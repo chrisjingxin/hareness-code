@@ -1,23 +1,22 @@
-"""Compose Work Item 的启动恢复、effect 对账与 429 有界 retry。
+"""Compose Work Item 的启动恢复、effect 对账与 provider 有界 retry。
 
 该模块不拥有 SQLite 连接或 graph。RecoveryScanner 在 Host 重启后把遗留
 running Activity 收敛为 interrupted 并枚举撕裂效果；OutcomeReconciler 依据
 Tool adapter 声明的策略决定 REPLAY / RECEIPTED / BLOCKED / NOOP，任何
 receipt 都只能来自真实对账（文件重读 Snapshot 等），模型输出无权补写；
-BoundedProviderRetry 提供 429/Retry-After 的有界重试策略，供
+BoundedProviderRetry 提供 provider 临时错误/Retry-After 的有界重试策略，供
 ManagedAgentExecutor 在 stream round 边界使用。
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping, Protocol
 
 from harness_agent.compose.models import ComposeEffect, ComposeEffectStatus
-from harness_agent.runtime.managed_agent_executor import (
-    ProviderRetryPolicy,
+from harness_agent.runtime.provider_retry import (
+    BoundedProviderRetry,
     is_provider_rate_limited,
 )
 from harness_agent.threads.compose_work_item_store import (
@@ -25,9 +24,6 @@ from harness_agent.threads.compose_work_item_store import (
     MarkComposeEffectUnknown,
     RecordComposeEffectReceipt,
 )
-
-_RETRY_AFTER = re.compile(r"(\d+)\s*(ms|s|min|h)?", re.IGNORECASE)
-
 
 class ToolEffectPolicy(str, Enum):
     """Tool adapter 对一类外部副作用声明的恢复策略。"""
@@ -164,50 +160,3 @@ class RecoveryScanner:
             interrupted_activities=interrupted,
             torn_effects=torn,
         )
-
-
-def _retry_after_seconds(error: BaseException) -> float | None:
-    """从 Retry-After 属性或常见文本形状解析秒数；不可解析返回 None。"""
-    raw = getattr(error, "retry_after_seconds", None)
-    if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw >= 0:
-        return float(raw)
-    header = getattr(error, "retry_after", None)
-    if isinstance(header, str):
-        match = _RETRY_AFTER.search(header)
-        if match is not None:
-            value = float(match.group(1))
-            unit = (match.group(2) or "s").lower()
-            if unit == "ms":
-                return value / 1000.0
-            if unit == "min":
-                return value * 60.0
-            if unit == "h":
-                return value * 3600.0
-            return value
-    return None
-
-
-@dataclass(frozen=True, slots=True)
-class BoundedProviderRetry:
-    """429/Retry-After 的有界 retry 策略；非限流错误不重试。"""
-
-    max_attempts: int = 3
-    base_delay_seconds: float = 1.0
-    max_delay_seconds: float = 30.0
-
-    def __post_init__(self) -> None:
-        if self.max_attempts < 1:
-            raise ValueError("PROVIDER_RETRY_BUDGET_INVALID")
-        if self.base_delay_seconds < 0 or self.max_delay_seconds < self.base_delay_seconds:
-            raise ValueError("PROVIDER_RETRY_DELAY_INVALID")
-
-    def should_retry(self, attempt: int, error: BaseException) -> bool:
-        """attempt 从 1 计数；达到预算或非限流错误不再重试。"""
-        return attempt < self.max_attempts and is_provider_rate_limited(error)
-
-    def retry_delay_seconds(self, error: BaseException) -> float:
-        """优先 Retry-After，缺失用 base delay，上限 max delay。"""
-        retry_after = _retry_after_seconds(error)
-        if retry_after is None:
-            return self.base_delay_seconds
-        return min(retry_after, self.max_delay_seconds)

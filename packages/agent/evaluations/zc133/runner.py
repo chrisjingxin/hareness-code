@@ -663,6 +663,10 @@ async def run_real_evaluation(
 
     from harness_agent.config.config import load_config
     from harness_agent.extensions.providers.harness_gateway import create_openai_compatible_model
+    from harness_agent.runtime.provider_retry import (
+        BoundedProviderRetry,
+        run_with_provider_retry,
+    )
 
     if repetitions < 1:
         raise ValueError("repetitions must be positive")
@@ -670,6 +674,9 @@ async def run_real_evaluation(
     config = load_config(workspace=workspace, home=home, config_path=config_path)
     profile = config.require_model_profile(profile_id)
     model = create_openai_compatible_model(profile.settings)
+    provider_retry = BoundedProviderRetry(
+        max_attempts=max(1, int(getattr(profile.settings, "max_retries", 0)) + 1)
+    )
     attempts: list[EvaluationAttempt] = []
     for repetition in range(1, repetitions + 1):
         for fixture in selected_fixtures:
@@ -695,7 +702,10 @@ async def run_real_evaluation(
                 prompt = _model_prompt(fixture, spec)
                 input_tokens = max(1, math.ceil(len(prompt) / 4))
                 try:
-                    response = await model.ainvoke([HumanMessage(content=prompt)])
+                    response = await run_with_provider_retry(
+                        lambda: model.ainvoke([HumanMessage(content=prompt)]),
+                        provider_retry,
+                    )
                     call = _parse_model_call(response)
                 except Exception:
                     call = None

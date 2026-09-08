@@ -19,6 +19,8 @@ from harness_agent.runtime.managed_agent_executor import (
     ManagedChildObserver,
     acquire_pooled_agent_runtime,
 )
+from harness_agent.runtime.model_output_guard import MalformedToolCallError
+from harness_agent.runtime.provider_retry import BoundedProviderRetry
 
 
 class _FakeAgent:
@@ -268,7 +270,7 @@ async def test_executor_logs_runtime_model_attempts_retry_and_nullable_usage() -
         def should_retry(self, attempt: int, _error: BaseException) -> bool:
             return attempt == 1
 
-        def retry_delay_seconds(self, _error: BaseException) -> float:
+        def retry_delay_seconds(self, _error: BaseException, _attempt: int) -> float:
             return 0.02
 
     clock = _FakeClock()
@@ -320,6 +322,185 @@ async def test_executor_logs_runtime_model_attempts_retry_and_nullable_usage() -
     }
     assert timing.retry_wait_ms == 20
     assert "CANARY_EXCEPTION_MESSAGE" not in repr(log.records)
+
+
+@pytest.mark.asyncio
+async def test_executor_retries_malformed_model_output_and_discards_attempt_state() -> None:
+    """畸形 tool-call 在模型边界重试，失败 attempt 不污染共享 session。"""
+    runtime = _Runtime(
+        _FakeAgent(
+            [
+                MalformedToolCallError("provider leaked raw tool payload"),
+                [("messages", (AIMessageChunk(content="完成"), {}))],
+            ]
+        )
+    )
+    observer = _Observer()
+    log = _RecordingLog()
+    request = _request(runtime, diagnostic_log=log)
+    object.__setattr__(request, "provider_retry", BoundedProviderRetry(max_attempts=2))
+
+    result = await ManagedAgentExecutor(sleep=lambda _seconds: asyncio.sleep(0)).execute(
+        request,
+        observer,
+    )
+
+    assert result.final_content == "完成"
+    assert [message.content for message in observer.messages] == ["完成"]
+    assert observer.signals[-1].type == "content.delta"
+    failed = next(fields for _, event, fields in log.records if event == "model.failed")
+    assert failed["error_code"] == "MALFORMED_TOOL_CALL"
+    assert failed["retryable"] is True
+    assert [event for _, event, _ in log.records].count("model.retry_scheduled") == 1
+
+
+@pytest.mark.asyncio
+async def test_executor_exhausted_provider_failure_is_stable_and_retryable() -> None:
+    """耗尽 transient provider 预算时只返回稳定错误，不泄露上游正文。"""
+    class _GatewayFailure(RuntimeError):
+        status_code = 503
+
+    runtime = _Runtime(
+        _FakeAgent([_GatewayFailure("RAW_GATEWAY_SECRET"), _GatewayFailure("RAW_GATEWAY_SECRET")])
+    )
+    request = _request(runtime)
+    object.__setattr__(request, "provider_retry", BoundedProviderRetry(max_attempts=2))
+
+    with pytest.raises(ManagedAgentExecutionError) as error:
+        await ManagedAgentExecutor(sleep=lambda _seconds: asyncio.sleep(0)).execute(
+            request,
+            _Observer(),
+        )
+
+    assert error.value.code == "PROVIDER_RETRY_EXHAUSTED"
+    assert error.value.retryable is True
+    assert "RAW_GATEWAY_SECRET" not in str(error.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [400, 401, 403])
+async def test_executor_does_not_retry_provider_request_rejection(status_code: int) -> None:
+    """400/401/403 类确定性 provider 错误只执行一次，终态不可重试。"""
+    class _BadRequest(RuntimeError):
+        pass
+
+    error = _BadRequest("RAW_BAD_REQUEST")
+    error.status_code = status_code
+    agent = _FakeAgent([error])
+    runtime = _Runtime(agent)
+    request = _request(runtime)
+    object.__setattr__(request, "provider_retry", BoundedProviderRetry(max_attempts=4))
+
+    with pytest.raises(ManagedAgentExecutionError) as error:
+        await ManagedAgentExecutor(sleep=lambda _seconds: asyncio.sleep(0)).execute(
+            request,
+            _Observer(),
+        )
+
+    assert len(agent.calls) == 1
+    assert error.value.code == "PROVIDER_REQUEST_REJECTED"
+    assert error.value.retryable is False
+    assert "RAW_BAD_REQUEST" not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_failed_model_attempt_does_not_emit_buffered_tool_signals() -> None:
+    """未公开正文的失败 attempt 不得把半条 tool signal 泄漏到 UI。"""
+
+    class _FailingAgent:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def astream(self, stream_input: object, **kwargs: object):
+            del stream_input, kwargs
+            self.calls += 1
+            if self.calls == 1:
+                yield (
+                    "messages",
+                    (
+                        AIMessageChunk(
+                            content="",
+                            tool_call_chunks=[
+                                {
+                                    "index": 0,
+                                    "id": "bad-call",
+                                    "name": "execute",
+                                    "args": "{",
+                                }
+                            ],
+                        ),
+                        {},
+                    ),
+                )
+                raise MalformedToolCallError("malformed provider response")
+            yield ("messages", (AIMessageChunk(content="OK"), {}))
+
+    runtime = _Runtime(_FailingAgent())
+    observer = _Observer()
+    request = _request(runtime)
+    object.__setattr__(request, "provider_retry", BoundedProviderRetry(max_attempts=3))
+
+    result = await ManagedAgentExecutor(sleep=lambda _seconds: asyncio.sleep(0)).execute(
+        request,
+        observer,
+    )
+
+    assert result.final_content == "OK"
+    payloads = [signal.payload for signal in observer.signals]
+    assert not any("bad-call" in repr(payload) for payload in payloads)
+    assert [signal.payload for signal in observer.signals] == [{"text": "OK"}]
+
+
+@pytest.mark.asyncio
+async def test_published_last_chunk_failure_does_not_retry_and_duplicate_output() -> None:
+    """last chunk 后 provider 仍失败时不得重放整个模型回合。"""
+
+    class _LateFailureAgent:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def astream(self, _stream_input: object, **_kwargs: object):
+            self.calls += 1
+            if self.calls == 1:
+                last = AIMessageChunk(
+                    content="PARTIAL",
+                    additional_kwargs={"reasoning_content": "THINK"},
+                    tool_call_chunks=[
+                        {
+                            "index": 0,
+                            "id": "late-tool",
+                            "name": "read_file",
+                            "args": '{"path":"a.py"}',
+                        }
+                    ],
+                )
+                object.__setattr__(last, "chunk_position", "last")
+                yield ("messages", (last, {}))
+                raise MalformedToolCallError()
+            retry = AIMessageChunk(content="DUPLICATE")
+            object.__setattr__(retry, "chunk_position", "last")
+            yield ("messages", (retry, {}))
+
+    agent = _LateFailureAgent()
+    observer = _Observer()
+    request = _request(_Runtime(agent))
+    object.__setattr__(request, "provider_retry", BoundedProviderRetry(max_attempts=2))
+
+    with pytest.raises(ManagedAgentExecutionError) as error:
+        await ManagedAgentExecutor(sleep=lambda _seconds: asyncio.sleep(0)).execute(
+            request,
+            observer,
+        )
+
+    assert error.value.code == "PROVIDER_OUTPUT_INTERRUPTED"
+    assert error.value.retryable is True
+    assert agent.calls == 1
+    assert [signal.type for signal in observer.signals] == [
+        "content.delta",
+        "reasoning.delta",
+    ]
+    assert all("DUPLICATE" not in str(signal) for signal in observer.signals)
+    assert all("late-tool" not in str(signal) for signal in observer.signals)
 
 
 def test_managed_agent_execution_error_exposes_stable_message() -> None:
@@ -608,6 +789,40 @@ async def test_executor_resumes_interaction_in_same_runtime_and_marks_context_li
     assert len(observer.interactions) == 1
     assert lifecycle.scheduled == ["interaction_resume"]
     assert type(agent.calls[1]["input"]).__name__ == "Command"
+
+
+@pytest.mark.asyncio
+async def test_approval_rejection_does_not_enter_provider_retry() -> None:
+    """审批拒绝是用户决策终态，不应被 provider retry 重新发起。"""
+    interrupt = type(
+        "Interrupt",
+        (),
+        {
+            "id": "approval-rejected",
+            "value": {
+                "action_requests": [
+                    {"name": "execute", "args": {"command": "rm -f x"}}
+                ]
+            },
+        },
+    )()
+
+    class _RejectingObserver(_Observer):
+        async def interact(self, _request: object) -> object:
+            raise ManagedAgentExecutionError("APPROVAL_REJECTED", retryable=False)
+
+    agent = _FakeAgent([[('updates', {"__interrupt__": [interrupt]})]])
+    request = _request(_Runtime(agent))
+    object.__setattr__(request, "provider_retry", BoundedProviderRetry(max_attempts=4))
+
+    with pytest.raises(ManagedAgentExecutionError) as error:
+        await ManagedAgentExecutor(sleep=lambda _seconds: asyncio.sleep(0)).execute(
+            request,
+            _RejectingObserver(),
+        )
+
+    assert error.value.code == "APPROVAL_REJECTED"
+    assert len(agent.calls) == 1
 
 
 @pytest.mark.asyncio

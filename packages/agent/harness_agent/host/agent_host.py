@@ -1590,6 +1590,8 @@ class AgentHost:
                     grader_fingerprint=grader_fingerprint,
                     goal_backed=goal_backed,
                 )
+            model_settings = getattr(spec, "model_settings", None)
+            max_retries = getattr(model_settings, "max_retries", 0)
             return RunPreparation(
                 resolved_execution_binding=resolved,
                 execution_binding=binding,
@@ -1612,6 +1614,7 @@ class AgentHost:
                         else ()
                     )
                 ),
+                provider_retry_attempts=max_retries + 1,
                 snapshot_reservation=reservation,
             )
         except BaseException:
@@ -2226,6 +2229,10 @@ class AgentHost:
         full_prompt = "\n\n".join(prompt_parts)
 
         from harness_agent.extensions.providers.harness_gateway import create_openai_compatible_model
+        from harness_agent.runtime.provider_retry import (
+            BoundedProviderRetry,
+            run_with_provider_retry,
+        )
         from langchain_core.messages import HumanMessage
 
         provider_lease = await self._provider_client_pool.acquire(model_settings)
@@ -2234,7 +2241,12 @@ class AgentHost:
                 model_settings,
                 async_client=provider_lease.value,
             )
-            response = await model.ainvoke([HumanMessage(content=full_prompt)])
+            response = await run_with_provider_retry(
+                lambda: model.ainvoke([HumanMessage(content=full_prompt)]),
+                BoundedProviderRetry(
+                    max_attempts=max(1, int(getattr(model_settings, "max_retries", 0)) + 1)
+                ),
+            )
             reply_text = response.content if isinstance(response.content, str) else str(response.content)
         finally:
             await provider_lease.release()
@@ -4514,6 +4526,7 @@ class AgentHost:
             ManagedChildObserver,
             acquire_pooled_agent_runtime,
         )
+        from harness_agent.runtime.provider_retry import BoundedProviderRetry
 
         catalog = self._require_agent_catalog(config)
         persistence = await self._ensure_thread_persistence()
@@ -4752,6 +4765,12 @@ class AgentHost:
                     agent_spec=resolved,
                     interaction_policy=resolved.effective_policy,
                     timeout_seconds=command.timeout_seconds,
+                    provider_retry=BoundedProviderRetry(
+                        max_attempts=max(
+                            1,
+                            int(getattr(resolved.model_settings, "max_retries", 0)) + 1,
+                        )
+                    ),
                     required_skill_snapshot_ids=(snapshot_id,)
                     if isinstance(snapshot_id, str) and snapshot_id
                     else (),
@@ -4822,6 +4841,7 @@ class AgentHost:
         ):
             raise RuntimeError("RUNTIME_SKILL_SNAPSHOT_MISMATCH")
         from harness_agent.runtime.agent import create_harness_agent
+        from harness_agent.runtime.provider_retry import BoundedProviderRetry
         from harness_agent.threads.context_window import ContextWindowMiddleware
         from harness_agent.extensions.providers.harness_gateway import create_openai_compatible_model
         from harness_agent.threads.runtime_state import RuntimeStateRehydrator
@@ -4896,6 +4916,9 @@ class AgentHost:
                 model_settings,
                 async_client=provider_lease.value,
             )
+            provider_retry = BoundedProviderRetry(
+                max_attempts=max(1, int(getattr(model_settings, "max_retries", 0)) + 1)
+            )
 
             async def runtime_state_provider(
                 thread_id: str,
@@ -4916,6 +4939,7 @@ class AgentHost:
                 thread_persistence=persistence,
                 updates=self._context_updates,
                 runtime_state_provider=runtime_state_provider,
+                provider_retry=provider_retry,
             )
 
             def _get_current_rules() -> list[PermissionRule]:
@@ -5023,6 +5047,7 @@ class AgentHost:
         """
         from harness_agent.extensions.providers.harness_gateway import create_openai_compatible_model
         from harness_agent.policy.classifier import SafetyClassifier
+        from harness_agent.runtime.provider_retry import BoundedProviderRetry
 
         config = self._config
         if config is None or config.model_catalog is None:
@@ -5045,7 +5070,8 @@ class AgentHost:
                 profile_id,
             )
             return None
-        # 分类调用发生在工具审批路径上，使用更短超时并禁用重试，避免慢网关放大工具等待；
+        # 分类调用发生在工具审批路径上，使用更短超时；SDK 自带 retry 固定为 0，
+        # 实际 bounded retry 由 SafetyClassifier 的 canonical owner 控制，避免双重重试。
         # replace 需显式回传保存在 InitVar 中的 TOML 降级密钥，否则替换后密钥会丢失。
         classifier_settings = replace(
             settings,
@@ -5054,7 +5080,12 @@ class AgentHost:
             max_retries=0,
         )
         model = create_openai_compatible_model(classifier_settings)
-        return SafetyClassifier(model)
+        return SafetyClassifier(
+            model,
+            provider_retry=BoundedProviderRetry(
+                max_attempts=max(1, int(getattr(settings, "max_retries", 0)) + 1)
+            ),
+        )
 
     def _resolve_approval_classifier(
         self,
@@ -5070,8 +5101,14 @@ class AgentHost:
             classifier = self._build_approval_classifier(classifier_profile_id)
         if classifier is None and model is not None:
             from harness_agent.policy.classifier import SafetyClassifier
+            from harness_agent.runtime.provider_retry import BoundedProviderRetry
 
-            classifier = SafetyClassifier(model)
+            # 主模型复用到审批分类器时显式固定为单次调用；主对话 retry
+            # 由 ManagedAgentExecutor 拥有，不能让分类器偷偷再开一层。
+            classifier = SafetyClassifier(
+                model,
+                provider_retry=BoundedProviderRetry(max_attempts=1),
+            )
         return classifier
 
     async def _create_run_context(

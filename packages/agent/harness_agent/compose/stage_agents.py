@@ -44,6 +44,7 @@ from harness_agent.runtime.managed_agent_executor import (
     ManagedAgentRequest,
     acquire_pooled_agent_runtime,
 )
+from harness_agent.runtime.provider_retry import BoundedProviderRetry
 from harness_agent.runtime.run_context import RunCancellationToken, RunContext
 from harness_agent.threads.deferred_store import ThreadDeferredToolStore
 
@@ -444,6 +445,8 @@ class ManagedStageAgentPort:
                 )
 
             snapshot_id = getattr(spec.skill_registry, "snapshot_id", None)
+            model_settings = getattr(spec, "model_settings", None)
+            max_retries = getattr(model_settings, "max_retries", 0)
             stage_ports = _StageStreamPorts(observer, started_at=started_at)
             managed_request = ManagedAgentRequest(
                 execution_ref=child_ref.execution_id,
@@ -458,6 +461,9 @@ class ManagedStageAgentPort:
                 agent_spec=spec,
                 interaction_policy=spec.effective_policy,
                 timeout_seconds=command.timeout_seconds,
+                provider_retry=BoundedProviderRetry(
+                    max_attempts=max_retries + 1
+                ),
                 required_skill_snapshot_ids=(snapshot_id,)
                 if isinstance(snapshot_id, str) and snapshot_id
                 else (),

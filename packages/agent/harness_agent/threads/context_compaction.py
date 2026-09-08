@@ -7,7 +7,7 @@ import hashlib
 import re
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Awaitable, Callable, Literal, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Mapping, Sequence
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
@@ -40,6 +40,7 @@ from harness_agent.threads.thread_persistence import (
     ThreadPersistence,
     ThreadPersistenceError,
 )
+from harness_agent.runtime.provider_retry import run_with_provider_retry
 
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
@@ -156,6 +157,7 @@ class ContextCompactor:
             [str, "RunContext | None", Sequence[BaseMessage]], Awaitable[RuntimeStateSnapshot]
         ]
         | None = None,
+        provider_retry: Any | None = None,
     ) -> None:
         """绑定当前 Profile 的摘要模型与共享 ThreadPersistence。"""
         self._model = model
@@ -164,6 +166,7 @@ class ContextCompactor:
         self._persistence = thread_persistence
         self._pressure_policy = pressure_policy or ContextPressurePolicy()
         self._runtime_state_provider = runtime_state_provider
+        self._provider_retry = provider_retry
 
     async def compress(self, request: CompressionRequest) -> CompressionResult:
         """按 trigger 统一执行完整压缩闭环，并在失败时保持旧投影。"""
@@ -404,11 +407,14 @@ class ContextCompactor:
                     previous_state,
                 )
 
-        response = await self._model.ainvoke(
-            [
-                SystemMessage(content=_SUMMARY_PROMPT),
-                HumanMessage(content=_render_messages(summary_input)),
-            ]
+        response = await run_with_provider_retry(
+            lambda: self._model.ainvoke(
+                [
+                    SystemMessage(content=_SUMMARY_PROMPT),
+                    HumanMessage(content=_render_messages(summary_input)),
+                ]
+            ),
+            self._provider_retry,
         )
         summary = _summary_text(response)
         validation_reason = _validate_summary_response(response, summary, self._summary_cap())

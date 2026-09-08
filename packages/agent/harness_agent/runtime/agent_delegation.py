@@ -194,6 +194,7 @@ _STABLE_ERROR_CODE_PREFIXES = (
     "DELEGATION_",
     "MANAGED_AGENT_",
     "MCP_",
+    "MALFORMED_",
     "PLUGIN_",
     "PROVIDER_",
     "RUNTIME_",

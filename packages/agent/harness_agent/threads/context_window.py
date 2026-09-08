@@ -115,6 +115,7 @@ class ContextWindowMiddleware(AgentMiddleware):
         updates: dict[str, list[ContextUpdate]] | None = None,
         pressure_policy: ContextPressurePolicy | None = None,
         runtime_state_provider: Callable[..., Any] | None = None,
+        provider_retry: Any | None = None,
     ) -> None:
         """绑定模型窗口、project-scoped persistence 和运行态读取器。"""
         super().__init__()
@@ -131,6 +132,7 @@ class ContextWindowMiddleware(AgentMiddleware):
                 thread_persistence=thread_persistence,
                 pressure_policy=self._pressure_policy,
                 runtime_state_provider=runtime_state_provider,
+                provider_retry=provider_retry,
             )
             if thread_persistence is not None
             else None

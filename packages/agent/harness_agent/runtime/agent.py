@@ -44,6 +44,7 @@ from harness_agent.runtime.run_context import (
     RunContextSnapshotMiddleware,
     plan_constraint_active,
 )
+from harness_agent.runtime.model_output_guard import ModelOutputGuardMiddleware
 from harness_agent.tools.file_tool_catalog import FILE_TOOL_SCHEMA_SHAPES
 
 if TYPE_CHECKING:
@@ -270,6 +271,9 @@ def _create_controlled_inline_subagents(
             if child_view.allows_tool(str(getattr(tool, "name", "")))
         ]
         child_middleware: list[Any] = []
+        # 先在 ToolNode 前收敛 provider 的 tool_calls；Inline child 与 root
+        # 共用同一门禁，避免子图把畸形响应写入父图或 checkpoint。
+        child_middleware.append(ModelOutputGuardMiddleware())
         if rules_provider is not None:
             child_middleware.append(DenyRulesMiddleware(rules_provider))
         child_middleware.extend(
@@ -877,7 +881,12 @@ def create_harness_agent(
 
     from harness_agent.diagnostic_log.middleware import DiagnosticToolMiddleware
 
-    agent_middleware: list[Any] = [DiagnosticToolMiddleware()]
+    agent_middleware: list[Any] = [
+        DiagnosticToolMiddleware(),
+        # guard 必须位于所有 ToolNode/策略路径之前，非法 tool_calls 只会
+        # 进入 ManagedAgentExecutor 的有界 retry，不进入 transcript。
+        ModelOutputGuardMiddleware(),
+    ]
     if rules_provider is not None:
         # deny 规则必须最先执行：命中即硬拒绝，任何审批模式（包括 yolo）不可覆盖。
         agent_middleware.append(DenyRulesMiddleware(rules_provider))

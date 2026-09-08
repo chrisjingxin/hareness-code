@@ -20,6 +20,7 @@ import logging
 import os
 import signal
 import time
+from copy import deepcopy
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
@@ -55,6 +56,7 @@ from harness_agent.runtime.managed_agent_executor import (
     ManagedAgentRequest,
     ManagedAgentResult,
 )
+from harness_agent.runtime.provider_retry import BoundedProviderRetry
 from harness_agent.threads.thread_persistence import TranscriptAppend
 
 if TYPE_CHECKING:
@@ -101,11 +103,24 @@ __all__ = [
 ]
 
 
-def _run_error(code: str, message: str | None = None) -> Exception:
+def _run_error(
+    code: str,
+    message: str | None = None,
+    *,
+    retryable: bool = False,
+) -> Exception:
     """延迟构造 RunError，避免 run_execution ↔ run_coordinator 的模块导入环。"""
     from harness_agent.host.run_coordinator import RunError
 
-    return RunError(code, message)
+    return RunError(code, message, retryable=retryable)
+
+
+def _provider_retry_for_run(run: RunState) -> BoundedProviderRetry | None:
+    """把 Run 解析时冻结的 retry attempt budget 绑定到共享 executor。"""
+    attempts = getattr(getattr(run, "preparation", None), "provider_retry_attempts", None)
+    if not isinstance(attempts, int) or isinstance(attempts, bool):
+        return None
+    return BoundedProviderRetry(max_attempts=attempts)
 
 
 class RunLifecyclePort(Protocol):
@@ -304,6 +319,7 @@ class BuildRunAdapter:
             else (),
             usage=run.usage,
             started_at=run.started_at,
+            provider_retry=_provider_retry_for_run(run),
             needs_user_decision=needs_user_decision,
             diagnostic_log=getattr(run, "diagnostic_log", None),
             timing=getattr(run, "timing", None),
@@ -319,7 +335,7 @@ class BuildRunAdapter:
         except ManagedAgentExecutionError as exc:
             if exc.code == "RUN_CANCELLED":
                 raise asyncio.CancelledError from exc
-            raise _run_error(exc.code, exc.message) from exc
+            raise _run_error(exc.code, exc.message, retryable=exc.retryable) from exc
 
 
 class DirectShellRunAdapter:
@@ -473,6 +489,40 @@ class _BuildStreamPorts:
     ) -> None:
         self._run = run
         self._port = port
+        self._model_attempt: dict[str, object] | None = None
+
+    def begin_model_output(self) -> object:
+        """开启一次 provider model output 的 Transcript capture 事务。"""
+        if self._model_attempt is not None:
+            raise RuntimeError("MODEL_ATTEMPT_TRANSACTION_ACTIVE")
+        self._model_attempt = {
+            "assistant_buffer": list(self._run.assistant_buffer),
+            "assistant_tool_calls": deepcopy(self._run.assistant_tool_calls),
+            "pending_transcript": deepcopy(self._run.pending_transcript),
+            "assistant_turn_count": self._run.assistant_turn_count,
+        }
+        return self._model_attempt
+
+    async def commit_model_output(self, token: object | None) -> None:
+        """model output 越过边界后提交 capture；Tool 批次仍即时落盘。"""
+        state = self._model_attempt
+        if state is None or token is not state:
+            raise RuntimeError("MODEL_ATTEMPT_TRANSACTION_INVALID")
+        self._model_attempt = None
+
+    async def rollback_model_output(self, token: object | None) -> None:
+        """provider output 失败时恢复 assistant capture 与待提交 Transcript。"""
+        state = self._model_attempt
+        if state is None or token is not state:
+            return
+        self._run.assistant_buffer[:] = state["assistant_buffer"]  # type: ignore[index]
+        self._run.assistant_tool_calls.clear()
+        self._run.assistant_tool_calls.update(
+            deepcopy(state["assistant_tool_calls"])  # type: ignore[arg-type,index]
+        )
+        self._run.pending_transcript[:] = state["pending_transcript"]  # type: ignore[index]
+        self._run.assistant_turn_count = int(state["assistant_turn_count"])
+        self._model_attempt = None
 
     def on_model_round(self) -> None:
         """由 executor 在 initial/resume 回合开始时投影 Build 进度。"""
@@ -504,6 +554,17 @@ class _BuildStreamPorts:
 
     async def after_tool_boundary(self) -> None:
         await self._port.flush_transcript(self._run)
+        if self._model_attempt is not None:
+            # Tool 结果已经成为 canonical 事实；后续 provider 失败只能回滚
+            # 这个边界之后的半条 assistant，不得撤销已完成的 Tool 批次。
+            self._model_attempt["assistant_buffer"] = list(self._run.assistant_buffer)
+            self._model_attempt["assistant_tool_calls"] = deepcopy(
+                self._run.assistant_tool_calls
+            )
+            self._model_attempt["pending_transcript"] = deepcopy(
+                self._run.pending_transcript
+            )
+            self._model_attempt["assistant_turn_count"] = self._run.assistant_turn_count
 
     def on_stream_event(self) -> None:
         self._port.drain_context_updates(self._run)
@@ -910,6 +971,7 @@ class ComposeRunAdapter:
             else (),
             usage=run.usage,
             started_at=run.started_at,
+            provider_retry=_provider_retry_for_run(run),
             needs_user_decision=needs_user_decision,
             diagnostic_log=getattr(run, "diagnostic_log", None),
             timing=getattr(run, "timing", None),
@@ -925,7 +987,7 @@ class ComposeRunAdapter:
         except ManagedAgentExecutionError as exc:
             if exc.code == "RUN_CANCELLED":
                 raise asyncio.CancelledError from exc
-            raise _run_error(exc.code, exc.message) from exc
+            raise _run_error(exc.code, exc.message, retryable=exc.retryable) from exc
 
     async def _workspace_revision(self) -> str | None:
         """把当前 workspace 的 Git HEAD 作为证据新鲜度 revision。"""

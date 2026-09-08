@@ -366,6 +366,9 @@ class RunPreparation:
     catalog_skill_ids: tuple[str, ...] = ()
     catalog_mcp_ids: tuple[str, ...] = ()
     catalog_plugin_ids: tuple[str, ...] = ()
+    # LangChain client 不再自行重试；这里冻结配置解析得到的总 attempt 预算，
+    # 由 ManagedAgentExecutor 在 root/Compose/Plugin 边界统一消费。
+    provider_retry_attempts: int | None = None
     # Default AgentHost may hold this reservation from spec resolution until the
     # corresponding AgentEngine lease is acquired.  It is intentionally opaque
     # here so the coordinator does not own the runtime snapshot protocol.
@@ -389,6 +392,12 @@ class RunPreparation:
             self.context_snapshot.skill_snapshot_id != self.skill_snapshot_id
         ):
             raise ValueError("RUN_PREPARATION_CONTEXT_SKILL_SNAPSHOT_MISMATCH")
+        if self.provider_retry_attempts is not None and (
+            not isinstance(self.provider_retry_attempts, int)
+            or isinstance(self.provider_retry_attempts, bool)
+            or self.provider_retry_attempts < 1
+        ):
+            raise ValueError("RUN_PREPARATION_PROVIDER_RETRY_INVALID")
 
 
 @dataclass(frozen=True, slots=True)

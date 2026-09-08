@@ -27,6 +27,7 @@ from harness_agent.threads.context_compaction import (
 )
 from harness_agent.threads.context_projection import ContextProjector
 from harness_agent.threads.context_window import ContextWindowMiddleware
+from harness_agent.runtime.provider_retry import BoundedProviderRetry
 from harness_agent.threads.prompting import estimate_tokens
 from harness_agent.threads.runtime_state import (
     RuntimeExecutionPolicy,
@@ -336,6 +337,42 @@ async def test_auto_micro_after_measure_does_not_call_summary_or_create_full_che
         )
         assert (await cursor.fetchone())[0] == 0
         await cursor.close()
+
+
+@pytest.mark.asyncio
+async def test_context_compaction_retries_direct_summary_ainvoke(tmp_path: Path) -> None:
+    """摘要模型的直接 ainvoke 也必须使用配置的有界 retry owner。"""
+
+    class _Transient(RuntimeError):
+        status_code = 503
+
+    class _RetryingModel(CountingModel):
+        _failures: int = PrivateAttr(default=1)
+
+        def __init__(self) -> None:
+            super().__init__(responses=[AIMessage(content=SUMMARY)])
+
+        async def ainvoke(self, *args: Any, **kwargs: Any) -> Any:
+            if self._failures:
+                self._failures -= 1
+                raise _Transient("gateway unavailable")
+            return await super().ainvoke(*args, **kwargs)
+
+    store = await _store(tmp_path)
+    await _long_thread(store, "direct-summary-retry")
+    projection = await ContextProjector(store).project("direct-summary-retry")
+    service = ContextCompactor(
+        _RetryingModel(),
+        context_window_tokens=16_384,
+        thread_persistence=store,
+        provider_retry=BoundedProviderRetry(max_attempts=2),
+    )
+
+    result = await service.compress(
+        _request("direct-summary-retry", projection, "manual", estimated=30_000)
+    )
+
+    assert result.outcome == "compressed"
     await store.close()
 
 

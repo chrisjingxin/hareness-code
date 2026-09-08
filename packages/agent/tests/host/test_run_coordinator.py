@@ -22,6 +22,7 @@ from harness_agent.host.run_coordinator import (
     UserRunInput,
 )
 from harness_agent.runtime.interactions import InteractionRequest
+from harness_agent.runtime.model_output_guard import MalformedToolCallError
 
 
 def test_compose_engine_only_mutates_run_lifecycle_through_port() -> None:
@@ -1859,4 +1860,137 @@ async def test_failed_run_flushes_completed_semantics_but_discards_partial_assis
         ("assistant", "已完成回答"),
         ("tool", "工具已完成"),
     ]
+    assert persistence.completed is True
+
+
+@pytest.mark.asyncio
+async def test_public_provider_output_failure_marks_run_retryable_without_replay() -> None:
+    """已公开正文后的 provider 断流不重放，但 Run 终态允许用户重试。"""
+
+    class PublicThenFailAgent:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def astream(self, *_args, **_kwargs):
+            self.calls += 1
+            last = AIMessageChunk(content="PARTIAL")
+            object.__setattr__(last, "chunk_position", "last")
+            yield ("messages", (last, {}))
+            raise MalformedToolCallError()
+
+    agent = PublicThenFailAgent()
+
+    async def preparation_provider(command, _persistence):
+        return RunPreparation(
+            execution_binding=make_test_binding(command.thread_id, command.run_id),
+            provider_retry_attempts=2,
+        )
+
+    async def runtime_provider(_run) -> RunRuntime:
+        async def release() -> None:
+            return None
+
+        return RunRuntime(
+            agent=agent,
+            run_context=None,
+            graph_config=lambda thread_id: {"configurable": {"thread_id": thread_id}},
+            release=release,
+        )
+
+    coordinator = RunCoordinator(
+        persistence_provider=_noop_persistence,
+        preparation_provider=preparation_provider,
+        runtime_provider=runtime_provider,
+        interaction_port=_NoopInteraction(),
+    )
+    execution = await coordinator.start(
+        StartRun(
+            mode="build",
+            thread_id="thread-public-failure",
+            run_id="run-public-failure",
+            input=UserRunInput(message="继续输出"),
+        ),
+        ConnectionRef("owner"),
+    )
+    events = await _events(execution)
+
+    assert agent.calls == 1
+    assert [event.type for event in events].count("content.delta") == 1
+    assert events[-1].type == "run.failed"
+    assert events[-1].payload["error"] == {
+        "code": "PROVIDER_OUTPUT_INTERRUPTED",
+        "message": "Provider stream failed after output was published",
+        "retryable": True,
+    }
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_provider_retry_drops_failed_build_output_before_transcript_commit() -> None:
+    """Build attempt 失败时 content/reasoning/tool capture 不得进入 Transcript。"""
+
+    class Persistence:
+        def __init__(self) -> None:
+            self.records: list[TranscriptAppend] = []
+            self.completed = False
+
+        async def append_transcript_batch(self, records) -> None:
+            self.records.extend(records)
+
+        async def complete_run(self, _thread_id: str) -> None:
+            self.completed = True
+
+    class RetryingAgent:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def astream(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                yield (
+                    "messages",
+                    (AIMessageChunk(content="", additional_kwargs={"reasoning_content": ""}), {}),
+                )
+                raise MalformedToolCallError()
+            yield ("messages", (AIMessageChunk(content="SURVIVE"), {}))
+
+    persistence = Persistence()
+    agent = RetryingAgent()
+
+    async def runtime_provider(_run) -> RunRuntime:
+        return RunRuntime(
+            agent=agent,
+            run_context=None,
+            graph_config=lambda thread_id: {"configurable": {"thread_id": thread_id}},
+            release=lambda: _noop_async(),
+        )
+
+    coordinator = RunCoordinator(
+        persistence_provider=_noop_persistence,
+        preparation_provider=lambda _command, _persistence: _noop_preparation(),
+        runtime_provider=runtime_provider,
+        interaction_port=_NoopInteraction(),
+    )
+    run = RunState(
+        start=StartRun(
+            mode="build",
+            thread_id="thread-retry",
+            run_id="run-retry",
+            input=UserRunInput(message="重试"),
+        ),
+        owner=ConnectionRef("owner"),
+        persistence=persistence,
+        preparation=RunPreparation(
+            execution_binding=make_test_binding("thread-retry", "run-retry"),
+            provider_retry_attempts=2,
+        ),
+    )
+    await _accept_direct_adapter_run(coordinator, run)
+    await coordinator._execution_adapters["build"].execute(run, coordinator._lifecycle_port)
+
+    assert agent.calls == 2
+    assert [record.content for record in persistence.records] == ["SURVIVE"]
+    assert "LEAK" not in repr(persistence.records)
+    assert "THINK" not in repr(persistence.records)
+    assert run.pending_transcript == []
     assert persistence.completed is True

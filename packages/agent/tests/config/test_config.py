@@ -612,6 +612,7 @@ def test_openai_compatible_adapter_is_constructed_without_network(monkeypatch: p
         )
     )
     assert model.model_name == "enterprise-model"
+    assert model.max_retries == 0
     assert model.openai_api_key is not None
     assert model.openai_api_key.get_secret_value() == "toml-key"
 

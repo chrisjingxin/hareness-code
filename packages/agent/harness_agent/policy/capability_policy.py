@@ -274,10 +274,16 @@ class CapabilityPolicyMiddleware(AgentMiddleware):
     def _rejection(self, call: dict[str, Any], reason: str) -> ToolMessage:
         """把授权失败转换为稳定错误结果，避免图异常或审批误导。"""
         name = str(call.get("name", "")) or "policy"
+        raw_id = call.get("id")
+        if not isinstance(raw_id, str) or not raw_id.strip():
+            # 模型输出门禁负责为合法调用补 ID；策略层不能再制造一个与
+            # assistant history 无关的固定 ID，否则 ToolMessage 会让网关认为
+            # assistant/tool cardinality 失配并返回 500。
+            raise ValueError("TOOL_CALL_ID_UNAVAILABLE")
         return ToolMessage(
             content=f"角色能力策略拒绝 {name}：{reason}。",
             name=name,
-            tool_call_id=str(call.get("id") or "capability-policy"),
+            tool_call_id=raw_id,
             status="error",
         )
 

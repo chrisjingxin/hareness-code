@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from harness_agent.runtime.agent_catalog import (
     DelegationPolicy,
     EffectiveExecutionPolicy,
@@ -106,6 +108,7 @@ def test_capability_middleware_hides_schema_and_rejects_forged_tool_call(tmp_pat
     )
     assert invoked is False
     assert result.status == "error"
+    assert result.tool_call_id == "forged-write"
     assert "角色能力策略拒绝" in str(result.content)
 
 
@@ -134,6 +137,7 @@ def test_capability_middleware_enforces_role_path_subset(tmp_path) -> None:
         handler,
     )
     assert denied.status == "error"
+    assert denied.tool_call_id == "outside-role-subset"
     assert invoked is False
 
     allowed = middleware.wrap_tool_call(
@@ -148,3 +152,24 @@ def test_capability_middleware_enforces_role_path_subset(tmp_path) -> None:
     )
     assert allowed == "ok"
     assert invoked is True
+
+
+def test_capability_rejection_does_not_fabricate_tool_call_id() -> None:
+    """模型输出保护遗漏 ID 时，策略防御路径必须稳定失败而不是造孤儿 ID。"""
+    view = resolve_effective_capability_view(
+        _readonly_policy(),
+        available_tools=("read_file",),
+    )
+    middleware = CapabilityPolicyMiddleware(view)
+
+    with pytest.raises(ValueError, match="TOOL_CALL_ID_UNAVAILABLE"):
+        middleware.wrap_tool_call(
+            SimpleNamespace(
+                tool_call={
+                    "name": "read_file",
+                    "id": None,
+                    "args": {"file_path": "/outside.txt"},
+                }
+            ),
+            lambda _request: "unexpected",
+        )

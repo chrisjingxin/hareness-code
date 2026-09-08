@@ -31,6 +31,11 @@ from typing import Any, Protocol
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from harness_agent.runtime.provider_retry import (
+    run_with_provider_retry,
+    run_with_provider_retry_sync,
+)
+
 logger = logging.getLogger(__name__)
 
 # 第一阶段快速判断的输出预算：只够输出一行 JSON。
@@ -116,6 +121,7 @@ class SafetyClassifier:
         *,
         max_reject_streak: int = MAX_REJECT_STREAK,
         cache_limit: int = DECISION_CACHE_LIMIT,
+        provider_retry: Any | None = None,
     ) -> None:
         """初始化分类器。
 
@@ -123,10 +129,12 @@ class SafetyClassifier:
             model: 聊天模型实例；建议以约 10 秒超时构建，fail-closed 依赖它。
             max_reject_streak: 连续拒绝阈值，达到后回退人工审批并重置。
             cache_limit: 决策缓存条目上限，先进先出淘汰。
+            provider_retry: 分类器直接模型调用使用的有界 retry owner。
         """
         self._model = model
         self._max_reject_streak = max(1, max_reject_streak)
         self._cache_limit = max(1, cache_limit)
+        self._provider_retry = provider_retry
         self._reject_streak = 0
         self._decisions: OrderedDict[str, tuple[str, str]] = OrderedDict()
 
@@ -236,9 +244,16 @@ class SafetyClassifier:
     async def _invoke_stage1(self, prompt: str) -> dict[str, Any] | None:
         """第一阶段异步调用；异常返回 None 交由第二阶段兜底。"""
         try:
-            response = await self._bind(STAGE1_MAX_TOKENS).ainvoke(
-                [SystemMessage(content=_STAGE1_SYSTEM_PROMPT), HumanMessage(content=prompt)],
-                config=_ISOLATED_RUN_CONFIG,
+            bound = self._bind(STAGE1_MAX_TOKENS)
+            response = await run_with_provider_retry(
+                lambda: bound.ainvoke(
+                    [
+                        SystemMessage(content=_STAGE1_SYSTEM_PROMPT),
+                        HumanMessage(content=prompt),
+                    ],
+                    config=_ISOLATED_RUN_CONFIG,
+                ),
+                self._provider_retry,
             )
         except Exception as exc:  # noqa: BLE001 - fail-closed：异常不得抛出到图执行
             logger.warning(
@@ -250,9 +265,16 @@ class SafetyClassifier:
     def _invoke_stage1_sync(self, prompt: str) -> dict[str, Any] | None:
         """第一阶段同步调用；异常返回 None 交由第二阶段兜底。"""
         try:
-            response = self._bind(STAGE1_MAX_TOKENS).invoke(
-                [SystemMessage(content=_STAGE1_SYSTEM_PROMPT), HumanMessage(content=prompt)],
-                config=_ISOLATED_RUN_CONFIG,
+            bound = self._bind(STAGE1_MAX_TOKENS)
+            response = run_with_provider_retry_sync(
+                lambda: bound.invoke(
+                    [
+                        SystemMessage(content=_STAGE1_SYSTEM_PROMPT),
+                        HumanMessage(content=prompt),
+                    ],
+                    config=_ISOLATED_RUN_CONFIG,
+                ),
+                self._provider_retry,
             )
         except Exception as exc:  # noqa: BLE001 - fail-closed：异常不得抛出到图执行
             logger.warning(
@@ -266,12 +288,16 @@ class SafetyClassifier:
     ) -> dict[str, Any] | None:
         """第二阶段异步复核；异常返回 None，由调用方 fail-closed 回退。"""
         try:
-            response = await self._bind(STAGE2_MAX_TOKENS).ainvoke(
-                [
-                    SystemMessage(content=_STAGE2_SYSTEM_PROMPT),
-                    HumanMessage(content=_stage2_prompt(prompt, first_stage)),
-                ],
-                config=_ISOLATED_RUN_CONFIG,
+            bound = self._bind(STAGE2_MAX_TOKENS)
+            response = await run_with_provider_retry(
+                lambda: bound.ainvoke(
+                    [
+                        SystemMessage(content=_STAGE2_SYSTEM_PROMPT),
+                        HumanMessage(content=_stage2_prompt(prompt, first_stage)),
+                    ],
+                    config=_ISOLATED_RUN_CONFIG,
+                ),
+                self._provider_retry,
             )
         except Exception as exc:  # noqa: BLE001 - fail-closed：异常不得抛出到图执行
             logger.warning(
@@ -285,12 +311,16 @@ class SafetyClassifier:
     ) -> dict[str, Any] | None:
         """第二阶段同步复核；异常返回 None，由调用方 fail-closed 回退。"""
         try:
-            response = self._bind(STAGE2_MAX_TOKENS).invoke(
-                [
-                    SystemMessage(content=_STAGE2_SYSTEM_PROMPT),
-                    HumanMessage(content=_stage2_prompt(prompt, first_stage)),
-                ],
-                config=_ISOLATED_RUN_CONFIG,
+            bound = self._bind(STAGE2_MAX_TOKENS)
+            response = run_with_provider_retry_sync(
+                lambda: bound.invoke(
+                    [
+                        SystemMessage(content=_STAGE2_SYSTEM_PROMPT),
+                        HumanMessage(content=_stage2_prompt(prompt, first_stage)),
+                    ],
+                    config=_ISOLATED_RUN_CONFIG,
+                ),
+                self._provider_retry,
             )
         except Exception as exc:  # noqa: BLE001 - fail-closed：异常不得抛出到图执行
             logger.warning(

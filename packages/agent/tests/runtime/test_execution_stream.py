@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
@@ -206,6 +207,45 @@ async def test_passthrough_emits_text_reasoning_and_tool_in_order() -> None:
     assert result.usage == {"input_tokens": 3, "output_tokens": 2}
     assert result.resume is None
     assert len(ports.messages) == 2
+
+
+@pytest.mark.asyncio
+async def test_passthrough_content_is_visible_before_model_stream_finishes() -> None:
+    """长模型输出不能等到最后一片才把首片正文投影给用户。"""
+    first_chunk_seen = asyncio.Event()
+    release_second_chunk = asyncio.Event()
+
+    class GatedAgent:
+        async def astream(self, _stream_input: object, **_kwargs: object):
+            yield ("messages", (AIMessageChunk(content="A"), {}))
+            first_chunk_seen.set()
+            await release_second_chunk.wait()
+            last = AIMessageChunk(content="B")
+            object.__setattr__(last, "chunk_position", "last")
+            yield ("messages", (last, {}))
+
+    ports = _RecordingPorts()
+    task = asyncio.create_task(
+        execute(
+            ExecutionStreamRequest(
+                agent=GatedAgent(),
+                stream_input={"messages": []},
+                graph_config={},
+                context=None,
+                content_visibility="passthrough",
+                session=StreamSession(run_id="run-realtime"),
+                is_cancelled=lambda: False,
+            ),
+            ports,
+        )
+    )
+
+    await asyncio.wait_for(first_chunk_seen.wait(), timeout=1)
+    assert [signal.payload["text"] for signal in ports.signals] == ["A"]
+
+    release_second_chunk.set()
+    result = await asyncio.wait_for(task, timeout=1)
+    assert result.final_content == "AB"
 
 
 @pytest.mark.asyncio

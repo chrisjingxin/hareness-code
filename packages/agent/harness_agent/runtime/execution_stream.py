@@ -18,12 +18,16 @@ Transcript / Compose activity 不进入本 module 的 public interface；
 
 from __future__ import annotations
 
+import inspect
 import json
 import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass, field, fields
 from typing import Any, Literal, Protocol
+
+from harness_agent.runtime.provider_retry import is_provider_transient
 
 # 单条工具 payload 的 1 MiB wire 上限；与 schema x-harness / host 同步。
 MAX_TOOL_PAYLOAD_BYTES = 1 * 1024 * 1024
@@ -80,6 +84,23 @@ class StreamSession:
     # 只保留当前（也就是最终）模型回合的正文。Tool 前的说明已经通过
     # content.delta 展示，但不能与 Tool 后的最终 artifact/回答拼接。
     content_parts: list[str] = field(default_factory=list)
+
+    def snapshot(self) -> dict[str, object]:
+        """复制一次 provider attempt 的内存状态，供失败回滚使用。"""
+        return {
+            item.name: deepcopy(getattr(self, item.name))
+            for item in fields(self)
+        }
+
+    def restore(self, snapshot: Mapping[str, object]) -> None:
+        """恢复失败 attempt 的状态，同时保留共享 usage 字典身份。"""
+        for item in fields(self):
+            value = deepcopy(snapshot[item.name])
+            if item.name == "usage" and isinstance(self.usage, dict) and isinstance(value, dict):
+                self.usage.clear()
+                self.usage.update(value)
+            else:
+                setattr(self, item.name, value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,62 +233,175 @@ async def execute(
     if request.context is not None:
         stream_kwargs["context"] = request.context
 
-    async for event in request.agent.astream(request.stream_input, **stream_kwargs):
-        ports.on_stream_event()
-        if request.is_cancelled():
-            raise ExecutionStreamError("RUN_CANCELLED", "Run was cancelled during stream")
+    # 正文和 reasoning 必须实时投影；tool/progress signal 则等到模型节点越过边界后
+    # 再投影，避免 provider 在半条 tool call 后失败时把不可信调用送进 UI。
+    # 已经公开的正文无法通过现有 Protocol 撤回，因此后续临时错误禁止重放。
+    pending_model_signals: list[ExecutionSignal] = []
+    model_output_active = False
+    model_output_token: object | None = None
+    model_output_session_snapshot: dict[str, object] | None = None
+    provider_activity_notified = False
+    model_output_published = False
 
-        interaction, auto_resume = extract_interaction(
-            event, needs_user_decision=request.needs_user_decision
-        )
-        if auto_resume is not None:
-            # Interaction resume 前不清理 model round：下一阶段 astream
-            # 仍可能依赖尚未结束的关联状态，与历史 Build 行为一致。
-            return ExecutionStreamResult(
-                final_content="".join(session.content_parts),
-                usage=dict(session.usage),
-                resume=auto_resume,
-            )
-        if interaction is not None:
-            response = await ports.interact(interaction)
-            if interaction.type == "approval":
-                # 串行审批由 adapter 收集完整 decisions resume dict。
-                resume = response
-            else:
-                resume = resume_value(interaction, response)
-            return ExecutionStreamResult(
-                final_content="".join(session.content_parts),
-                usage=dict(session.usage),
-                resume=resume,
-            )
+    async def begin_model_output() -> None:
+        """开启当前 provider model call 的 session/observer 事务。"""
+        nonlocal model_output_active, model_output_token
+        nonlocal model_output_session_snapshot
+        if model_output_active:
+            return
+        model_output_session_snapshot = session.snapshot()
+        begin = getattr(ports, "begin_model_output", None)
+        token = begin() if callable(begin) else None
+        if inspect.isawaitable(token):
+            token = await token
+        model_output_token = token
+        model_output_active = True
 
-        custom_payload = extract_custom_payload(event)
-        if custom_payload is not None:
-            on_custom = getattr(ports, "on_custom", None)
-            if callable(on_custom):
-                signal = await on_custom(custom_payload)
-                if signal is not None:
-                    ports.emit(signal)
-            continue
-
-        chunk = message_stream_chunk(event, execution_id=expected_execution_id)
-        if chunk is not None and not _tool_result_was_emitted(session, chunk):
-            complete_tool = await ports.observe_message(chunk, session)
-            if complete_tool:
-                await ports.after_tool_boundary()
-
-        signals = tuple(
-            translate_stream_event(
-                event,
-                session,
-                content_visibility=request.content_visibility,
-                execution_id=expected_execution_id,
-            )
-        )
-        if signals and request.on_provider_activity is not None:
-            request.on_provider_activity()
-        for signal in signals:
+    async def commit_model_output() -> None:
+        """提交完整 model call，并投影已确认的 tool signal。"""
+        nonlocal model_output_active, model_output_token
+        nonlocal model_output_session_snapshot
+        if not model_output_active:
+            return
+        commit = getattr(ports, "commit_model_output", None)
+        if callable(commit):
+            result = commit(model_output_token)
+            if inspect.isawaitable(result):
+                await result
+        if any(_is_provider_activity_signal(signal) for signal in pending_model_signals):
+            notify_provider_activity()
+        for signal in pending_model_signals:
             ports.emit(signal)
+        pending_model_signals.clear()
+        model_output_active = False
+        model_output_token = None
+        model_output_session_snapshot = None
+
+    async def rollback_model_output() -> None:
+        """丢弃失败 model call 的 signal、observer capture 与 session 增量。"""
+        nonlocal model_output_active, model_output_token
+        nonlocal model_output_session_snapshot
+        if not model_output_active:
+            pending_model_signals.clear()
+            return
+        rollback = getattr(ports, "rollback_model_output", None)
+        if callable(rollback):
+            try:
+                result = rollback(model_output_token)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:  # noqa: BLE001 - 原始 provider 错误不能被清理遮蔽
+                pass
+        if model_output_session_snapshot is not None:
+            session.restore(model_output_session_snapshot)
+        pending_model_signals.clear()
+        model_output_active = False
+        model_output_token = None
+        model_output_session_snapshot = None
+
+    def notify_provider_activity() -> None:
+        """只在首个可见或已确认 tool signal 时通知 provider 首包。"""
+        nonlocal provider_activity_notified
+        if provider_activity_notified:
+            return
+        provider_activity_notified = True
+        if request.on_provider_activity is not None:
+            request.on_provider_activity()
+
+    def emit_or_queue(signals: Iterable[ExecutionSignal]) -> None:
+        """正文/reasoning 实时投影，其余 signal 在 model call 内暂存。"""
+        nonlocal model_output_published
+        values = tuple(signals)
+        if not values:
+            return
+        if model_output_active:
+            for signal in values:
+                if _is_realtime_model_signal(signal):
+                    model_output_published = True
+                    notify_provider_activity()
+                    ports.emit(signal)
+                else:
+                    pending_model_signals.append(signal)
+            return
+        if any(_is_provider_activity_signal(signal) for signal in values):
+            notify_provider_activity()
+        for signal in values:
+            ports.emit(signal)
+
+    try:
+        async for event in request.agent.astream(request.stream_input, **stream_kwargs):
+            ports.on_stream_event()
+            chunk = message_stream_chunk(event, execution_id=expected_execution_id)
+            is_model_chunk = _is_model_output_chunk(chunk)
+            # 收到 model output 后，下一种 graph event（包括 child event、updates
+            # 和 ToolMessage）是 tool signal 的确认边界。普通正文已经实时投影，
+            # 若 provider 随后直接抛错，由下方统一阻止重试，避免重复输出。
+            if model_output_active and not is_model_chunk:
+                await commit_model_output()
+            if request.is_cancelled():
+                raise ExecutionStreamError("RUN_CANCELLED", "Run was cancelled during stream")
+
+            interaction, auto_resume = extract_interaction(
+                event, needs_user_decision=request.needs_user_decision
+            )
+            if auto_resume is not None:
+                await commit_model_output()
+                # Interaction resume 前不清理 model round：下一阶段 astream
+                # 仍可能依赖尚未结束的关联状态，与历史 Build 行为一致。
+                return ExecutionStreamResult(
+                    final_content="".join(session.content_parts),
+                    usage=dict(session.usage),
+                    resume=auto_resume,
+                )
+            if interaction is not None:
+                await commit_model_output()
+                response = await ports.interact(interaction)
+                if interaction.type == "approval":
+                    # 串行审批由 adapter 收集完整 decisions resume dict。
+                    resume = response
+                else:
+                    resume = resume_value(interaction, response)
+                return ExecutionStreamResult(
+                    final_content="".join(session.content_parts),
+                    usage=dict(session.usage),
+                    resume=resume,
+                )
+
+            custom_payload = extract_custom_payload(event)
+            if custom_payload is not None:
+                on_custom = getattr(ports, "on_custom", None)
+                if callable(on_custom):
+                    signal = await on_custom(custom_payload)
+                    if signal is not None:
+                        ports.emit(signal)
+                continue
+
+            if is_model_chunk:
+                await begin_model_output()
+            if chunk is not None and not _tool_result_was_emitted(session, chunk):
+                complete_tool = await ports.observe_message(chunk, session)
+                if complete_tool:
+                    await ports.after_tool_boundary()
+
+            signals = tuple(
+                translate_stream_event(
+                    event,
+                    session,
+                    content_visibility=request.content_visibility,
+                    execution_id=expected_execution_id,
+                )
+            )
+            emit_or_queue(signals)
+        await commit_model_output()
+    except BaseException as exc:
+        published_before_failure = model_output_published
+        await rollback_model_output()
+        if published_before_failure and is_provider_transient(exc):
+            raise ExecutionStreamError(
+                "PROVIDER_OUTPUT_INTERRUPTED",
+                "Provider stream failed after output was published",
+            ) from exc
+        raise
 
     finish_model_round(session)
     return ExecutionStreamResult(
@@ -524,6 +658,27 @@ def message_stream_chunk(
     if not _message_event_matches_execution(data, execution_id):
         return None
     return data[0]
+
+
+def _is_model_output_chunk(chunk: object | None) -> bool:
+    """判断 root stream chunk 是否属于 provider 的 assistant 输出。"""
+    return type(chunk).__name__ in {"AIMessage", "AIMessageChunk"}
+
+
+def _is_realtime_model_signal(signal: ExecutionSignal) -> bool:
+    """判断 signal 是否是可实时展示且不可撤回的模型输出。"""
+    return signal.type in {CONTENT_DELTA, REASONING_DELTA}
+
+
+def _is_provider_activity_signal(signal: ExecutionSignal) -> bool:
+    """判断 signal 是否代表 provider 已产生有效首包。"""
+    return signal.type in {
+        CONTENT_DELTA,
+        REASONING_DELTA,
+        TOOL_STARTED,
+        TOOL_DELTA,
+        TOOL_COMPLETED,
+    }
 
 
 def translate_stream_event(

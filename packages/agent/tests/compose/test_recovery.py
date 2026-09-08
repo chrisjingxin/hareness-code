@@ -393,11 +393,11 @@ def test_provider_retry_policy_respects_budget_and_retry_after() -> None:
     assert policy.should_retry(attempt=1, error=limited)
     assert policy.should_retry(attempt=2, error=limited)
     assert not policy.should_retry(attempt=3, error=limited)
-    assert policy.retry_delay_seconds(limited) == 2.0
+    assert policy.retry_delay_seconds(limited, attempt=1) == 2.0
     capped = _RateLimitedError(retry_after_seconds=999.0)
-    assert policy.retry_delay_seconds(capped) == 30.0
+    assert policy.retry_delay_seconds(capped, attempt=1) == 30.0
     fallback = _RateLimitedError(retry_after_seconds=None)
-    assert policy.retry_delay_seconds(fallback) == 1.0
+    assert policy.retry_delay_seconds(fallback, attempt=1) == 1.0
     assert not policy.should_retry(attempt=1, error=RuntimeError("boom"))
     assert is_provider_rate_limited(limited)
     assert not is_provider_rate_limited(RuntimeError("boom"))
@@ -415,7 +415,7 @@ class _ScriptedRetryPolicy:
         self.calls += 1
         return self.calls <= self.allowed
 
-    def retry_delay_seconds(self, error: BaseException) -> float:
+    def retry_delay_seconds(self, _error: BaseException, _attempt: int) -> float:
         return self.delay
 
 

@@ -38,6 +38,7 @@ from harness_agent.runtime.managed_agent_executor import (
     ManagedAgentRequest,
     acquire_pooled_agent_runtime,
 )
+from harness_agent.runtime.provider_retry import BoundedProviderRetry
 
 
 class _ToolCallingModel(GenericFakeChatModel):
@@ -82,6 +83,206 @@ async def _registry() -> tuple[AgentExecutionRegistry, ExecutionRef]:
     )
     await registry.start(root)
     return registry, root
+
+
+@pytest.mark.asyncio
+async def test_managed_root_retries_guarded_malformed_model_output() -> None:
+    """Build/root graph 的 guard 错误回到同一 executor 后可恢复。"""
+    from langgraph.checkpoint.memory import MemorySaver
+
+    from harness_agent.runtime.agent import create_harness_agent
+
+    checkpointer = MemorySaver()
+    model = _ToolCallingModel(
+        messages=iter(
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "  ", "args": {}, "id": None}],
+                ),
+                AIMessage(content="ROOT_OK"),
+            ]
+        )
+    )
+    model.profile = {"max_input_tokens": 200_000}
+    graph = create_harness_agent(
+        model,
+        checkpointer=checkpointer,
+        approval_mode="yolo",
+        enable_skills=False,
+        enable_memory=False,
+        enable_ask_user=False,
+    )
+
+    class Runtime:
+        agent = graph
+        run_context = None
+
+        def graph_config(self, namespace: str) -> dict[str, object]:
+            return {"configurable": {"thread_id": namespace}}
+
+        async def release(self) -> None:
+            return None
+
+    runtime = Runtime()
+
+    async def acquire_runtime() -> Runtime:
+        return runtime
+
+    result = await ManagedAgentExecutor(
+        sleep=lambda _seconds: asyncio.sleep(0)
+    ).execute(
+        ManagedAgentRequest(
+            execution_ref="root-execution",
+            parent_execution_ref=None,
+            run_id="root-run",
+            input="repair",
+            checkpoint_namespace="root-thread",
+            output_policy="passthrough",
+            runtime_provider=acquire_runtime,
+            is_cancelled=lambda: False,
+            idempotency_key="root-retry",
+            provider_retry=BoundedProviderRetry(max_attempts=2),
+        ),
+        FailClosedManagedObserver(),
+    )
+
+    assert result.final_content == "ROOT_OK"
+    state = await graph.aget_state({"configurable": {"thread_id": "root-thread"}})
+    assert not any("LEAK" in repr(message) for message in state.values["messages"])
+
+
+@pytest.mark.asyncio
+async def test_inline_child_malformed_output_is_retried_by_parent_executor(
+    tmp_path,
+) -> None:
+    """Inline child 的稳定畸形码必须穿过 delegation 回到父 executor。"""
+    from harness_agent.policy.capability_policy import (
+        BUILTIN_TOOL_NAMES,
+        resolve_effective_capability_view,
+    )
+    from harness_agent.runtime.agent import create_harness_agent
+    from harness_agent.runtime.agent_catalog import EffectiveExecutionPolicy
+    from harness_agent.threads.snapshots import ThreadSnapshotStore
+    from harness_agent.runtime.run_context import RunContext
+    from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
+
+    registry, root = await _registry()
+    policy = EffectiveExecutionPolicy(
+        policy_ids=("main",),
+        tools=None,
+        mcp_tools=None,
+        skills=None,
+        filesystem_read=None,
+        filesystem_write=None,
+        shell=None,
+        network=None,
+        isolation="local",
+        approval_mode="yolo",
+        delegation=DelegationPolicy(
+            enabled=True,
+            allowed_agents=("general-purpose",),
+            max_depth=1,
+            max_parallelism=1,
+        ),
+    )
+    view = resolve_effective_capability_view(
+        policy,
+        available_tools=BUILTIN_TOOL_NAMES,
+    )
+    model = _ToolCallingModel(
+        messages=iter(
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {
+                                "description": "return child",
+                                "subagent_type": "general-purpose",
+                            },
+                            "id": "task-call-1",
+                        }
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "  ", "args": {}, "id": None}],
+                ),
+                AIMessage(content="PARENT_RECOVERED"),
+            ]
+        )
+    )
+    model.profile = {"max_input_tokens": 200_000}
+    graph = create_harness_agent(
+        model,
+        cwd=str(tmp_path),
+        approval_mode="yolo",
+        enable_skills=False,
+        enable_memory=False,
+        enable_ask_user=False,
+        shared_engine=True,
+        capability_view=view,
+        execution_registry=registry,
+        snapshot_store=ThreadSnapshotStore(),
+    )
+    context = RunContext(
+        thread_id=root.thread_id,
+        run_id=root.run_id,
+        context_snapshot=prepare_embedded_context_snapshot(
+            thread_id=root.thread_id,
+            system_prompt="test",
+            workspace=str(tmp_path),
+            sandboxed=False,
+            provider=None,
+            approval_mode="yolo",
+            skill_registry=None,
+            enable_memory=False,
+            enable_skills=False,
+            enable_ask_user=False,
+        ),
+        approval_mode="yolo",
+        execution_id=root.execution_id,
+        agent_id="main",
+        cancellation_token=RunCancellationToken(),
+        delegation_policy=policy.delegation,
+    )
+
+    class Runtime:
+        agent = graph
+        run_context = context
+
+        def graph_config(self, namespace: str) -> dict[str, object]:
+            return {"configurable": {"thread_id": namespace}}
+
+        async def release(self) -> None:
+            return None
+
+    runtime = Runtime()
+
+    async def acquire_runtime() -> Runtime:
+        return runtime
+
+    result = await ManagedAgentExecutor(
+        sleep=lambda _seconds: asyncio.sleep(0)
+    ).execute(
+        ManagedAgentRequest(
+            execution_ref=root.execution_id,
+            parent_execution_ref=None,
+            run_id=root.run_id,
+            input="delegate",
+            checkpoint_namespace=root.thread_id,
+            output_policy="passthrough",
+            runtime_provider=acquire_runtime,
+            is_cancelled=lambda: False,
+            idempotency_key="inline-retry",
+            provider_retry=BoundedProviderRetry(max_attempts=2),
+        ),
+        FailClosedManagedObserver(),
+    )
+
+    assert result.final_content == "PARENT_RECOVERED"
 
 
 def _command(

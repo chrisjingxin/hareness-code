@@ -9,7 +9,12 @@ from pathlib import Path
 import pytest
 
 from harness_agent.runtime.agent_catalog import DelegationPolicy
-from harness_agent.runtime.agent_delegation import AgentDelegator, DelegateAgent, DelegationTarget
+from harness_agent.runtime.agent_delegation import (
+    AgentDelegationError,
+    AgentDelegator,
+    DelegateAgent,
+    DelegationTarget,
+)
 from harness_agent.runtime.agent_execution import AgentExecutionRegistry
 from harness_agent.runtime.execution_binding import (
     AgentExecutionBinding,
@@ -280,6 +285,30 @@ async def test_parent_cancellation_converges_member_tasks() -> None:
 
     assert result.status is TeamRunStatus.CANCELLED
     assert result.task("work").status is TeamTaskStatus.CANCELLED
+
+
+async def test_team_preserves_stable_child_provider_failure_without_second_retry_owner() -> None:
+    """Team 只收敛成员失败码，不另起 provider retry 或改写稳定错误。"""
+
+    async def malformed(_command: DelegateAgent):
+        raise AgentDelegationError("MALFORMED_TOOL_CALL")
+
+    coordinator, _store, root = await _runtime({"worker": malformed})
+    result = await coordinator.run(
+        TeamDefinition(
+            team_id="malformed-team",
+            tasks=(TeamTaskDefinition("work", "worker", "inspect"),),
+        ),
+        run_id="team-malformed",
+        parent_ref=root,
+        request="inspect",
+        delegation_policy=_policy("worker"),
+        cancellation_token=RunCancellationToken(),
+    )
+
+    assert result.status is TeamRunStatus.FAILED
+    assert result.terminal_count == 1
+    assert result.task("work").error_code == "MALFORMED_TOOL_CALL"
 
 
 async def test_recovery_retries_read_but_never_repeats_unknown_write() -> None:

@@ -97,7 +97,9 @@ def create_openai_compatible_model(
         "api_key": settings.resolve_api_key(),
         "use_responses_api": False,
         "timeout": settings.timeout_seconds,
-        "max_retries": settings.max_retries,
+        # SDK 不再持有 retry budget；root、Compose、Inline child 与 Plugin
+        # 都由 ManagedAgentExecutor 统一按 Run 配置重试，避免双重退避。
+        "max_retries": 0,
         "default_headers": settings.resolve_headers(),
     }
     if async_client is not None:

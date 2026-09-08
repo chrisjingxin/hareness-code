@@ -31,6 +31,11 @@ from harness_agent.runtime.execution_stream import (
     execute as execute_stream,
 )
 from harness_agent.diagnostic_log.runtime import DiagnosticLog, ensure_log
+from harness_agent.runtime.provider_retry import (
+    is_provider_error,
+    is_provider_rate_limited,
+    is_provider_transient,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +47,7 @@ class ProviderRetryPolicy(Protocol):
 
     def should_retry(self, attempt: int, error: BaseException) -> bool: ...
 
-    def retry_delay_seconds(self, error: BaseException) -> float: ...
+    def retry_delay_seconds(self, error: BaseException, attempt: int) -> float: ...
 
 
 class ManagedTimingPort(Protocol):
@@ -57,29 +62,20 @@ class ManagedTimingPort(Protocol):
     def end_retry_wait(self, started_at: float) -> None: ...
 
 
-_RATE_LIMIT_CODES = frozenset(
-    {"RATE_LIMITED", "PROVIDER_RATE_LIMITED", "429", "THROTTLED"}
-)
-
-
-def is_provider_rate_limited(error: BaseException) -> bool:
-    """判断异常是否携带稳定 provider 限流事实。"""
-    code = getattr(error, "code", None)
-    if isinstance(code, str) and code.upper() in _RATE_LIMIT_CODES:
-        return True
-    if getattr(error, "status_code", None) == 429:
-        return True
-    message = str(error)
-    return "429" in message or "rate limit" in message.lower()
-
-
 class ManagedAgentExecutionError(RuntimeError):
     """Managed executor 对外暴露的稳定执行错误。"""
 
-    def __init__(self, code: str, message: str | None = None) -> None:
-        """保存调用方可映射到产品错误码的稳定 code。"""
+    def __init__(
+        self,
+        code: str,
+        message: str | None = None,
+        *,
+        retryable: bool = False,
+    ) -> None:
+        """保存稳定错误码，并显式标记是否值得用户重试 Run。"""
         self.code = code
         self.message = message or code
+        self.retryable = retryable
         super().__init__(self.message)
 
 
@@ -537,6 +533,7 @@ class ManagedAgentExecutor:
             attempt_started = self._clock()
             first_chunk_at: float | None = None
             usage_before = dict(session.usage)
+            attempt_snapshot = session.snapshot()
             active_started = (
                 request.timing.begin_active() if request.timing is not None else None
             )
@@ -582,8 +579,10 @@ class ManagedAgentExecutor:
                 )
                 return result
             except asyncio.CancelledError:
+                session.restore(attempt_snapshot)
                 raise
             except ExecutionStreamError as exc:
+                session.restore(attempt_snapshot)
                 _log_model_failure(
                     request,
                     model_round,
@@ -603,8 +602,15 @@ class ManagedAgentExecutor:
                     )
                     attempt += 1
                     continue
-                raise ManagedAgentExecutionError(exc.code, exc.message) from exc
+                if is_provider_error(exc):
+                    raise _provider_terminal_error(exc) from exc
+                raise ManagedAgentExecutionError(
+                    exc.code,
+                    exc.message,
+                    retryable=exc.code == "PROVIDER_OUTPUT_INTERRUPTED",
+                ) from exc
             except Exception as exc:  # noqa: BLE001 - retry 边界需要判定任何错误
+                session.restore(attempt_snapshot)
                 _log_model_failure(
                     request,
                     model_round,
@@ -624,11 +630,8 @@ class ManagedAgentExecutor:
                     )
                     attempt += 1
                     continue
-                if is_provider_rate_limited(exc):
-                    raise ManagedAgentExecutionError(
-                        "PROVIDER_RATE_LIMITED",
-                        "Provider rate limit budget exhausted",
-                    ) from exc
+                if is_provider_error(exc):
+                    raise _provider_terminal_error(exc) from exc
                 raise
             finally:
                 if request.timing is not None and active_started is not None:
@@ -643,7 +646,7 @@ class ManagedAgentExecutor:
         provider_attempt: int,
     ) -> None:
         """按策略延迟并在醒来后复核取消；取消语义不被重试吞掉。"""
-        delay = max(0.0, policy.retry_delay_seconds(error))
+        delay = max(0.0, policy.retry_delay_seconds(error, provider_attempt))
         request.diagnostic_log.warn(
             "model.retry_scheduled",
             {
@@ -707,6 +710,33 @@ def _error_code(error: BaseException) -> str:
     return str(code) if isinstance(code, str) and code else type(error).__name__
 
 
+def _provider_terminal_error(error: BaseException) -> ManagedAgentExecutionError:
+    """把临时 provider 故障收敛成不泄露上游正文的终态错误。"""
+    if _error_code(error) == "MALFORMED_TOOL_CALL":
+        return ManagedAgentExecutionError(
+            "MALFORMED_TOOL_CALL",
+            "Model returned malformed tool call after retry budget was exhausted",
+            retryable=True,
+        )
+    if is_provider_rate_limited(error):
+        return ManagedAgentExecutionError(
+            "PROVIDER_RATE_LIMITED",
+            "Provider rate limit budget exhausted",
+            retryable=True,
+        )
+    if is_provider_transient(error):
+        return ManagedAgentExecutionError(
+            "PROVIDER_RETRY_EXHAUSTED",
+            "Provider retry budget exhausted",
+            retryable=True,
+        )
+    return ManagedAgentExecutionError(
+        "PROVIDER_REQUEST_REJECTED",
+        "Provider rejected the model request",
+        retryable=False,
+    )
+
+
 def _error_fields(
     error: BaseException,
     failure_stage: str,
@@ -716,7 +746,7 @@ def _error_fields(
         "failure_stage": failure_stage,
         "error_code": _error_code(error),
         "error_type": type(error).__name__,
-        "retryable": False,
+        "retryable": is_provider_transient(error),
         "summary_code": summary_code,
     }
 

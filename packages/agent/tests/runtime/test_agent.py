@@ -133,6 +133,120 @@ async def test_auto_mode_preflight_uses_classifier_cache_end_to_end():
     assert any(isinstance(message, ToolMessage) for message in result["messages"])
 
 
+async def test_missing_tool_call_id_survives_assistant_tool_next_model_chain() -> None:
+    """合法缺失 ID 由 assistant 规范化，并贯穿 ToolNode 到下一次模型请求。"""
+    from langchain_core.tools import StructuredTool
+
+    from harness_agent.runtime.agent import create_harness_agent
+
+    observed: list[str] = []
+
+    def remember(value: str) -> str:
+        observed.append(value)
+        return f"remembered:{value}"
+
+    tool = StructuredTool.from_function(
+        func=remember,
+        name="remember",
+        description="记录一段测试文本",
+    )
+    model = RecordingFakeChatModel(
+        messages=iter(
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"id": None, "name": "remember", "args": {"value": "x"}}
+                    ],
+                ),
+                AIMessage(content="done"),
+            ]
+        )
+    )
+    model.profile = {"max_input_tokens": 200_000}
+    agent = create_harness_agent(
+        model,
+        tools=[tool],
+        enable_skills=False,
+        enable_memory=False,
+        enable_ask_user=False,
+        approval_mode="yolo",
+    )
+
+    result = await agent.ainvoke(
+        {"messages": [HumanMessage(content="记住 x")]},
+        config={"configurable": {"thread_id": "missing-id-chain"}},
+    )
+
+    assistant = next(
+        message
+        for message in result["messages"]
+        if isinstance(message, AIMessage) and message.tool_calls
+    )
+    tool_message = next(
+        message for message in result["messages"] if message.type == "tool"
+    )
+    call_id = assistant.tool_calls[0]["id"]
+    assert isinstance(call_id, str) and call_id
+    assert tool_message.tool_call_id == call_id
+    assert observed == ["x"]
+    assert result["messages"][-1].content == "done"
+    assert any(
+        any(
+            message.type == "tool"
+            and message.tool_call_id == call_id
+            for message in messages
+        )
+        for messages in model.received[1:]
+    )
+
+
+async def test_unknown_tool_keeps_original_id_without_provider_retry() -> None:
+    """结构合法但未授权的工具只返回原 ID 策略错误，不消耗 provider retry。"""
+    from harness_agent.runtime.agent import create_harness_agent
+
+    original_id = "unknown-call-1"
+    model = RecordingFakeChatModel(
+        messages=iter(
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": original_id,
+                            "name": "not_registered",
+                            "args": {},
+                        }
+                    ],
+                ),
+                AIMessage(content="done"),
+            ]
+        )
+    )
+    model.profile = {"max_input_tokens": 200_000}
+    agent = create_harness_agent(
+        model,
+        enable_skills=False,
+        enable_memory=False,
+        enable_ask_user=False,
+        approval_mode="yolo",
+    )
+
+    result = await agent.ainvoke(
+        {"messages": [HumanMessage(content="调用未知工具")]},
+        config={"configurable": {"thread_id": "unknown-tool-no-retry"}},
+    )
+
+    rejected = next(
+        message
+        for message in result["messages"]
+        if message.type == "tool" and message.status == "error"
+    )
+    assert rejected.tool_call_id == original_id
+    assert result["messages"][-1].content == "done"
+    assert len(model.received) == 2
+
+
 async def test_default_hitl_registers_prepared_file_diff_for_host_approval(tmp_path: Path):
     """真实 Agent 图把已固定 diff 登记到当前 Run，而不在描述中复制源码。"""
     from langgraph.checkpoint.memory import MemorySaver
