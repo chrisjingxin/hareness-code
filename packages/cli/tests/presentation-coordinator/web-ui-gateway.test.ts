@@ -305,6 +305,35 @@ test("command.execute 无 argument（Web adapter 真实发射形状）受理且�
   expect(system.controller.getSnapshot().catalogs.threads.items).toEqual(before)
 })
 
+test("catalog.refresh/agents：真实 Browser 帧路由到 Controller 且不触发 Web fail-closed", async () => {
+  const harness = makeHarness({ initialThreadId: "thread-1" })
+  const { wrapped, counting } = createCountingController(harness.controller)
+  const system = createSystem({ controller: wrapped })
+  await flush()
+  const { ch } = await connectAndReady(system)
+
+  sendClient(ch, {
+    type: "interactive.intent",
+    requestId: "agents-refresh",
+    revision: 1,
+    intent: { type: "catalog.refresh", catalog: "agents" },
+  })
+  await waitFor(() => ch.sent.some(message => message.type === "intent.outcome" && message.requestId === "agents-refresh"))
+
+  expect(ch.sent.find(message => message.type === "intent.outcome" && message.requestId === "agents-refresh")).toEqual({
+    type: "intent.outcome",
+    requestId: "agents-refresh",
+    domain: "interactive",
+    outcome: { status: "accepted" },
+  })
+  expect(counting.intents).toEqual([{ type: "catalog.refresh", catalog: "agents" }])
+  expect(ch.closed).toEqual([])
+  expect(system.coordinator.getSnapshot().phase).toBe("web-active")
+
+  await system.gateway.close()
+  await harness.controller.close()
+})
+
 test("child-timeline.open/leave：真实 Browser 帧路由到 Controller 且不触发 Web fail-closed", async () => {
   const harness = makeHarness({ initialThreadId: "thread-1" })
   const { wrapped, counting } = createCountingController(harness.controller)

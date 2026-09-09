@@ -62,9 +62,11 @@ export function ThreadView(props: SharedViewProps & { modelName?: string }) {
       )}
       {slot === "approval" && interaction?.type === "approval" ? (
         <ApprovalDock
+          key={interaction.requestId}
           interaction={interaction}
           workMode={props.interactive.workMode}
           terminalWidth={props.terminalWidth}
+          approvalScrollRef={props.approvalScrollRef}
           onApproval={props.onApproval}
         />
       ) : null}

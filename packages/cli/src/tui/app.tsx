@@ -19,7 +19,7 @@ import {
 import type { CommandMenuItem } from "../interactive/commands"
 import { isHomeState } from "../interactive/state"
 import type { InteractiveSnapshot, PlanDecision } from "../interactive/types"
-import { resolveShortcut, type ScrollIntent } from "./application/shortcuts"
+import { resolveScrollIntent, resolveShortcut, type ScrollIntent } from "./application/shortcuts"
 import { TuiErrorBoundary } from "./presentation/error-boundary"
 import { HomeView } from "./presentation/home"
 import { DialogShell, SearchPicker, type SearchPickerRenderContext } from "./presentation/overlays"
@@ -107,6 +107,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
 
   const inputRef = useRef<TextareaRenderable | null>(null)
   const conversationScrollRef = useRef<ScrollBoxRenderable | null>(null)
+  const approvalScrollRef = useRef<ScrollBoxRenderable | null>(null)
   const statusScrollRef = useRef<ScrollBoxRenderable | null>(null)
   const skillSearchRef = useRef<TextareaRenderable | null>(null)
   const threadSearchRef = useRef<TextareaRenderable | null>(null)
@@ -278,6 +279,27 @@ export function Za38Tui(options: RenderedTuiOptions) {
     return true
   }
 
+  /** 审批挂起时只滚动当前文件 Diff，不让 Page/Ctrl 滚动键落到底层时间线。 */
+  function scrollApproval(intent: ScrollIntent): boolean {
+    const scroll = approvalScrollRef.current
+    if (!scroll || scroll.isDestroyed) return false
+    if (intent === "top") {
+      scroll.scrollTo(0)
+      return true
+    }
+    if (intent === "bottom") {
+      scroll.scrollTo(scroll.scrollHeight)
+      return true
+    }
+    const half = Math.max(1, Math.floor(scroll.height / 2))
+    const delta = intent === "line-up" ? -1
+      : intent === "line-down" ? 1
+        : intent === "page-up" ? -half
+          : half
+    scroll.scrollBy(delta)
+    return true
+  }
+
   /** 全局快捷键只负责识别动作；具体状态转换由 Adapter 处理。 */
   useKeyboard(key => {
     if (key.defaultPrevented) return
@@ -306,6 +328,22 @@ export function Za38Tui(options: RenderedTuiOptions) {
       || snapshot.btw.visible
       || snapshot.statusModal.visible
       || snapshot.inspectOverlay.visible
+
+    if (
+      !overlayCapturesKeys
+      && interactive.interaction?.type === "approval"
+      && interactive.interaction.presentation
+      && approvalScrollRef.current
+      && !approvalScrollRef.current.isDestroyed
+    ) {
+      const approvalIntent = resolveScrollIntent(key)
+      if (approvalIntent) {
+        // 只有真实 Diff scrollbox 存在时才接管滚动键；通用审批必须回到底层时间线。
+        key.preventDefault()
+        scrollApproval(approvalIntent)
+        return
+      }
+    }
 
     if (sidebarVisibility.visible && !overlayCapturesKeys) {
       if (key.sequence === "[" || key.sequence === "1") {
@@ -447,6 +485,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
     terminalHeight: terminal.height,
     inputRef,
     conversationScrollRef,
+    approvalScrollRef,
     value: snapshot.draft,
     onInput: (value: string) => { void adapter.dispatch({ type: "draft-input", value }) },
     onInputCursorChange: (cursorOffset: number) => { void adapter.dispatch({ type: "draft-cursor", cursorOffset }) },

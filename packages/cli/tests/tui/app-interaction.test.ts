@@ -790,6 +790,441 @@ test("串行审批竞态下第二个对话框回车仍可回写", async () => {
   }
 })
 
+test("审批挂起时 Ctrl+End 滚动当前文件 Diff 而不是底层时间线", async () => {
+  const { client, requests, writeServer, controller, adapter } = createSession()
+  const diff = [
+    "--- /src/scroll.ts",
+    "+++ /src/scroll.ts",
+    "@@ -1,1 +1,32 @@",
+    "-oldValue",
+    ...Array.from({ length: 32 }, (_, index) => `+approval-tail-${index + 1}`),
+  ].join("\n")
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        controller,
+        adapter,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 28 })
+      await setup.flush()
+      await adapter.dispatch({ type: "submit", value: "滚动审批预览" })
+      await setup.flush()
+    })
+    const run = requests.at(-1)
+    expect(run?.message).toBe("滚动审批预览")
+
+    await act(async () => {
+      writeServer({
+        jsonrpc: "2.0",
+        id: "run-started-scroll",
+        method: "interaction.approval",
+        params: {
+          thread_id: run!.threadId,
+          run_id: run!.runId,
+          timeout_ms: 5_000,
+          payload: {
+            interrupt_id: "approval-scroll",
+            description: "文件变更需要审批",
+            requests: JSON.stringify({ action_requests: [{ name: "edit_file", args: { file_path: "/src/scroll.ts" } }] }),
+            presentation: {
+              kind: "file_diff",
+              operation: "edit",
+              path: "/src/scroll.ts",
+              added_lines: 32,
+              removed_lines: 1,
+              truncated: false,
+              unified_diff: diff,
+            },
+            decisions: ["approve_once", "reject"],
+          },
+        },
+      })
+      await setup.flush()
+    })
+    await setup.waitForFrame(frame => frame.includes("文件变更需要审批") && frame.includes("允许一次"))
+    expect(setup.captureCharFrame()).not.toContain("approval-tail-32")
+
+    await act(async () => {
+      setup.mockInput.pressKey("END", { ctrl: true })
+      await setup.flush()
+    })
+    expect(setup.captureCharFrame()).toContain("approval-tail-32")
+    const approvalFrame = setup.captureCharFrame()
+    expect(approvalFrame).toContain("PgUp/PgDn 滚动预览")
+    expect(approvalFrame).toContain("↑↓")
+    expect(approvalFrame).toContain("Enter 确认")
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+    await adapter.close()
+    await controller.close()
+  }
+})
+
+test("127x40 长 TODO 的文件审批首屏保留摘要和 Diff", async () => {
+  const { client, requests, writeServer, controller, adapter } = createSession()
+  const diff = [
+    "--- /workspace/src/approval.ts",
+    "+++ /workspace/src/approval.ts",
+    "@@ -1,1 +1,196 @@",
+    "-const before = 1",
+    ...Array.from({ length: 196 }, (_, index) => `+visible-diff-line-${index + 1}`),
+  ].join("\n")
+  const todos = {
+    todos: Array.from({ length: 7 }, (_, index) => ({
+      content: `阶段 ${index + 1}：${"检查审批前后的工作区变更、快照一致性和回滚边界，保留完整验证证据。".repeat(3)}`,
+      status: index === 1 ? "in_progress" : "pending",
+    })),
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        controller,
+        adapter,
+        onRequestExit: () => undefined,
+      }), { width: 127, height: 40, useMouse: true, screenMode: "alternate-screen" })
+      await setup.flush()
+      await adapter.dispatch({ type: "submit", value: "长 TODO 文件审批" })
+      await setup.flush()
+    })
+    const run = requests.at(-1)
+    expect(run?.message).toBe("长 TODO 文件审批")
+
+    await act(async () => {
+      const eventBase = {
+        thread_id: run!.threadId,
+        run_id: run!.runId,
+        timestamp_ms: Date.now(),
+      }
+      client.emit("event", { event_id: "long-todo-run", type: "run.started", sequence: 1, payload: {}, ...eventBase })
+      client.emit("event", { event_id: "long-todo-started", type: "tool.started", sequence: 2, payload: { tool_call_id: "todo-long", name: "write_todos" }, ...eventBase })
+      client.emit("event", {
+        event_id: "long-todo-delta",
+        type: "tool.delta",
+        sequence: 3,
+        payload: { tool_call_id: "todo-long", arguments_delta: JSON.stringify(todos) },
+        ...eventBase,
+      })
+      client.emit("event", {
+        event_id: "long-todo-completed",
+        type: "tool.completed",
+        sequence: 4,
+        payload: { tool_call_id: "todo-long", result: { content: "", is_error: false } },
+        ...eventBase,
+      })
+      client.emit("event", {
+        event_id: "long-todo-history",
+        type: "content.delta",
+        sequence: 5,
+        payload: { text: Array.from({ length: 36 }, (_, index) => `长时间线历史第 ${index + 1} 行：审批前仍需保留上下文和操作依据`).join("\n") },
+        ...eventBase,
+      })
+      await setup.flush()
+    })
+    await act(async () => {
+      writeServer({
+        jsonrpc: "2.0",
+        id: "long-todo-approval",
+        method: "interaction.approval",
+        params: {
+          thread_id: run!.threadId,
+          run_id: run!.runId,
+          timeout_ms: 5_000,
+          payload: {
+            interrupt_id: "long-todo-approval",
+            description: "（第 2/7 个待审批操作）编辑 /workspace/src/approval.ts",
+            requests: JSON.stringify({ action_requests: [{ name: "edit_file", args: { file_path: "/workspace/src/approval.ts" } }] }),
+            presentation: {
+              kind: "file_diff",
+              operation: "edit",
+              path: "/workspace/src/approval.ts",
+              added_lines: 196,
+              removed_lines: 1,
+              truncated: true,
+              unified_diff: diff,
+            },
+            decisions: ["approve_once", "approve_thread", "approve_project", "reject", "reject_with_feedback"],
+          },
+        },
+      })
+      await setup.flush()
+    })
+    await setup.waitForFrame(frame => frame.includes("（第 2/7 个待审批操作）") && frame.includes("允许一次"))
+
+    let frame = setup.captureCharFrame()
+    const diffRows = frame.split("\n").filter(row => row.includes("visible-diff-line-"))
+    expect(frame).toContain("需要审批")
+    expect(frame).toContain("编辑文件 · /workspace/src/approval.ts · +196 / -1")
+    expect(frame).toContain("visible-diff-line-1")
+    expect(frame).toContain("预览已按 200 行或 16 KiB 上限截断；批准仍会应用完整变更。")
+    expect(diffRows.length).toBeGreaterThanOrEqual(4)
+    expect(diffRows.length).toBeLessThanOrEqual(14)
+    expect(frame).toContain("▶ 允许一次")
+    expect(frame).toContain("↑↓ 选择 · Enter 确认")
+    expect(frame).toContain("v0.1.0")
+
+    await act(async () => {
+      setup.mockInput.pressKey("END", { ctrl: true })
+      await setup.flush()
+    })
+    await setup.waitForFrame(nextFrame => nextFrame.includes("visible-diff-line-196"))
+    frame = setup.captureCharFrame()
+    expect(frame).toContain("编辑文件 · /workspace/src/approval.ts · +196 / -1")
+    expect(frame).toContain("visible-diff-line-196")
+    expect(frame).toContain("▶ 允许一次")
+    expect(frame).toContain("↑↓ 选择 · Enter 确认")
+    expect(frame).toContain("v0.1.0")
+
+    await act(async () => {
+      setup.mockInput.pressKey("HOME", { ctrl: true })
+      await setup.flush()
+    })
+    await setup.waitForFrame(nextFrame => nextFrame.includes("visible-diff-line-1"))
+    frame = setup.captureCharFrame()
+    const selectedRow = frame.split("\n").findIndex(row => row.includes("▶ 允许一次"))
+    expect(selectedRow).toBeGreaterThanOrEqual(0)
+
+    await act(async () => {
+      await setup.mockMouse.scroll(20, selectedRow, "down")
+      await setup.flush()
+    })
+    await setup.waitForFrame(nextFrame => nextFrame.includes("▶ 本会话允许"))
+    frame = setup.captureCharFrame()
+    expect(frame).toContain("▶ 本会话允许")
+    expect(frame).not.toContain("▶ 允许一次")
+    expect(frame).toContain("visible-diff-line-1")
+    expect(frame).toContain("编辑文件 · /workspace/src/approval.ts · +196 / -1")
+    expect(frame).toContain("v0.1.0")
+
+    await act(async () => {
+      await setup.mockMouse.scroll(20, selectedRow, "up")
+      await setup.flush()
+    })
+    await setup.waitForFrame(nextFrame => nextFrame.includes("▶ 允许一次"))
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+    await adapter.close()
+    await controller.close()
+  }
+})
+
+test("无文件预览的五项审批在受限高度滚动选择且保留底栏", async () => {
+  const { client, requests, writeServer, controller, adapter } = createSession()
+  const history = Array.from({ length: 32 }, (_, index) => `approval-history-${index + 1}`).join("\n")
+  const decisions = ["允许一次", "本会话允许", "本项目允许", "拒绝", "拒绝并反馈"]
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        controller,
+        adapter,
+        onRequestExit: () => undefined,
+      }), { width: 127, height: 24 })
+      await setup.flush()
+      await adapter.dispatch({ type: "submit", value: "受限高度五项审批" })
+      await setup.flush()
+    })
+    const run = requests.at(-1)
+    expect(run?.message).toBe("受限高度五项审批")
+
+    await act(async () => {
+      client.emit("event", {
+        event_id: "approval-history",
+        type: "content.delta",
+        thread_id: run!.threadId,
+        run_id: run!.runId,
+        sequence: 1,
+        timestamp_ms: Date.now(),
+        payload: { text: history },
+      })
+      await setup.flush()
+    })
+    await act(async () => {
+      writeServer({ jsonrpc: "2.0", id: "approval-five-decisions", method: "interaction.approval", params: approvalParams(run!, "五项决定需要审批") })
+      await setup.flush()
+    })
+    await setup.waitForFrame(frame => frame.includes("五项决定需要审批") && frame.includes("允许一次"))
+
+    let frame = setup.captureCharFrame()
+    expect(frame).toContain("▶ 允许一次")
+    expect(frame).toContain("↑↓ 选择 · Enter 确认")
+    expect(frame).not.toContain("PgUp/PgDn 滚动预览")
+    expect(frame).toContain("v0.1.0")
+
+    for (let index = 1; index < decisions.length; index += 1) {
+      await act(async () => {
+        if (index % 2 === 1) setup.mockInput.pressArrow("down")
+        else setup.mockInput.pressKey("j")
+        await setup.flush()
+      })
+      frame = setup.captureCharFrame()
+      expect(frame).toContain(`▶ ${decisions[index]}`)
+      expect(frame).toContain("v0.1.0")
+    }
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+    await adapter.close()
+    await controller.close()
+  }
+})
+
+test("127x40 无文件预览的五项审批用鼠标滚轮只滚动决定选择器", async () => {
+  const { client, requests, writeServer, controller, adapter } = createSession()
+  const history = [
+    "mouse-history-top",
+    ...Array.from({ length: 42 }, (_, index) => `mouse-history-middle-${index + 1}`),
+    "mouse-history-tail",
+  ].join("\n")
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        controller,
+        adapter,
+        onRequestExit: () => undefined,
+      }), { width: 127, height: 40, useMouse: true })
+      await setup.flush()
+      await adapter.dispatch({ type: "submit", value: "鼠标滚轮审批选择" })
+      await setup.flush()
+    })
+    const run = requests.at(-1)
+    expect(run?.message).toBe("鼠标滚轮审批选择")
+
+    await act(async () => {
+      client.emit("event", {
+        event_id: "mouse-approval-history",
+        type: "content.delta",
+        thread_id: run!.threadId,
+        run_id: run!.runId,
+        sequence: 1,
+        timestamp_ms: Date.now(),
+        payload: { text: history },
+      })
+      await setup.flush()
+      writeServer({ jsonrpc: "2.0", id: "mouse-five-decisions", method: "interaction.approval", params: approvalParams(run!, "鼠标五项决定") })
+      await setup.flush()
+    })
+    await setup.waitForFrame(frame => frame.includes("鼠标五项决定") && frame.includes("▶ 允许一次"))
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 75))
+      await setup.flush()
+    })
+
+    await act(async () => {
+      setup.mockInput.pressKey("HOME", { ctrl: true })
+      await setup.flush()
+    })
+    await setup.waitForFrame(frame => frame.includes("mouse-history-top"))
+    let frame = setup.captureCharFrame()
+    const selectedRow = frame.split("\n").findIndex(row => row.includes("▶ 允许一次"))
+    expect(selectedRow).toBeGreaterThanOrEqual(0)
+    expect(frame).toContain("mouse-history-top")
+    expect(frame).not.toContain("mouse-history-tail")
+    expect(frame).toContain("v0.1.0")
+
+    await act(async () => {
+      await setup.mockMouse.scroll(20, selectedRow, "down")
+      await setup.flush()
+    })
+    await setup.waitForFrame(nextFrame => nextFrame.includes("▶ 本会话允许"))
+    frame = setup.captureCharFrame()
+    expect(frame).toContain("▶ 本会话允许")
+    expect(frame).not.toContain("▶ 允许一次")
+    expect(frame).toContain("mouse-history-top")
+    expect(frame).not.toContain("mouse-history-tail")
+    expect(frame).toContain("↑↓ 选择 · Enter 确认")
+    expect(frame).toContain("v0.1.0")
+
+    await act(async () => {
+      await setup.mockMouse.scroll(20, selectedRow, "up")
+      await setup.flush()
+    })
+    await setup.waitForFrame(nextFrame => nextFrame.includes("▶ 允许一次"))
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+    await adapter.close()
+    await controller.close()
+  }
+})
+
+test("无文件预览的审批滚动键回退到底层时间线", async () => {
+  const { client, requests, writeServer, controller, adapter } = createSession()
+  const history = [
+    "fallback-history-top",
+    ...Array.from({ length: 34 }, (_, index) => `fallback-history-middle-${index + 1}`),
+    "fallback-history-tail",
+  ].join("\n")
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        controller,
+        adapter,
+        onRequestExit: () => undefined,
+      }), { width: 127, height: 40 })
+      await setup.flush()
+      await adapter.dispatch({ type: "submit", value: "回退时间线滚动" })
+      await setup.flush()
+    })
+    const run = requests.at(-1)
+    expect(run?.message).toBe("回退时间线滚动")
+
+    await act(async () => {
+      client.emit("event", {
+        event_id: "fallback-history",
+        type: "content.delta",
+        thread_id: run!.threadId,
+        run_id: run!.runId,
+        sequence: 1,
+        timestamp_ms: Date.now(),
+        payload: { text: history },
+      })
+      await setup.flush()
+      writeServer({ jsonrpc: "2.0", id: "approval-no-preview-scroll", method: "interaction.approval", params: approvalParams(run!, "没有文件预览") })
+      await setup.flush()
+    })
+    await setup.waitForFrame(frame => frame.includes("没有文件预览") && frame.includes("允许一次"))
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 75))
+      await setup.flush()
+    })
+
+    await act(async () => {
+      setup.mockInput.pressKey("HOME", { ctrl: true })
+      await setup.flush()
+    })
+    await setup.waitForFrame(frame => frame.includes("fallback-history-top"))
+    let frame = setup.captureCharFrame()
+    expect(frame).toContain("fallback-history-top")
+    expect(frame).not.toContain("fallback-history-tail")
+
+    await act(async () => {
+      setup.mockInput.pressKey("\u001b[6~")
+      await setup.flush()
+    })
+    await setup.waitForFrame(frame => !frame.includes("fallback-history-top"))
+    frame = setup.captureCharFrame()
+    expect(frame).not.toContain("fallback-history-top")
+
+    await act(async () => {
+      setup.mockInput.pressKey("END", { ctrl: true })
+      await setup.flush()
+    })
+    await setup.waitForFrame(frame => frame.includes("fallback-history-tail"))
+    expect(setup.captureCharFrame()).toContain("fallback-history-tail")
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+    await adapter.close()
+    await controller.close()
+  }
+})
+
 test("运行中出现开放式问题时请求滚动到最新问答卡", async () => {
   const { client, requests, writeServer, controller, adapter } = createSession()
   try {

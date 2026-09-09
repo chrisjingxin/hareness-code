@@ -162,9 +162,17 @@ Agent 继续生成标准 unified diff，避免 Protocol 携带 Web/TUI 专属的
 - 增删背景使用与普通代码面具有明确色差的深绿 `#1a4d1a` / 深红 `#4d1a1a`，内容区与行号槽
   保持连续色块并保留 `+`/`-`；颜色须避免在终端有限色阶映射后与普通深灰背景合并。长行采用可读
   换行，不能因为列宽省略源码。
-- 截断警告位于 Diff 前、审批选择器前。Diff/Tree-sitter 异常时显示原始纯文本，选择器和超时逻辑
-  继续工作。
-- 首版不增加新的审批快捷键或 TUI 模式切换控件，避免与现有 select/反馈输入争抢焦点。
+- 截断警告位于 Diff 前、审批选择器前。标题、description、文件统计、截断警告、审批选择器和操作
+  提示固定可见；只有 Diff 正文进入受限的独立纵向 scrollbox。Diff 外层和正文视口都必须有非零
+  最小高度：在 127x40 且 TODO/时间线很长时，首屏至少保留 4 行正文，正文视口最多占约 14 行，
+  由 ConversationTimeline 让出剩余高度；Diff/Tree-sitter 异常时，原始纯文本降级也复用同一滚动边界，
+  选择器和超时逻辑继续工作。
+- 有 file_diff presentation 时，鼠标滚轮位于 Diff 正文区域只滚动当前 Diff；位于审批选择器区域时只移动
+  当前决定且消费事件，不滚动背后的 ConversationTimeline。PageUp/PageDown、Ctrl+Up/Down 和
+  Ctrl+Home/End 只滚动当前 Diff；普通 Up/Down、j/k 和 Enter 仍由审批选择器处理。没有 presentation
+  时不显示 Diff 滚动提示，Page/Ctrl 滚动键回到现有 ConversationTimeline 行为，但审批选择器区域的鼠标
+  滚轮仍只移动决定。串行审批切换到新的 `requestId` 时，预览回到顶部。
+- 不增加新的审批决定或模式切换控件，避免与现有 select/反馈输入争抢焦点。
 
 ## 关键 invariant
 
@@ -199,7 +207,8 @@ Agent 继续生成标准 unified diff，避免 Protocol 携带 Web/TUI 专属的
 - Interactive：presentation 原样投影且不影响 timeout/reject fallback；未知/缺失数据安全。
 - Shared presenter：多 hunk、replace block、纯增/纯删、不同长度配对、no-newline、CRLF 文本和畸形输入。
 - Web：宽/窄默认、手动切换后 resize、行号/增删标记、截断 banner、折叠参数、ARIA、Shiki 各降级状态。
-- TUI：119/120 列边界、resize、split/unified、空/截断/畸形 diff、Tree-sitter 降级和审批选择/反馈回归。
+- TUI：119/120 列边界、resize、split/unified、空/截断/畸形 diff、长正文独立滚动、滚动后决策区
+  可见、requestId 切换复位、Tree-sitter 降级和审批选择/反馈回归。
 - 项目：运行 Protocol check、Python/CLI focused tests、build、typecheck、全量 test、project:check 与 diff check。
 
 ## 回滚思路

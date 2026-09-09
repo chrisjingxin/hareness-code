@@ -9,6 +9,23 @@ type KeyLike = {
   shift?: boolean
 }
 
+/** 把审批预览专用的 Page/Ctrl 组合键映射为滚动意图；普通方向键留给 select。 */
+export function resolveScrollIntent(key: KeyLike): ScrollIntent | null {
+  if (key.ctrl) {
+    switch (key.name) {
+      case "up": return "line-up"
+      case "down": return "line-down"
+      case "home": return "top"
+      case "end": return "bottom"
+    }
+  }
+  switch (key.name) {
+    case "pageup": return "page-up"
+    case "pagedown": return "page-down"
+    default: return null
+  }
+}
+
 export type ShortcutContext = {
   commandDialogVisible?: boolean
   btwModalVisible?: boolean
@@ -114,19 +131,9 @@ export type ShortcutAction =
 
 /** 滚动专用快捷键：Ctrl 组合键与 PageUp/PageDown，避免抢占方向键与 Home/End 的文本编辑语义。 */
 function resolveScrollShortcut(key: KeyLike): ShortcutAction {
-  if (key.ctrl) {
-    switch (key.name) {
-      case "up": return "scroll-line-up"
-      case "down": return "scroll-line-down"
-      case "home": return "scroll-top"
-      case "end": return "scroll-bottom"
-    }
-  }
-  switch (key.name) {
-    case "pageup": return "scroll-page-up"
-    case "pagedown": return "scroll-page-down"
-  }
-  return "none"
+  const intent = resolveScrollIntent(key)
+  if (!intent) return "none"
+  return `scroll-${intent}` as ShortcutAction
 }
 
 /** 快捷键先处理临时菜单，再处理运行态，避免输入控件吞掉 Ctrl+C 与 Esc。 */
