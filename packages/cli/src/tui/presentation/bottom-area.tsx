@@ -1,8 +1,8 @@
 /** 底部槽位：输入栏、审批 Dock、问答 Dock 互斥。 */
 
-import type { TextareaRenderable } from "@opentui/core"
+import type { ScrollBoxRenderable, SelectRenderable, TextareaRenderable } from "@opentui/core"
 import { useKeyboard } from "@opentui/react"
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState, type RefObject } from "react"
 
 import type { InteractiveSnapshot } from "../../interactive/types"
 import {
@@ -30,12 +30,35 @@ import { diffTextForRenderer, parseFileDiff } from "../../presentation-shared/fi
 import { resolveLanguageForPath } from "../../presentation-shared/language-catalog"
 import { getCommonSyntaxClient } from "../platform/syntax-parsers"
 import { SUBMIT_ON_ENTER_KEY_BINDINGS } from "./input-bar"
+import { createScrollAcceleration } from "./scroll.js"
 import { modeAccent, markdownSyntax, tuiTheme } from "./theme"
 import type { ApprovalDecision, DirectoryTrustDecision, GoalReviewResponse, PlanDecision } from "../../interactive/types"
 
 function tuiDiffViewForWidth(contentWidth: number): "split" | "unified" {
   return contentWidth >= 120 ? "split" : "unified"
 }
+
+const APPROVAL_DIFF_MIN_HEIGHT = 4
+const APPROVAL_DIFF_MAX_HEIGHT = 14
+const APPROVAL_PREVIEW_HEADER_HEIGHT = 1
+const APPROVAL_PREVIEW_WARNING_HEIGHT = 1
+const APPROVAL_PREVIEW_MARGIN_TOP = 1
+const APPROVAL_DOCK_PADDING_HEIGHT = 2
+const APPROVAL_DOCK_TITLE_HEIGHT = 1
+const APPROVAL_DOCK_DESCRIPTION_HEIGHT = 1
+const APPROVAL_SELECT_MIN_HEIGHT = 2
+const APPROVAL_SELECT_MAX_HEIGHT = 10
+const APPROVAL_PROMPT_HEIGHT = 1
+const APPROVAL_DOCK_MIN_HEIGHT =
+  APPROVAL_DOCK_PADDING_HEIGHT
+  + APPROVAL_DOCK_TITLE_HEIGHT
+  + APPROVAL_DOCK_DESCRIPTION_HEIGHT
+  + APPROVAL_PREVIEW_MARGIN_TOP
+  + APPROVAL_PREVIEW_HEADER_HEIGHT
+  + APPROVAL_PREVIEW_WARNING_HEIGHT
+  + APPROVAL_DIFF_MIN_HEIGHT
+  + APPROVAL_SELECT_MIN_HEIGHT
+  + APPROVAL_PROMPT_HEIGHT
 
 function approvalDockTitle(interaction: Extract<InteractiveSnapshot["interaction"], { type: "approval" }>): string {
   return interaction.agentId && interaction.agentId !== "main"
@@ -181,6 +204,7 @@ export function ApprovalDock(props: {
   interaction: Extract<InteractiveSnapshot["interaction"], { type: "approval" }>
   workMode: InteractiveSnapshot["workMode"]
   terminalWidth: number
+  approvalScrollRef: RefObject<ScrollBoxRenderable | null>
   onApproval: (decision: ApprovalDecision) => void
 }) {
   const accent = modeAccent(props.workMode)
@@ -190,9 +214,18 @@ export function ApprovalDock(props: {
     description: approvalDecisionDescription(decision),
     value: decision,
   }))
+  const hasFilePreview = props.interaction.presentation !== null
+  const approvalSelectRef = useRef<SelectRenderable | null>(null)
+  useEffect(() => {
+    // 连续串行审批复用同一 Dock ref 时，新的 requestId 必须从 Diff 顶部开始。
+    const scroll = props.approvalScrollRef.current
+    if (!scroll || scroll.isDestroyed) return
+    scroll.scrollTo(0)
+  }, [props.approvalScrollRef, props.interaction.requestId])
   return (
     <box
-      flexShrink={0}
+      flexShrink={hasFilePreview ? 0 : 1}
+      minHeight={hasFilePreview ? APPROVAL_DOCK_MIN_HEIGHT : 0}
       marginLeft={2}
       marginRight={2}
       marginBottom={1}
@@ -202,18 +235,37 @@ export function ApprovalDock(props: {
       paddingTop={1}
       paddingBottom={1}
       flexDirection="column"
+      overflow="hidden"
     >
-      <text fg={accent}>{approvalDockTitle(props.interaction)}</text>
-      {props.interaction.description ? <text content={props.interaction.description} fg={tuiTheme.text} /> : null}
+      <text flexShrink={0} fg={accent}>{approvalDockTitle(props.interaction)}</text>
+      {props.interaction.description ? <text flexShrink={0} content={props.interaction.description} fg={tuiTheme.text} /> : null}
       {props.interaction.presentation
-        ? <FileDiffApprovalPreview presentation={props.interaction.presentation} terminalWidth={props.terminalWidth} />
+        ? <FileDiffApprovalPreview
+            presentation={props.interaction.presentation}
+            terminalWidth={props.terminalWidth}
+            scrollRef={props.approvalScrollRef}
+          />
         : null}
       <select
+        ref={approvalSelectRef}
         focused
-        height={Math.max(2, Math.min(10, options.length * 2))}
+        flexShrink={1}
+        minHeight={APPROVAL_SELECT_MIN_HEIGHT}
+        maxHeight={APPROVAL_SELECT_MAX_HEIGHT}
+        height={Math.max(APPROVAL_SELECT_MIN_HEIGHT, Math.min(APPROVAL_SELECT_MAX_HEIGHT, options.length * 2))}
         showDescription
+        showScrollIndicator
         wrapSelection
         options={options}
+        onMouseScroll={event => {
+          const direction = event.scroll?.direction
+          if (direction !== "up" && direction !== "down") return
+          // 选项区域自行消费滚轮，不能继续冒泡到外层滚动容器。
+          event.preventDefault()
+          event.stopPropagation()
+          if (direction === "up") approvalSelectRef.current?.moveUp()
+          else approvalSelectRef.current?.moveDown()
+        }}
         onSelect={(_, option) => {
           const value = option?.value
           if (value === "approve_once" || value === "approve_thread" || value === "approve_project" || value === "reject" || value === "reject_with_feedback") {
@@ -221,7 +273,9 @@ export function ApprovalDock(props: {
           }
         }}
       />
-      <text fg={tuiTheme.muted}>↑↓ 选择 · Enter 确认</text>
+      <text flexShrink={0} fg={tuiTheme.muted}>
+        {props.interaction.presentation ? "PgUp/PgDn 滚动预览 · ↑↓ 选择 · Enter 确认" : "↑↓ 选择 · Enter 确认"}
+      </text>
     </box>
   )
 }
@@ -797,6 +851,7 @@ export function QuestionDock(props: {
 function FileDiffApprovalPreview(props: {
   presentation: NonNullable<Extract<InteractiveSnapshot["interaction"], { type: "approval" }>["presentation"]>
   terminalWidth: number
+  scrollRef: RefObject<ScrollBoxRenderable | null>
 }) {
   const { presentation } = props
   const contentWidth = Math.max(1, props.terminalWidth - 10)
@@ -805,42 +860,62 @@ function FileDiffApprovalPreview(props: {
   const parsed = parseFileDiff(presentation.unified_diff)
   const operation = presentation.operation === "write" ? "创建文件" : presentation.operation === "delete" ? "删除文件" : "编辑文件"
   const summary = `${operation} · ${presentation.path} · +${presentation.added_lines} / -${presentation.removed_lines}`
+  const previewHeaderHeight = APPROVAL_PREVIEW_HEADER_HEIGHT + (presentation.truncated ? APPROVAL_PREVIEW_WARNING_HEIGHT : 0)
   return (
-    <box flexDirection="column" marginTop={1}>
-      <text content={summary} fg={tuiTheme.text} />
+    <box
+      flexGrow={1}
+      minHeight={previewHeaderHeight + APPROVAL_DIFF_MIN_HEIGHT}
+      maxHeight={previewHeaderHeight + APPROVAL_DIFF_MAX_HEIGHT}
+      flexDirection="column"
+      marginTop={APPROVAL_PREVIEW_MARGIN_TOP}
+      overflow="hidden"
+    >
+      <text flexShrink={0} content={summary} fg={tuiTheme.text} />
       {presentation.truncated ? (
-        <text content="预览已按 200 行或 16 KiB 上限截断；批准仍会应用完整变更。" fg={tuiTheme.warning} />
+        <text flexShrink={0} content="预览已按 200 行或 16 KiB 上限截断；批准仍会应用完整变更。" fg={tuiTheme.warning} />
       ) : null}
-      {presentation.unified_diff === "" ? (
-        <text content="创建空文件（没有可显示的内容行）" fg={tuiTheme.muted} />
-      ) : parsed.status === "invalid" ? (
-        <>
-          <text content="无法解析结构化 Diff，以下按纯文本展示。" fg={tuiTheme.warning} />
-          <text content={presentation.unified_diff} fg={tuiTheme.text} />
-        </>
-      ) : (
-        <diff
-          width="100%"
-          diff={diffTextForRenderer(presentation.unified_diff)}
-          view={view}
-          syncScroll
-          filetype={language === "plaintext" ? undefined : language}
-          syntaxStyle={markdownSyntax}
-          treeSitterClient={getCommonSyntaxClient()}
-          showLineNumbers
-          wrapMode="word"
-          fg={tuiTheme.text}
-          lineNumberFg={tuiTheme.muted}
-          lineNumberBg={tuiTheme.toolSurface}
-          addedBg={tuiTheme.diffAddedBackground}
-          removedBg={tuiTheme.diffRemovedBackground}
-          contextBg={tuiTheme.toolSurface}
-          addedSignColor={tuiTheme.success}
-          removedSignColor={tuiTheme.danger}
-          addedLineNumberBg={tuiTheme.diffAddedBackground}
-          removedLineNumberBg={tuiTheme.diffRemovedBackground}
-        />
-      )}
+      <scrollbox
+        ref={props.scrollRef}
+        flexGrow={1}
+        minHeight={APPROVAL_DIFF_MIN_HEIGHT}
+        maxHeight={APPROVAL_DIFF_MAX_HEIGHT}
+        stickyScroll={false}
+        scrollAcceleration={createScrollAcceleration()}
+        viewportOptions={{ paddingRight: 1 }}
+      >
+        <box width="100%" flexDirection="column">
+          {presentation.unified_diff === "" ? (
+            <text content="创建空文件（没有可显示的内容行）" fg={tuiTheme.muted} />
+          ) : parsed.status === "invalid" ? (
+            <>
+              <text content="无法解析结构化 Diff，以下按纯文本展示。" fg={tuiTheme.warning} />
+              <text content={presentation.unified_diff} fg={tuiTheme.text} />
+            </>
+          ) : (
+            <diff
+              width="100%"
+              diff={diffTextForRenderer(presentation.unified_diff)}
+              view={view}
+              syncScroll
+              filetype={language === "plaintext" ? undefined : language}
+              syntaxStyle={markdownSyntax}
+              treeSitterClient={getCommonSyntaxClient()}
+              showLineNumbers
+              wrapMode="word"
+              fg={tuiTheme.text}
+              lineNumberFg={tuiTheme.muted}
+              lineNumberBg={tuiTheme.toolSurface}
+              addedBg={tuiTheme.diffAddedBackground}
+              removedBg={tuiTheme.diffRemovedBackground}
+              contextBg={tuiTheme.toolSurface}
+              addedSignColor={tuiTheme.success}
+              removedSignColor={tuiTheme.danger}
+              addedLineNumberBg={tuiTheme.diffAddedBackground}
+              removedLineNumberBg={tuiTheme.diffRemovedBackground}
+            />
+          )}
+        </box>
+      </scrollbox>
     </box>
   )
 }

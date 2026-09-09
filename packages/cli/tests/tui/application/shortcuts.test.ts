@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 
-import { resolveShortcut } from "../../../src/tui/application/shortcuts"
+import { resolveScrollIntent, resolveShortcut } from "../../../src/tui/application/shortcuts"
 
 const idle = {
   commandMenuVisible: false,
@@ -108,6 +108,19 @@ test("滚动快捷键在输入与运行态下全局生效，便于随时回看�
   expect(resolveShortcut({ name: "down", ctrl: true }, running)).toBe("scroll-line-down")
   expect(resolveShortcut({ name: "home", ctrl: true }, typing)).toBe("scroll-top")
   expect(resolveShortcut({ name: "end", ctrl: true }, typing)).toBe("scroll-bottom")
+})
+
+test("审批预览只接管 Page 与 Ctrl 滚动键，方向键继续留给决定选择器", () => {
+  expect(resolveScrollIntent({ name: "pageup", ctrl: false })).toBe("page-up")
+  expect(resolveScrollIntent({ name: "pagedown", ctrl: false })).toBe("page-down")
+  expect(resolveScrollIntent({ name: "up", ctrl: true })).toBe("line-up")
+  expect(resolveScrollIntent({ name: "down", ctrl: true })).toBe("line-down")
+  expect(resolveScrollIntent({ name: "home", ctrl: true })).toBe("top")
+  expect(resolveScrollIntent({ name: "end", ctrl: true })).toBe("bottom")
+  expect(resolveScrollIntent({ name: "up", ctrl: false })).toBeNull()
+  expect(resolveScrollIntent({ name: "down", ctrl: false })).toBeNull()
+  expect(resolveScrollIntent({ name: "j", ctrl: false })).toBeNull()
+  expect(resolveScrollIntent({ name: "k", ctrl: false })).toBeNull()
 })
 
 test("浮层打开时滚动键让位给选择器，不在背后滚动历史", () => {

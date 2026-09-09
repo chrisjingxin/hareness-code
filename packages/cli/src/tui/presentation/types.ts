@@ -22,6 +22,7 @@ export type SharedViewProps = {
   terminalHeight: number
   inputRef: RefObject<TextareaRenderable | null>
   conversationScrollRef: RefObject<ScrollBoxRenderable | null>
+  approvalScrollRef: RefObject<ScrollBoxRenderable | null>
   value: string
   onInput: (value: string, cursorOffset?: number) => void
   onInputCursorChange?: (cursorOffset: number) => void

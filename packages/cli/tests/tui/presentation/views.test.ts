@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { RGBA, type ScrollBoxRenderable, type TextareaRenderable } from "@opentui/core"
 import { testRender } from "@opentui/react/test-utils"
-import { act, createElement, createRef } from "react"
+import { act, createElement, createRef, useState } from "react"
 
 import type { InteractiveSnapshot } from "../../../src/interactive/types"
 import { createInteractiveRuntime } from "../../../src/interactive/runtime"
@@ -1189,7 +1189,7 @@ test("ask_user 式多题单选显示 QuestionDock 选项，时间线不铺 JSON"
   }
 })
 
-test("审批作为内联时间线事件保留选项高度", async () => {
+test("审批作为内联时间线事件保留当前选项与操作提示", async () => {
   const run = { threadId: "thread-1", runId: "run-1" }
   const started = startRun(createInitialState(), run, "写入文件")
   const state: InteractiveState = {
@@ -1231,11 +1231,10 @@ test("审批作为内联时间线事件保留选项高度", async () => {
     await act(async () => { await setup.flush() })
     const frame = setup.captureCharFrame()
     expect(frame).toContain("需要审批")
-    expect(frame).toContain("允许一次")
-    expect(frame).toContain("本会话允许")
-    expect(frame).toContain("本项目允许")
-    expect(frame).toContain("拒绝")
-    expect(frame).toContain("拒绝并反馈")
+    expect(frame).toContain("▶ 允许一次")
+    expect(frame).toContain("↑↓ 选择 · Enter 确认")
+    expect(frame).not.toContain("PgUp/PgDn 滚动预览")
+    expect(frame).toContain("v0.1.0")
     expect(frame.indexOf("execute")).toBeLessThan(frame.indexOf("需要审批"))
   } finally {
     await act(async () => { setup.renderer.destroy() })
@@ -1333,6 +1332,141 @@ test("文件审批在窄终端用行内 Diff，宽终端用双栏且保留统计
 test("TUI Diff 内容宽度 120 列切换为双栏", () => {
   expect(tuiDiffViewForWidth(119)).toBe("unified")
   expect(tuiDiffViewForWidth(120)).toBe("split")
+})
+
+test("长文件审批把 Diff 限制在独立滚动区并固定显示决策区", async () => {
+  const approvalPrompt = "PgUp/PgDn 滚动预览 · ↑↓ 选择 · Enter 确认"
+  const diff = [
+    "--- /src/long.ts",
+    "+++ /src/long.ts",
+    "@@ -1,1 +1,45 @@",
+    "-oldValue",
+    ...Array.from({ length: 45 }, (_, index) => `+long-line-${index + 1}`),
+  ].join("\n")
+  const snapshot = fileApprovalSnapshot("approval-long", diff)
+  const approvalScrollRef = createRef<ScrollBoxRenderable>()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(
+      createElement(ThreadView, viewProps(snapshot, 100, 28, approvalScrollRef)),
+      { width: 100, height: 28, useMouse: true },
+    )
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const scroll = approvalScrollRef.current
+    expect(scroll).not.toBeNull()
+    if (!scroll) throw new Error("文件审批没有创建独立 Diff scrollbox")
+    expect(scroll.scrollHeight).toBeGreaterThan(scroll.height)
+
+    let frame = setup.captureCharFrame()
+    expect(frame).toContain("需要审批")
+    expect(frame).toContain("文件变更需要审批")
+    expect(frame).toContain("编辑文件 · /src/approval.ts · +45 / -1")
+    expect(frame).toContain("允许一次")
+    expect(frame).toContain(approvalPrompt)
+    expect(frame).not.toContain("long-line-45")
+
+    const initialTop = scroll.scrollTop
+    await act(async () => {
+      await setup.mockMouse.scroll(scroll.x + 1, scroll.y + Math.min(1, Math.max(0, scroll.height - 1)), "down")
+      await setup.flush()
+    })
+    expect(scroll.scrollTop).toBeGreaterThan(initialTop)
+
+    scroll.scrollTo(scroll.scrollHeight)
+    await act(async () => { await setup.flush() })
+    frame = setup.captureCharFrame()
+    expect(frame).toContain("long-line-45")
+    expect(frame).toContain("允许一次")
+    expect(frame).toContain(approvalPrompt)
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("长畸形文件 Diff 的纯文本降级复用同一滚动边界", async () => {
+  const diff = [
+    "这不是 unified diff",
+    ...Array.from({ length: 45 }, (_, index) => `fallback-line-${index + 1}`),
+  ].join("\n")
+  const snapshot = fileApprovalSnapshot("approval-invalid-long", diff)
+  const approvalScrollRef = createRef<ScrollBoxRenderable>()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(
+      createElement(ThreadView, viewProps(snapshot, 100, 28, approvalScrollRef)),
+      { width: 100, height: 28 },
+    )
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const scroll = approvalScrollRef.current
+    expect(scroll).not.toBeNull()
+    if (!scroll) throw new Error("畸形文件审批没有创建独立 Diff scrollbox")
+    expect(scroll.scrollHeight).toBeGreaterThan(scroll.height)
+    expect(setup.captureCharFrame()).toContain("允许一次")
+
+    scroll.scrollTo(scroll.scrollHeight)
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("fallback-line-45")
+    expect(frame).toContain("允许一次")
+    expect(frame).toContain("PgUp/PgDn 滚动预览 · ↑↓ 选择 · Enter 确认")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("连续文件审批使用新的 requestId 时把 Diff 预览重置到顶部", async () => {
+  const first = fileApprovalSnapshot("approval-first", [
+    "--- /src/first.ts",
+    "+++ /src/first.ts",
+    "@@ -1,1 +1,40 @@",
+    "-first-old",
+    ...Array.from({ length: 40 }, (_, index) => `+first-line-${index + 1}`),
+  ].join("\n"))
+  const second = fileApprovalSnapshot("approval-second", [
+    "--- /src/second.ts",
+    "+++ /src/second.ts",
+    "@@ -1,1 +1,40 @@",
+    "-second-old",
+    ...Array.from({ length: 40 }, (_, index) => `+second-line-${index + 1}`),
+  ].join("\n"))
+  const approvalScrollRef = createRef<ScrollBoxRenderable>()
+  let updateSnapshot: ((snapshot: InteractiveSnapshot) => void) | undefined
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(
+      createElement(ApprovalSnapshotHarness, {
+        snapshot: first,
+        approvalScrollRef,
+        onReady: setter => { updateSnapshot = setter },
+      }),
+      { width: 100, height: 28 },
+    )
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const firstScroll = approvalScrollRef.current
+    expect(firstScroll).not.toBeNull()
+    if (!firstScroll) throw new Error("首个文件审批没有创建独立 Diff scrollbox")
+    firstScroll.scrollTo(firstScroll.scrollHeight)
+    await act(async () => { await setup.flush() })
+    expect(firstScroll.scrollTop).toBeGreaterThan(0)
+
+    if (!updateSnapshot) throw new Error("测试 Harness 没有暴露 snapshot 更新入口")
+    await act(async () => { updateSnapshot!(second) })
+    await act(async () => { await setup.flush() })
+    const secondScroll = approvalScrollRef.current
+    expect(secondScroll).not.toBeNull()
+    if (!secondScroll) throw new Error("第二个文件审批没有创建独立 Diff scrollbox")
+    expect(secondScroll.scrollTop).toBe(0)
+    expect(setup.captureCharFrame()).toContain("second-line-1")
+    expect(setup.captureCharFrame()).not.toContain("second-line-40")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
 })
 
 test("继续执行只作为历史事件之后的底部活动行", async () => {
@@ -1564,13 +1698,19 @@ test("FooterRail 展示分支标签与 detached 标签", async () => {
   }
 })
 
-function viewProps(interactive: InteractiveSnapshot, terminalWidth: number, terminalHeight: number) {
+function viewProps(
+  interactive: InteractiveSnapshot,
+  terminalWidth: number,
+  terminalHeight: number,
+  approvalScrollRef = createRef<ScrollBoxRenderable>(),
+) {
   return {
     interactive,
     terminalWidth,
     terminalHeight,
     inputRef: createRef<TextareaRenderable>(),
     conversationScrollRef: createRef<ScrollBoxRenderable>(),
+    approvalScrollRef,
     value: "",
     onInput: () => undefined,
     onInputBarKeyDown: () => undefined,
@@ -1592,6 +1732,59 @@ function viewProps(interactive: InteractiveSnapshot, terminalWidth: number, term
     onGoalViewClose: () => undefined,
     onQuestion: () => undefined,
   }
+}
+
+function fileApprovalSnapshot(requestId: string, unifiedDiff: string): InteractiveSnapshot {
+  const run = { threadId: `thread-${requestId}`, runId: `run-${requestId}` }
+  const started = startRun(createInitialState(), run, "修改文件")
+  const state: InteractiveState = {
+    ...started,
+    activity: { kind: "waiting-interaction", label: "等待工具审批" },
+    timeline: [
+      started.timeline[0]!,
+      {
+        type: "interaction",
+        interaction: {
+          id: requestId,
+          runId: run.runId,
+          type: "approval",
+          status: "pending",
+          description: "文件变更需要审批",
+          requests: {},
+        },
+      },
+    ],
+  }
+  return {
+    ...snapshotOf(state),
+    interaction: {
+      type: "approval",
+      requestId,
+      description: "文件变更需要审批",
+      requests: {},
+      presentation: {
+        kind: "file_diff",
+        operation: "edit",
+        path: "/src/approval.ts",
+        added_lines: unifiedDiff.split("\n").filter(line => line.startsWith("+") && !line.startsWith("+++ ")).length,
+        removed_lines: unifiedDiff.split("\n").filter(line => line.startsWith("-") && !line.startsWith("--- ")).length,
+        truncated: false,
+        unified_diff: unifiedDiff,
+      },
+      decisions: ["approve_once", "reject"],
+      deadlineAtMs: Date.now() + 5_000,
+    },
+  }
+}
+
+function ApprovalSnapshotHarness(props: {
+  snapshot: InteractiveSnapshot
+  approvalScrollRef: ReturnType<typeof createRef<ScrollBoxRenderable>>
+  onReady: (setter: (snapshot: InteractiveSnapshot) => void) => void
+}) {
+  const [snapshot, setSnapshot] = useState(props.snapshot)
+  props.onReady(next => setSnapshot(next))
+  return createElement(ThreadView, viewProps(snapshot, 100, 28, props.approvalScrollRef))
 }
 
 test("Compose activity 分组标题与终态折叠摘要可见", async () => {
