@@ -929,14 +929,15 @@ def create_harness_agent(
     if enable_skills and not sandboxed:
         from harness_agent.threads.virtual_files import (
             mount_harness_virtual_files,
-            run_scoped_virtual_backend_factory,
+            mount_run_scoped_virtual_files,
         )
 
         if shared_engine:
             # ``backend`` 的固定部分只包含工作区资源；虚拟历史必须在每次工具
             # 调用时按 RunContext 的 thread 和 Skill snapshot 重新挂载，不能被
-            # 编译图闭包捕获。
-            backend = run_scoped_virtual_backend_factory(
+            # 编译图闭包捕获。deepagents 0.7 要求传入 backend 实例，因此这里
+            # 挂载一个按 get_runtime() 解析的 CompositeBackend，而不是 factory。
+            backend = mount_run_scoped_virtual_files(
                 backend,
                 thread_persistence=thread_persistence,
             )

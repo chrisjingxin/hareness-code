@@ -2873,7 +2873,7 @@ async def test_task_timeout_tool_error_allows_host_run_to_complete(tmp_path: Pat
             "run.start",
             {
                 "mode": "build",
-                "message": "委派超时任务",
+                "input": {"kind": "user", "message": "委派超时任务"},
                 "thread_id": "timeout-thread",
                 "run_id": "timeout-run",
             },
@@ -3364,7 +3364,7 @@ async def test_mixed_batch_approval_keeps_hanging_calls_stable_until_resume(
             "run.start",
             {
                 "mode": "build",
-                "message": "更新配置并委派检查",
+                "input": {"kind": "user", "message": "更新配置并委派检查"},
                 "thread_id": "mixed-batch",
                 "run_id": "mixed-batch-run",
             },
@@ -3493,7 +3493,7 @@ async def test_unconsumed_approval_rule_is_discarded_on_resume_abort(
             "run.start",
             {
                 "mode": "build",
-                "message": "测试恢复中止",
+                "input": {"kind": "user", "message": "测试恢复中止"},
                 "thread_id": "abort-run",
                 "run_id": "abort-run",
             },
@@ -3659,7 +3659,7 @@ api_key_env = "FAST_KEY"
 
     assert server._config is not None
     # Run 级覆盖不得改动配置默认模式。
-    assert server._config.execution.approval_mode == "default"
+    assert server._config.execution.approval_mode == "auto"
     override_specs = list(server._resolved_agent_specs.values())
     assert [spec.effective_policy.approval_mode for spec in override_specs] == ["yolo"]
 
@@ -3691,9 +3691,9 @@ api_key_env = "FAST_KEY"
 
     specs = {spec.effective_policy.approval_mode: spec for spec in server._resolved_agent_specs.values()}
     # 两种模式必须派生出不同的 Profile key，引擎池据此各自缓存强制策略图。
-    assert set(specs) == {"default", "yolo"}
+    assert set(specs) == {"auto", "yolo"}
     assert (
-        specs["default"].runtime_profile.profile_key != specs["yolo"].runtime_profile.profile_key
+        specs["auto"].runtime_profile.profile_key != specs["yolo"].runtime_profile.profile_key
     )
     await server._close_thread_persistence()
 

@@ -1,4 +1,4 @@
-"""验证 Harness 依赖的 DeepAgents RubricMiddleware 0.6.8 行为边界。"""
+"""验证 Harness 依赖的 DeepAgents RubricMiddleware 0.7.3 行为边界。"""
 
 from __future__ import annotations
 
@@ -146,8 +146,8 @@ def test_rubric_mapping_loops_to_model_and_emits_custom_events() -> None:
     assert events[-1]["result"] == "satisfied"
 
 
-def test_iteration_cap_requires_harness_terminal_normalization() -> None:
-    """0.6.8 的最终 stream 仍是 needs_revision，最终 state 才表示达到上限。"""
+def test_iteration_cap_emits_terminal_result_consistently() -> None:
+    """0.7.3 的最终 stream 与 state 都明确表示达到迭代上限。"""
     main_model = _ToolCallingFakeModel(
         messages=iter([AIMessage(content="第一次"), AIMessage(content="第二次")])
     )
@@ -192,16 +192,19 @@ def test_iteration_cap_requires_harness_terminal_normalization() -> None:
     state = agent.get_state(config).values
     assert state["_rubric_status"] == "max_iterations_reached"
     assert state["_rubric_iterations"] == 2
-    assert events[-1]["result"] == "needs_revision"
+    assert events[-1]["result"] == "max_iterations_reached"
     assert events[-1]["iteration"] == 1
 
 
-def test_rubric_iteration_limit_is_bounded_by_sdk() -> None:
-    """Harness 声明的 1～20 上限与当前 SDK 构造门一致。"""
+def test_rubric_iteration_limit_remains_bounded_by_harness() -> None:
+    """SDK 取消硬上限后，Harness 仍将用户配置限制在 1～20。"""
     model = _ToolCallingFakeModel(messages=iter(()))
 
-    with pytest.raises(ValueError, match=r"\[1, 20\]"):
-        RubricMiddleware(model=model, max_iterations=21)
+    from harness_agent.goals.models import GoalStoreError
+    from harness_agent.goals.rubric_adapter import create_rubric_middleware
+
+    with pytest.raises(GoalStoreError, match="GOAL_MAX_ITERATIONS_INVALID"):
+        create_rubric_middleware(model=model, max_iterations=21)
 
 
 async def test_rubric_composes_with_harness_run_context_and_context_window() -> None:

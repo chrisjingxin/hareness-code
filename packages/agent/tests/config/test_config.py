@@ -446,11 +446,11 @@ def test_execution_defaults_to_local_and_redacts_security_summary(tmp_path: Path
     config = load_config(workspace=tmp_path, home=tmp_path / "home", environ={})
 
     assert config.execution.sandbox_enabled is False
-    assert config.execution.approval_mode == "default"
+    assert config.execution.approval_mode == "auto"
     assert config.redacted()["security"] == {
         "mode": "local",
         "sandbox_enabled": False,
-        "approval_mode": "default",
+        "approval_mode": "auto",
         "provider": None,
         "working_directory": None,
     }

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from deepagents.backends import CompositeBackend
 from deepagents.backends.protocol import (
@@ -20,6 +20,7 @@ from deepagents.backends.protocol import (
     ReadResult,
     WriteResult,
 )
+from langgraph.runtime import get_runtime
 
 from harness_agent.extensions.skills import SkillError, SkillRegistry
 from harness_agent.diagnostic_log.runtime import ensure_log
@@ -314,31 +315,33 @@ def mount_harness_virtual_files(
     )
 
 
-def run_scoped_virtual_backend_factory(
-    default_backend: "BackendProtocol",
-    *,
-    thread_persistence: "ThreadPersistence | None" = None,
-) -> Callable[[Any], CompositeBackend]:
-    """返回按当前 RunContext 解析虚拟历史的 backend factory。
+class RunScopedHarnessVirtualBackend:
+    """共享图上的 ``/.harness`` 路由：每次调用都从当前 RunContext 重新绑定。
 
-    编译图可以安全共享 ``default_backend``，但 Skill 和 ``/.harness/history``
-    必须以当前 RunContext 为边界。RunContext 缺失或没有 Skill identity 时
-    直接拒绝 Skill 读取，避免共享图闭包捕获构图期旧 Registry。
+    deepagents 0.7 不再接受 backend factory，因此这个对象本身必须是已初始化
+    的 backend 实例。Skill catalog、历史归档和计划可写性仍不能在构图期冻结。
     """
 
-    def backend_for_run(runtime: Any) -> CompositeBackend:
-        """在工具执行边界创建仅绑定当前 execution 的虚拟挂载。"""
-        context = require_run_context(runtime)
+    def __init__(
+        self,
+        *,
+        thread_persistence: "ThreadPersistence | None" = None,
+    ) -> None:
+        """只保存共享的持久化读取器；thread/Skill 身份在每次调用时解析。"""
+        self._thread_persistence = thread_persistence
+
+    def _current(self) -> HarnessVirtualBackend:
+        """按当前 LangGraph runtime 构造仅绑定这一次 execution 的虚拟后端。"""
+        context = require_run_context(get_runtime())
         snapshot = context.context_snapshot
         # Managed child 的公开 thread_id 仍用于 provenance，但其私有历史
         # scope 必须跟根图 checkpoint 使用同一个 execution identity；否则
         # child 可以通过 /.harness/history 读取父 Thread 的 artifact。
         virtual_thread_id = context.checkpoint_thread_id or context.thread_id
-        return mount_harness_virtual_files(
-            default_backend,
+        return HarnessVirtualBackend(
             registry=context.skill_registry,
             thread_id=virtual_thread_id,
-            thread_persistence=thread_persistence,
+            thread_persistence=self._thread_persistence,
             expected_snapshot_id=(
                 snapshot.skill_snapshot_id if snapshot is not None else None
             ),
@@ -347,4 +350,95 @@ def run_scoped_virtual_backend_factory(
             diagnostic_log=context.diagnostic_log,
         )
 
-    return backend_for_run
+    def read(self, file_path: str, offset: int = 0, limit: int = 2_000) -> ReadResult:
+        """同步读取当前 Run 绑定的虚拟文件。"""
+        return self._current().read(file_path, offset=offset, limit=limit)
+
+    async def aread(self, file_path: str, offset: int = 0, limit: int = 2_000) -> ReadResult:
+        """异步读取当前 Run 绑定的虚拟文件。"""
+        return await self._current().aread(file_path, offset=offset, limit=limit)
+
+    def ls(self, path: str) -> LsResult:
+        """拒绝列举虚拟命名空间。"""
+        return self._current().ls(path)
+
+    async def als(self, path: str) -> LsResult:
+        """异步列举入口保持与同步拒绝一致。"""
+        return await self._current().als(path)
+
+    def glob(self, pattern: str, path: str | None = None) -> GlobResult:
+        """虚拟命名空间不支持 glob 搜索。"""
+        return self._current().glob(pattern, path)
+
+    async def aglob(self, pattern: str, path: str | None = None) -> GlobResult:
+        """异步搜索入口保持与同步行为一致。"""
+        return await self._current().aglob(pattern, path)
+
+    def grep(self, pattern: str, path: str | None = None, glob: str | None = None) -> GrepResult:
+        """虚拟命名空间不支持全文检索。"""
+        return self._current().grep(pattern, path, glob)
+
+    async def agrep(
+        self, pattern: str, path: str | None = None, glob: str | None = None
+    ) -> GrepResult:
+        """异步全文检索入口保持与同步行为一致。"""
+        return await self._current().agrep(pattern, path, glob)
+
+    def write(self, file_path: str, content: str) -> WriteResult:
+        """按当前 Run 的计划约束写入会话计划文件。"""
+        return self._current().write(file_path, content)
+
+    async def awrite(self, file_path: str, content: str) -> WriteResult:
+        """异步写入入口保持与同步行为一致。"""
+        return await self._current().awrite(file_path, content)
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> EditResult:
+        """按当前 Run 的计划约束编辑会话计划文件。"""
+        return self._current().edit(file_path, old_string, new_string, replace_all=replace_all)
+
+    async def aedit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> EditResult:
+        """异步编辑入口保持与同步行为一致。"""
+        return await self._current().aedit(
+            file_path, old_string, new_string, replace_all=replace_all
+        )
+
+    def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        """拒绝从虚拟后端执行命令。"""
+        return self._current().execute(command, timeout=timeout)
+
+    async def aexecute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        """异步命令入口保持与同步拒绝一致。"""
+        return await self._current().aexecute(command, timeout=timeout)
+
+
+def mount_run_scoped_virtual_files(
+    default_backend: "BackendProtocol",
+    *,
+    thread_persistence: "ThreadPersistence | None" = None,
+) -> CompositeBackend:
+    """挂载按当前 RunContext 解析的虚拟后端，返回可传入 deepagents 的实例。
+
+    编译图可以安全共享 ``default_backend``，但 Skill 和 ``/.harness/history``
+    必须以当前 RunContext 为边界。RunContext 缺失或没有 Skill identity 时
+    直接拒绝 Skill 读取，避免共享图闭包捕获构图期旧 Registry。
+    """
+    return CompositeBackend(
+        default=default_backend,
+        routes={
+            f"{VIRTUAL_ROOT}/": RunScopedHarnessVirtualBackend(
+                thread_persistence=thread_persistence,
+            )
+        },
+    )

@@ -7,7 +7,7 @@ import { CatalogFeature, CommandFeature, formatMcpStatusNotice, GoalFeature, Int
 import type { AgentGateway, Clock, IdGenerator, IntentOutcome, InteractiveConfirmation, InteractiveConnectionState, InteractiveController, InteractiveControllerOptions, InteractiveIntent, InteractiveSnapshot, LoadableCatalog, Scheduler } from "./ports"
 import { createFallbackNoopGateway } from "./ports"
 import { cryptoIdGenerator, systemClock, systemScheduler } from "../infrastructure"
-import type { InteractiveRuntime } from "./runtime"
+import { DEFAULT_APPROVAL_MODE, type InteractiveRuntime } from "./runtime"
 import { appendNotice, clearThread, createInitialState, finishContextCompaction, leaveChildTimeline, openChildTimeline, setWorkMode, startContextCompaction, type InteractiveState } from "./state"
 import { scopeTimeline } from "../presentation-shared/timeline-scope"
 import { resolveMentions } from "../workspace/mention-resolver"
@@ -61,7 +61,7 @@ export class InteractiveControllerImpl implements InteractiveController {
   }
   constructor(options: InteractiveControllerOptions) {
     this.gateway = options.gateway ?? options.agent ?? createFallbackNoopGateway()
-    const defaultRuntime: InteractiveRuntime = { workspace: "", cliVersion: "0.1.0", modelConfigured: false, executionMode: "local", approvalMode: "default", capabilities: builtinCommandCapabilities }
+    const defaultRuntime: InteractiveRuntime = { workspace: "", cliVersion: "0.1.0", modelConfigured: false, executionMode: "local", approvalMode: DEFAULT_APPROVAL_MODE, capabilities: builtinCommandCapabilities }
     const rawRuntime = options.baseRuntime ?? options.runtime ?? defaultRuntime
     this.baseRuntime = { ...defaultRuntime, ...rawRuntime, capabilities: rawRuntime.capabilities ?? builtinCommandCapabilities }
     this.commandFeature = new CommandFeature(

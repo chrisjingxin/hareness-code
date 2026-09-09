@@ -61,6 +61,45 @@ def test_create_harness_agent_returns_compiled_graph():
     assert hasattr(agent, "ainvoke")
 
 
+def test_shared_engine_with_skills_builds_without_backend_factory(tmp_path: Path) -> None:
+    """deepagents 0.7 拒绝 backend factory；共享图必须在构图时传入实例。"""
+    from langgraph.checkpoint.memory import MemorySaver
+
+    from harness_agent.policy.capability_policy import (
+        BUILTIN_TOOL_NAMES,
+        resolve_effective_capability_view,
+    )
+    from harness_agent.runtime.agent import create_harness_agent
+    from harness_agent.runtime.agent_catalog import EffectiveExecutionPolicy
+    from harness_agent.runtime.agent_execution import AgentExecutionRegistry
+
+    policy = EffectiveExecutionPolicy(
+        policy_ids=("main",),
+        tools=None,
+        mcp_tools=None,
+        skills=None,
+        filesystem_read=None,
+        filesystem_write=None,
+        shell=None,
+        network=None,
+        isolation="local",
+        approval_mode="default",
+    )
+    view = resolve_effective_capability_view(policy, available_tools=BUILTIN_TOOL_NAMES)
+    agent = create_harness_agent(
+        model=_make_fake_model(),
+        cwd=str(tmp_path),
+        checkpointer=MemorySaver(),
+        enable_skills=True,
+        enable_memory=False,
+        enable_ask_user=False,
+        shared_engine=True,
+        capability_view=view,
+        execution_registry=AgentExecutionRegistry(),
+    )
+    assert hasattr(agent, "ainvoke")
+
+
 def test_default_tool_schema_exposes_only_canonical_snapshot_file_mutations():
     """静态 schema/指纹与运行时 contract 共用同一套 Snapshot 文件参数。"""
     from harness_agent.runtime.agent import default_tool_schemas

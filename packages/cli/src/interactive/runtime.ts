@@ -11,6 +11,9 @@ export type InteractiveApprovalMode = "plan" | "default" | "auto-edit" | "auto" 
 /** Shift+Tab 循环切换顺序，与 Python approval_mode.MODE_CYCLE 对齐。 */
 export const APPROVAL_MODE_CYCLE: readonly InteractiveApprovalMode[] = ["plan", "default", "auto-edit", "auto", "yolo"]
 
+/** 未从服务端拿到配置前的产品默认审批模式，与 Python DEFAULT_APPROVAL_MODE 对齐。 */
+export const DEFAULT_APPROVAL_MODE: InteractiveApprovalMode = "auto"
+
 /** Git 工作区状态：探测结果只有这四种稳定形态，未知/失败统一为 unavailable。 */
 export type GitWorkspaceState =
   | { kind: "branch"; branch: string; root: string }

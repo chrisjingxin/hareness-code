@@ -17,6 +17,7 @@ from harness_agent.runtime.managed_agent_executor import (
     ManagedAgentResult,
     ManagedAgentRequest,
     ManagedChildObserver,
+    _restore_failed_attempt,
     acquire_pooled_agent_runtime,
 )
 from harness_agent.runtime.model_output_guard import MalformedToolCallError
@@ -352,6 +353,37 @@ async def test_executor_retries_malformed_model_output_and_discards_attempt_stat
     assert failed["error_code"] == "MALFORMED_TOOL_CALL"
     assert failed["retryable"] is True
     assert [event for _, event, _ in log.records].count("model.retry_scheduled") == 1
+
+
+def test_malformed_retry_only_preserves_tools_started_in_failed_attempt() -> None:
+    """历史 Tool 不能让无关的畸形 attempt 绕过状态回滚。"""
+    session = StreamSession(run_id="run")
+    session.started_tool_ids.add("existing-tool")
+    snapshot = session.snapshot()
+    session.content_parts.append("uncommitted")
+
+    _restore_failed_attempt(
+        session,
+        snapshot,
+        MalformedToolCallError("provider leaked raw tool payload"),
+    )
+
+    assert session.content_parts == []
+
+
+def test_malformed_retry_preserves_tool_started_in_failed_attempt() -> None:
+    """已向宿主发布的新 Tool start 必须保留，以便后续取消结果完成关联。"""
+    session = StreamSession(run_id="run")
+    snapshot = session.snapshot()
+    session.started_tool_ids.add("new-tool")
+
+    _restore_failed_attempt(
+        session,
+        snapshot,
+        MalformedToolCallError("provider leaked raw tool payload"),
+    )
+
+    assert session.started_tool_ids == {"new-tool"}
 
 
 @pytest.mark.asyncio

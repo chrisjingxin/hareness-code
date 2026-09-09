@@ -582,7 +582,7 @@ class ManagedAgentExecutor:
                 session.restore(attempt_snapshot)
                 raise
             except ExecutionStreamError as exc:
-                session.restore(attempt_snapshot)
+                _restore_failed_attempt(session, attempt_snapshot, exc)
                 _log_model_failure(
                     request,
                     model_round,
@@ -610,7 +610,7 @@ class ManagedAgentExecutor:
                     retryable=exc.code == "PROVIDER_OUTPUT_INTERRUPTED",
                 ) from exc
             except Exception as exc:  # noqa: BLE001 - retry 边界需要判定任何错误
-                session.restore(attempt_snapshot)
+                _restore_failed_attempt(session, attempt_snapshot, exc)
                 _log_model_failure(
                     request,
                     model_round,
@@ -703,6 +703,23 @@ class ManagedAgentExecutor:
 
 def _duration_ms(clock: Callable[[], float], started_at: float) -> int:
     return max(0, round((clock() - started_at) * 1000))
+
+
+def _restore_failed_attempt(
+    session: StreamSession,
+    snapshot: Mapping[str, object],
+    error: BaseException,
+) -> None:
+    """回滚失败 attempt；保留 DeepAgents 重试时必须补齐的已发布 Tool 关联。"""
+    started_before = snapshot.get("started_tool_ids")
+    started_in_attempt = (
+        session.started_tool_ids - started_before
+        if isinstance(started_before, set)
+        else set()
+    )
+    if _error_code(error) == "MALFORMED_TOOL_CALL" and started_in_attempt:
+        return
+    session.restore(snapshot)
 
 
 def _error_code(error: BaseException) -> str:

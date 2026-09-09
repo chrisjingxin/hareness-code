@@ -1198,15 +1198,18 @@ api_key_env = "HARNESS_PHASE1_FAKE_KEY"
                 "method": "run.start",
                 "params": {
                     "mode": "build",
-                    "message": raw_invocation,
+                    "input": {
+                        "kind": "user",
+                        "message": raw_invocation,
+                        "requested_skill": {
+                            "id": command["requested_skill_id"],
+                            "args": "创建登录功能",
+                            "raw_invocation": raw_invocation,
+                            "command_name": "za38-sdd",
+                        },
+                    },
                     "thread_id": "phase1-thread",
                     "run_id": "phase1-run",
-                    "requested_skill": {
-                        "id": command["requested_skill_id"],
-                        "args": "创建登录功能",
-                        "raw_invocation": raw_invocation,
-                        "command_name": "za38-sdd",
-                    },
                 },
                 "id": "phase1-run-start",
             }
@@ -1284,15 +1287,18 @@ api_key_env = "HARNESS_PHASE1_FAKE_KEY"
                 "method": "run.start",
                 "params": {
                     "mode": "build",
-                    "message": "/help dangerous-goal",
+                    "input": {
+                        "kind": "user",
+                        "message": "/help dangerous-goal",
+                        "requested_skill": {
+                            "id": command["requested_skill_id"],
+                            "args": "dangerous-goal",
+                            "raw_invocation": "/help dangerous-goal",
+                            "command_name": "help",
+                        },
+                    },
                     "thread_id": "phase1-mismatch-thread",
                     "run_id": "phase1-mismatch-run",
-                    "requested_skill": {
-                        "id": command["requested_skill_id"],
-                        "args": "dangerous-goal",
-                        "raw_invocation": "/help dangerous-goal",
-                        "command_name": "help",
-                    },
                 },
                 "id": "phase1-mismatch-start",
             }
@@ -1368,15 +1374,18 @@ async def test_old_minor_rejects_plugin_command_before_emitting_v37_provenance(
                 "method": "run.start",
                 "params": {
                     "mode": "build",
-                    "message": "/za38-sdd",
+                    "input": {
+                        "kind": "user",
+                        "message": "/za38-sdd",
+                        "requested_skill": {
+                            "id": command["requested_skill_id"],
+                            "args": "",
+                            "raw_invocation": "/za38-sdd",
+                            "command_name": "za38-sdd",
+                        },
+                    },
                     "thread_id": "old-thread",
                     "run_id": "old-run",
-                    "requested_skill": {
-                        "id": command["requested_skill_id"],
-                        "args": "",
-                        "raw_invocation": "/za38-sdd",
-                        "command_name": "za38-sdd",
-                    },
                 },
                 "id": "old-run-start",
             }
@@ -1395,7 +1404,7 @@ async def test_old_minor_rejects_plugin_command_before_emitting_v37_provenance(
 def test_host_accepts_cli_resolved_command_name_without_builtin_table() -> None:
     """Host 只验证 CLI 的单一解析结果，不复制未来 builtin/alias 规则。"""
     from harness_agent.host.agent_host import _validate_command_invocation
-    from harness_agent.host.run_coordinator import RequestedSkill, StartRun
+    from harness_agent.host.run_coordinator import RequestedSkill, StartRun, UserRunInput
 
     command_id = "plugin/local/future/command/preview"
 
@@ -1422,9 +1431,8 @@ def test_host_accepts_cli_resolved_command_name_without_builtin_table() -> None:
     command = StartRun(
         thread_id="future-command-thread",
         run_id="future-command-run",
-        message=raw,
         mode="build",
-        requested_skill=requested,
+        input=UserRunInput(message=raw, requested_skill=requested),
     )
 
     record = SnapshotRegistry().resolve(command_id)
@@ -1456,7 +1464,7 @@ def test_host_exact_command_binding_matches_cli_resolution(
 ) -> None:
     """Host 只接受 CLI 已选中的 exact name，不根据 record 形状推断候选。"""
     from harness_agent.host.agent_host import _validate_command_invocation
-    from harness_agent.host.run_coordinator import RequestedSkill, StartRun
+    from harness_agent.host.run_coordinator import RequestedSkill, StartRun, UserRunInput
 
     command_id = "plugin/local/ZA38/command/za38-sdd"
     raw = f"/{raw_name} dangerous-goal"
@@ -1464,9 +1472,8 @@ def test_host_exact_command_binding_matches_cli_resolution(
     command = StartRun(
         thread_id="record-binding-thread",
         run_id="record-binding-run",
-        message=raw,
         mode="build",
-        requested_skill=requested,
+        input=UserRunInput(message=raw, requested_skill=requested),
     )
     record = SimpleNamespace(
         skill_id=command_id,
@@ -1496,7 +1503,7 @@ def test_host_exact_command_binding_matches_cli_resolution(
 def test_host_rejects_unselected_plugin_natural_name_when_cli_binding_uses_fallback() -> None:
     """Host 必须使用 CLI 的 exact binding，不能把未选中的自然名当作已解析命令。"""
     from harness_agent.host.agent_host import _validate_command_invocation
-    from harness_agent.host.run_coordinator import RequestedSkill, StartRun
+    from harness_agent.host.run_coordinator import RequestedSkill, StartRun, UserRunInput
 
     command_id = "plugin/local/bad/command/help"
     record = SimpleNamespace(
@@ -1510,13 +1517,15 @@ def test_host_rejects_unselected_plugin_natural_name_when_cli_binding_uses_fallb
     rejected = StartRun(
         thread_id="exact-command-binding-thread",
         run_id="exact-command-binding-rejected",
-        message=rejected_raw,
         mode="build",
-        requested_skill=RequestedSkill(
-            command_id,
-            "dangerous-goal",
-            rejected_raw,
-            "help",
+        input=UserRunInput(
+            message=rejected_raw,
+            requested_skill=RequestedSkill(
+                command_id,
+                "dangerous-goal",
+                rejected_raw,
+                "help",
+            ),
         ),
     )
 
@@ -1532,12 +1541,14 @@ def test_host_rejects_unselected_plugin_natural_name_when_cli_binding_uses_fallb
     accepted = replace(
         rejected,
         run_id="exact-command-binding-accepted",
-        message=accepted_raw,
-        requested_skill=RequestedSkill(
-            command_id,
-            "dangerous-goal",
-            accepted_raw,
-            "bad.help",
+        input=UserRunInput(
+            message=accepted_raw,
+            requested_skill=RequestedSkill(
+                command_id,
+                "dangerous-goal",
+                accepted_raw,
+                "bad.help",
+            ),
         ),
     )
     _validate_command_invocation(
@@ -1552,7 +1563,7 @@ def test_host_rejects_unselected_plugin_natural_name_when_cli_binding_uses_fallb
 async def test_host_uses_immutable_cli_fallback_binding_for_plugin_help() -> None:
     """同一 snapshot 的 /bad.help 可运行，未被 CLI 选中的 /help 必须拒绝。"""
     from harness_agent.host.agent_host import AgentHost, _validate_command_invocation
-    from harness_agent.host.run_coordinator import RequestedSkill, StartRun
+    from harness_agent.host.run_coordinator import RequestedSkill, StartRun, UserRunInput
 
     command_id = "plugin/local/bad/command/help"
 
@@ -1599,13 +1610,15 @@ async def test_host_uses_immutable_cli_fallback_binding_for_plugin_help() -> Non
         accepted = StartRun(
             thread_id="binding-help-thread",
             run_id="binding-help-run",
-            message=accepted_raw,
             mode="build",
-            requested_skill=RequestedSkill(
-                command_id,
-                "dangerous-goal",
-                accepted_raw,
-                "bad.help",
+            input=UserRunInput(
+                message=accepted_raw,
+                requested_skill=RequestedSkill(
+                    command_id,
+                    "dangerous-goal",
+                    accepted_raw,
+                    "bad.help",
+                ),
             ),
         )
         _validate_command_invocation(
@@ -1619,12 +1632,14 @@ async def test_host_uses_immutable_cli_fallback_binding_for_plugin_help() -> Non
         rejected = replace(
             accepted,
             run_id="binding-help-rejected",
-            message=rejected_raw,
-            requested_skill=RequestedSkill(
-                command_id,
-                "dangerous-goal",
-                rejected_raw,
-                "help",
+            input=UserRunInput(
+                message=rejected_raw,
+                requested_skill=RequestedSkill(
+                    command_id,
+                    "dangerous-goal",
+                    rejected_raw,
+                    "help",
+                ),
             ),
         )
         with pytest.raises(PluginSkillError, match="COMMAND_INVOCATION_IDENTITY_MISMATCH"):
@@ -2448,7 +2463,7 @@ async def test_host_injects_qwen_context_once_and_gates_same_child_for_plugin_ag
     from langchain_core.messages import AIMessage
 
     from harness_agent.host.agent_host import AgentHost
-    from harness_agent.host.run_coordinator import StartRun
+    from harness_agent.host.run_coordinator import StartRun, UserRunInput
     from harness_agent.runtime.agent_delegation import AgentDelegationError, DelegateAgent
     from harness_agent.runtime.execution_binding import ExecutionRef
     from harness_agent.runtime.run_context import RunCancellationToken
@@ -2666,7 +2681,10 @@ async def test_host_injects_qwen_context_once_and_gates_same_child_for_plugin_ag
         enable_ask_user=False,
         runtime_profile=SimpleNamespace(profile_key="main-profile"),
     )
-    resolved_binding = SimpleNamespace(bind_run=lambda **_kwargs: object())
+    resolved_binding = SimpleNamespace(
+        safe_primary=SimpleNamespace(profile_id="fast"),
+        bind_run=lambda **_kwargs: object(),
+    )
 
     async def resolve_binding(*_args: object, **_kwargs: object) -> object:
         return resolved_binding
@@ -2687,7 +2705,7 @@ async def test_host_injects_qwen_context_once_and_gates_same_child_for_plugin_ag
                 mode="build",
                 thread_id="host-context-main",
                 run_id="host-context-main-run",
-                message="只读检查",
+                input=UserRunInput(message="只读检查"),
             ),
             server._thread_persistence,
         )

@@ -58,7 +58,7 @@ def create_rubric_middleware(
     max_iterations: int = 3,
     system_prompt: str | None = None,
 ) -> RubricMiddleware:
-    """实例化原生 0.6.8 RubricMiddleware；默认注入中文评委提示词。"""
+    """实例化原生 0.7.3 RubricMiddleware；默认注入中文评委提示词。"""
     if not isinstance(max_iterations, int) or isinstance(max_iterations, bool):
         raise GoalStoreError("GOAL_MAX_ITERATIONS_INVALID")
     if not 1 <= max_iterations <= 20:
@@ -242,4 +242,3 @@ def _best_effort_criteria(
         gap = item.get("gap")
         parsed.append((name, passed, gap if isinstance(gap, str) and gap else None))
     return tuple(parsed)
-

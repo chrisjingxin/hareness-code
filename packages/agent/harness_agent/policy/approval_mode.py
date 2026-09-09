@@ -15,8 +15,11 @@ _dangerous_rules_stash: list = []
 ApprovalMode: TypeAlias = Literal["plan", "default", "auto-edit", "auto", "yolo"]
 """面向配置、Agent 和 TUI 的规范审批模式。"""
 
-DEFAULT_APPROVAL_MODE: ApprovalMode = "default"
-"""未配置或无法识别时使用的保守默认审批模式。"""
+DEFAULT_APPROVAL_MODE: ApprovalMode = "auto"
+"""未配置审批模式时使用的产品默认值。"""
+
+SAFE_APPROVAL_MODE: ApprovalMode = "default"
+"""无法识别的配置值或未受信目录降级时使用的保守确认模式。"""
 
 _CANONICAL_MODES = frozenset({"plan", "default", "auto-edit", "auto", "yolo"})
 _LEGACY_MODE_ALIASES = {"ask": "default"}
@@ -49,8 +52,8 @@ def parse_approval_mode(value: object | None) -> tuple[ApprovalMode, str | None]
     # 预留模式：bubble 当前未启用，降级为 default 并输出警告
     if normalized in _RESERVED_MODES:
         logger.warning("审批模式 %s 已预留但尚未启用，降级为 default", normalized)
-        return DEFAULT_APPROVAL_MODE, f"审批模式 {normalized} 尚未启用，已降级为默认确认模式。"
-    return DEFAULT_APPROVAL_MODE, "审批模式无效，已安全降级为默认确认模式。"
+        return SAFE_APPROVAL_MODE, f"审批模式 {normalized} 尚未启用，已降级为默认确认模式。"
+    return SAFE_APPROVAL_MODE, "审批模式无效，已安全降级为默认确认模式。"
 
 
 def on_mode_entered(mode: str, current_rules: list) -> list:
@@ -91,7 +94,7 @@ def next_mode(current: ApprovalMode, project_dir: str | None = None) -> Approval
         idx = MODE_CYCLE.index(current)
         target = MODE_CYCLE[(idx + 1) % len(MODE_CYCLE)]
     except ValueError:
-        return DEFAULT_APPROVAL_MODE
+        return SAFE_APPROVAL_MODE
 
     # 受信目录门禁：未受信目录不允许切换到 auto/yolo
     if project_dir and target in ("auto", "yolo"):
@@ -99,6 +102,6 @@ def next_mode(current: ApprovalMode, project_dir: str | None = None) -> Approval
         restricted, _reason = is_restricted_mode_for_untrusted(target, project_dir)
         if restricted:
             logger.warning("未受信目录，权限模式锁定为 default")
-            return DEFAULT_APPROVAL_MODE
+            return SAFE_APPROVAL_MODE
 
     return target

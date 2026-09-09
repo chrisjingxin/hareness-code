@@ -213,15 +213,25 @@ async def test_virtual_skill_reads_are_isolated_between_old_and_new_snapshots(
     assert deleted_skill.error
 
 
-async def test_run_scoped_virtual_backend_isolates_shared_graph_history(tmp_path: Path):
+def _bind_run_runtime(monkeypatch: pytest.MonkeyPatch, context: object) -> None:
+    """把当前测试的 RunContext 接到虚拟后端的 get_runtime 读取点。"""
+    monkeypatch.setattr(
+        "harness_agent.threads.virtual_files.get_runtime",
+        lambda: SimpleNamespace(context=context),
+    )
+
+
+async def test_run_scoped_virtual_backend_isolates_shared_graph_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """共享图每次工具调用都必须按 RunContext 重新绑定历史归档。"""
-    from deepagents.backends import LocalShellBackend
+    from deepagents.backends import CompositeBackend, LocalShellBackend
 
     from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
     from harness_agent.runtime.run_context import RunContext
     from harness_agent.extensions.skills import SkillRegistry
     from harness_agent.threads.thread_persistence import CommitContextRewrite, ContextArtifactDraft, ThreadPersistence
-    from harness_agent.threads.virtual_files import run_scoped_virtual_backend_factory
+    from harness_agent.threads.virtual_files import mount_run_scoped_virtual_files
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -260,35 +270,36 @@ async def test_run_scoped_virtual_backend_isolates_shared_graph_history(tmp_path
             skill_registry=registry,
         )
 
-    factory = run_scoped_virtual_backend_factory(
+    backend = mount_run_scoped_virtual_files(
         LocalShellBackend(root_dir=workspace, virtual_mode=True),
         thread_persistence=store,
     )
-    first = factory(SimpleNamespace(context=context_for("thread-a")))
-    second = factory(SimpleNamespace(context=context_for("thread-b")))
-    child = factory(
-        SimpleNamespace(
-            context=context_for(
-                "thread-a",
-                checkpoint_thread_id="managed-execution-child",
-            )
-        )
-    )
+    assert isinstance(backend, CompositeBackend)
+    assert not callable(backend)
 
-    assert (await first.aread(f"/.harness/history/{artifact.artifact_id}.md")).file_data["content"] == "only thread a"
-    assert (await second.aread(f"/.harness/history/{artifact.artifact_id}.md")).error
-    assert (await child.aread(f"/.harness/history/{artifact.artifact_id}.md")).error
+    history_path = f"/.harness/history/{artifact.artifact_id}.md"
+    _bind_run_runtime(monkeypatch, context_for("thread-a"))
+    assert (await backend.aread(history_path)).file_data["content"] == "only thread a"
+    _bind_run_runtime(monkeypatch, context_for("thread-b"))
+    assert (await backend.aread(history_path)).error
+    _bind_run_runtime(
+        monkeypatch,
+        context_for("thread-a", checkpoint_thread_id="managed-execution-child"),
+    )
+    assert (await backend.aread(history_path)).error
     await store.close()
 
 
-async def test_run_scoped_virtual_backend_requires_the_run_skill_snapshot(tmp_path: Path):
+async def test_run_scoped_virtual_backend_requires_the_run_skill_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """共享图的虚拟 Skill 文件只能读取 RunContext 绑定的 catalog identity。"""
     from deepagents.backends import LocalShellBackend
 
     from harness_agent.threads.context_lifecycle import ContextLifecycle
     from harness_agent.runtime.run_context import RunContext, RunContextError
     from harness_agent.extensions.skills import SkillRegistry
-    from harness_agent.threads.virtual_files import run_scoped_virtual_backend_factory
+    from harness_agent.threads.virtual_files import mount_run_scoped_virtual_files
 
     workspace = tmp_path / "workspace"
     _write_skill(workspace / ".harness" / "skills")
@@ -326,10 +337,10 @@ async def test_run_scoped_virtual_backend_requires_the_run_skill_snapshot(tmp_pa
         approval_mode="yolo",
         skill_registry=registry,
     )
-    factory = run_scoped_virtual_backend_factory(
+    backend = mount_run_scoped_virtual_files(
         LocalShellBackend(root_dir=workspace, virtual_mode=True),
     )
-    backend = factory(SimpleNamespace(context=context))
+    _bind_run_runtime(monkeypatch, context)
     result = await backend.aread("/.harness/skills/project/review/SKILL.md")
     assert result.file_data and "第一行" in result.file_data["content"]
 
@@ -357,7 +368,7 @@ def test_run_scoped_virtual_backend_observes_runtime_plan_activation(
     from harness_agent.extensions.skills import SkillRegistry
     from harness_agent.runtime.run_context import RunContext
     from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
-    from harness_agent.threads.virtual_files import run_scoped_virtual_backend_factory
+    from harness_agent.threads.virtual_files import mount_run_scoped_virtual_files
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -385,14 +396,14 @@ def test_run_scoped_virtual_backend_observes_runtime_plan_activation(
         "harness_agent.threads.virtual_files.write_plan_markdown",
         lambda thread_id, content, _home=None: written.append((thread_id, content)),
     )
-    factory = run_scoped_virtual_backend_factory(
+    backend = mount_run_scoped_virtual_files(
         LocalShellBackend(root_dir=workspace, virtual_mode=True)
     )
-    runtime = SimpleNamespace(context=context)
+    _bind_run_runtime(monkeypatch, context)
 
-    before = factory(runtime).write("/.harness/plan.md", "# before")
+    before = backend.write("/.harness/plan.md", "# before")
     context.plan_constraint.activate()
-    after = factory(runtime).write("/.harness/plan.md", "# after")
+    after = backend.write("/.harness/plan.md", "# after")
 
     assert before.error == "计划约束未开启，不能写入计划文件"
     assert after.error is None
