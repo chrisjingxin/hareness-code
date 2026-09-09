@@ -18,6 +18,8 @@ import {
   type InitializeParams,
   type InteractionMap,
   type InteractionMethod,
+  type NotificationMap,
+  type NotificationName,
   type PluginConsentRequest,
   type PluginConsentResponse,
   type JsonRpcMessage,
@@ -49,6 +51,7 @@ type ContractEntry = { params?: string; result?: string; payload?: string; min_m
 type ContractMetadata = {
   operations: Record<string, ContractEntry>
   events: Record<string, ContractEntry>
+  notifications?: Record<string, ContractEntry>
   interactions: Record<string, ContractEntry>
 }
 type ContractValidationError = { instancePath: string; message?: string; keyword: string }
@@ -101,6 +104,17 @@ export function validateInteractionResult<M extends InteractionMethod>(
 ): InteractionMap[M]["result"] {
   validateRef(entry(metadata.interactions, method).result!, value, `${method} result`)
   return value as InteractionMap[M]["result"]
+}
+
+/** 校验非 Event 的 JSON-RPC 通知参数。 */
+export function validateNotificationParams<M extends NotificationName>(
+  method: M,
+  value: unknown,
+): NotificationMap[M]["params"] {
+  const contract = (metadata.notifications ?? {})[method]
+  if (!contract?.params) throw new Error(`未知 notification：${method}`)
+  validateRef(contract.params, value, `${method} params`)
+  return value as NotificationMap[M]["params"]
 }
 
 /** 校验业务错误中供表现层分支的稳定 data。 */

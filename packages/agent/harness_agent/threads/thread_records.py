@@ -23,6 +23,7 @@ from harness_agent.threads.context_projection import (
 from harness_agent.threads.runtime_state import RuntimeStateSnapshot
 
 _MAX_PREVIEW_CHARS = 160
+_TITLE_MAX_CODEPOINTS = 20
 _MAX_INLINE_TOOL_BYTES = 64 * 1024
 _TRANSCRIPT_KINDS = ("user", "assistant", "tool", "context")
 
@@ -41,6 +42,7 @@ class ThreadSummary:
     first_message: str
     latest_message: str
     message_count: int
+    title: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,8 +226,28 @@ def _preview(value: str) -> str:
     return compact[:_MAX_PREVIEW_CHARS] or "(空消息)"
 
 
+def normalize_thread_title(raw: str) -> str:
+    """把用户或模型给出的标题收成可存储的短名；空结果视为无效。"""
+    import unicodedata
+
+    text = unicodedata.normalize("NFC", raw)
+    text = " ".join(text.split())
+    if len(text) >= 2:
+        pairs = (('"', '"'), ("'", "'"), ("“", "”"), ("‘", "’"))
+        for left, right in pairs:
+            if text.startswith(left) and text.endswith(right):
+                text = text[1:-1].strip()
+                break
+    if not text:
+        raise ThreadPersistenceError("TITLE_EMPTY")
+    if len(text) > _TITLE_MAX_CODEPOINTS:
+        text = text[:_TITLE_MAX_CODEPOINTS]
+    return text
+
+
 def _summary(row: Mapping[str, Any]) -> ThreadSummary:
     """将 SQLite 行转换为不携带 project 路径的线程摘要。"""
+    raw_title = row["title"] if "title" in row.keys() else None
     return ThreadSummary(
         thread_id=str(row["thread_id"]),
         created_at_ms=int(row["created_at_ms"]),
@@ -233,6 +255,7 @@ def _summary(row: Mapping[str, Any]) -> ThreadSummary:
         first_message=str(row["first_message"]),
         latest_message=str(row["latest_message"]),
         message_count=int(row["message_count"]),
+        title=str(raw_title) if raw_title is not None else None,
     )
 
 

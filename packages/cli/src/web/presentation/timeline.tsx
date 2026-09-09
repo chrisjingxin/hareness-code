@@ -7,6 +7,9 @@ import {
   Brain,
   Check,
   ChevronDown,
+  CircleCheck,
+  CircleX,
+  ClipboardCheck,
   Code2,
   Copy,
   FilePenLine,
@@ -36,7 +39,7 @@ import {
   type ReactElement,
   type ReactNode,
 } from "react"
-import { activityLabel, interactionStatusLabel, toolStatusLabel } from "../../presentation-shared/timeline-presenter"
+import { activityLabel, goalEvaluationTitle, interactionStatusLabel, toolStatusLabel } from "../../presentation-shared/timeline-presenter"
 import { progressPhaseLabel } from "../../presentation-shared/timeline-presenter"
 import { childTimelineEmptyMessage } from "../../presentation-shared/child-timeline-empty"
 import { formatElapsed } from "../../presentation-shared/formatters"
@@ -71,6 +74,7 @@ import {
 import type {
   ComposeProjection,
   ConversationMessage,
+  GoalEvaluationCard,
   InteractionCard,
   ReasoningCard,
   TimelineItem,
@@ -614,24 +618,7 @@ function TimelineRowImpl({
     return <ReasoningRow reasoning={item.reasoning} />
   }
   if (item.type === "goal-evaluation") {
-    const title = item.evaluation.phase === "checking"
-      ? `验收中 · 第 ${item.evaluation.iteration} 轮`
-      : `验收 · ${item.evaluation.result ?? ""} · 第 ${item.evaluation.iteration} 轮`
-    return (
-      <div className="timeline-goal-evaluation" role="status">
-        <div className="goal-evaluation-header">{title}</div>
-        {item.evaluation.explanation ? <div className="goal-evaluation-text">{item.evaluation.explanation}</div> : null}
-        {(item.evaluation.criteria ?? []).map((criterion, index) => {
-          const label = criterion.text ? `${index + 1}. ${criterion.text}` : criterion.criterion_id
-          return (
-            <div key={criterion.criterion_id} className="goal-evaluation-criterion">
-              {criterion.passed ? "✓" : "✗"} {label}
-              {criterion.gap ? `：${criterion.gap}` : ""}
-            </div>
-          )
-        })}
-      </div>
-    )
+    return <GoalEvaluationBlock evaluation={item.evaluation} />
   }
   if (item.type === "compose-summary") {
     const stageKey = item.summary.composeScope?.stage
@@ -709,6 +696,67 @@ function ReasoningRow({ reasoning }: { reasoning: ReasoningCard }): ReactElement
 
 const TimelineRow = memo(TimelineRowImpl)
 TimelineRow.displayName = "TimelineRow"
+
+/** Goal 独立验收：状态条 + 准则清单，不伪装成 assistant 或普通工具。 */
+function GoalEvaluationBlock({ evaluation }: { evaluation: GoalEvaluationCard }): ReactElement {
+  const checking = evaluation.phase === "checking"
+  const title = goalEvaluationTitle(evaluation.phase, evaluation.iteration, evaluation.result)
+  const Icon = checking
+    ? Loader2
+    : evaluation.result === "satisfied"
+      ? CircleCheck
+      : evaluation.result === "needs_revision" || evaluation.result === "failed"
+        ? CircleX
+        : evaluation.result === "grader_error" || evaluation.result === "max_iterations_reached"
+          ? AlertTriangle
+          : ClipboardCheck
+  const criteria = evaluation.criteria ?? []
+  return (
+    <article
+      className="timeline-goal-evaluation"
+      data-phase={evaluation.phase}
+      data-result={evaluation.result ?? ""}
+      role="status"
+      aria-label={title}
+    >
+      <header className="goal-evaluation-header">
+        <Icon
+          aria-hidden="true"
+          focusable="false"
+          className={checking ? "goal-evaluation-icon spinning" : "goal-evaluation-icon"}
+        />
+        <span className="goal-evaluation-title">{title}</span>
+        {evaluation.graderProfileId ? (
+          <span className="goal-evaluation-grader">{evaluation.graderProfileId}</span>
+        ) : null}
+      </header>
+      {evaluation.explanation ? <p className="goal-evaluation-text">{evaluation.explanation}</p> : null}
+      {criteria.length > 0 ? (
+        <ol className="goal-evaluation-criteria">
+          {criteria.map((criterion, index) => {
+            const label = criterion.text ? criterion.text : criterion.criterion_id
+            return (
+              <li
+                key={criterion.criterion_id}
+                className="goal-evaluation-criterion"
+                data-passed={criterion.passed ? "true" : "false"}
+              >
+                <span className="goal-evaluation-mark" aria-hidden="true">
+                  {criterion.passed ? <Check size={14} strokeWidth={2.2} /> : <CircleX size={14} strokeWidth={2} />}
+                </span>
+                <span className="goal-evaluation-criterion-body">
+                  <span className="goal-evaluation-criterion-index">{index + 1}.</span>
+                  {label}
+                  {criterion.gap ? <span className="goal-evaluation-gap">{criterion.gap}</span> : null}
+                </span>
+              </li>
+            )
+          })}
+        </ol>
+      ) : null}
+    </article>
+  )
+}
 
 /** 流式 Assistant 消息：内容随时 in-place 更新；不 memo 才能接收每帧变更。 */
 function StreamingAssistantBubble({

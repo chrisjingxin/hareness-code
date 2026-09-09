@@ -1,7 +1,7 @@
 /** 共享 Timeline 展示语义测试：activity/tool/interaction 状态的中文文案。 */
 
 import { expect, test } from "bun:test"
-import { activityLabel, interactionStatusLabel, progressPhaseLabel, toolStatusLabel } from "../../src/presentation-shared/timeline-presenter"
+import { activityLabel, goalEvaluationResultLabel, goalEvaluationTitle, interactionStatusLabel, progressPhaseLabel, toolStatusLabel } from "../../src/presentation-shared/timeline-presenter"
 
 test("activityLabel：领域 Kind 全部映射为稳定中文标签", () => {
   const kinds = ["home", "idle", "compacting", "starting", "running", "waiting-interaction", "cancelling", "completed", "cancelled", "failed"] as const
@@ -23,6 +23,14 @@ test("toolStatusLabel：运行中/完成/失败", () => {
 test("progressPhaseLabel：只映射 Host 已观测阶段", () => {
   expect(progressPhaseLabel("preparing")).toBe("准备运行")
   expect(progressPhaseLabel("model")).toBe("等待模型响应")
+})
+
+test("goalEvaluationTitle：验收中与结果使用中文，不回显 satisfied", () => {
+  expect(goalEvaluationTitle("checking", 1)).toBe("验收中 · 第 1 轮")
+  expect(goalEvaluationTitle("result", 1, "satisfied")).toBe("验收通过 · 第 1 轮")
+  expect(goalEvaluationTitle("result", 2, "needs_revision")).toBe("验收未通过 · 第 2 轮")
+  expect(goalEvaluationResultLabel("satisfied")).toBe("通过")
+  expect(goalEvaluationResultLabel("unknown")).toBe("")
 })
 
 test("interactionStatusLabel：历史交互结果标签", () => {

@@ -107,16 +107,21 @@ function renderBlock(token: Token, key: string): ReactNode {
 
 /** list_item 单独抽出来以便把任务复选框 token 提升为可读控件。 */
 function renderListItem(item: Tokens.ListItem, key: string): ReactNode {
+  // 松散列表的 item.tokens 是 paragraph 等 block；紧凑列表则是带 nested tokens 的 text。
+  // 一律按 block 渲染，否则 paragraph 会落到 inline 的 default 分支，把 ** 与反引号当纯文本。
+  const body = item.tokens && item.tokens.length > 0
+    ? renderBlocks(item.tokens, key)
+    : item.text
   if (item.task) {
     const checked = item.checked === true
     return (
       <li key={key} className="markdown-task">
         <input type="checkbox" checked={checked} disabled readOnly aria-label={checked ? "已完成" : "未完成"} />
-        <span>{renderInline(item.tokens, key, item.text)}</span>
+        <span>{body}</span>
       </li>
     )
   }
-  return <li key={key}>{renderInline(item.tokens, key, item.text)}</li>
+  return <li key={key}>{body}</li>
 }
 
 function renderTableCell(cell: Tokens.TableCell, key: string, header: boolean): ReactNode {

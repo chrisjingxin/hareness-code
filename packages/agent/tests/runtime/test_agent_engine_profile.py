@@ -205,6 +205,11 @@ async def test_thread_persistence_upgrades_v3_runtime_profile_schema_without_los
             "ALTER TABLE harness_context_artifacts DROP COLUMN content_sha256"
         )
         connection.execute("ALTER TABLE harness_context_artifacts DROP COLUMN byte_length")
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(harness_threads)")}
+        if "title" in columns:
+            connection.execute("ALTER TABLE harness_threads DROP COLUMN title")
+        if "title_origin" in columns:
+            connection.execute("ALTER TABLE harness_threads DROP COLUMN title_origin")
         connection.execute("PRAGMA user_version=3")
         connection.commit()
     finally:

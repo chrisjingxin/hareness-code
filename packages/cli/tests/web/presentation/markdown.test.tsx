@@ -11,6 +11,28 @@ afterAll(() => unregisterTestDom())
 
 
 describe("Markdown", () => {
+  test("有序/松散列表项内的加粗和行内代码会真正渲染，不把 ** 与反引号当纯文本", () => {
+    const handle = render(
+      <Markdown
+        text={"## 实现内容与验证结果\n\n1. **可执行脚本（criterion-1）**- 脚本位于 `/wc.py`\n\n2. **核心统计函数** 提供 `count_stream`"}
+      />,
+    )
+    try {
+      const html = handle.container
+      expect(html.querySelector("h2")?.textContent).toBe("实现内容与验证结果")
+      const items = [...html.querySelectorAll("li")]
+      expect(items.length).toBe(2)
+      expect(items[0]?.querySelector("strong")?.textContent).toBe("可执行脚本（criterion-1）")
+      expect(items[0]?.querySelector("code")?.textContent).toBe("/wc.py")
+      expect(items[1]?.querySelector("strong")?.textContent).toBe("核心统计函数")
+      expect(items[1]?.querySelector("code")?.textContent).toBe("count_stream")
+      expect(html.textContent).not.toContain("**可执行脚本")
+      expect(html.textContent).not.toContain("`/wc.py`")
+    } finally {
+      handle.unmount()
+    }
+  })
+
   test("渲染 GFM 标题、强调、表格、任务列表、围栏代码、内联代码、链接", () => {
     const handle = render(
       <Markdown

@@ -4,6 +4,7 @@ import type { InteractiveController, InteractiveIntent, InteractiveResult, Inter
 import type { ToolCard } from "../../interactive/state"
 import { selectWorkItemView, type WorkItemView } from "../../interactive/selectors"
 import { filterAgents } from "../../presentation-shared/agent-catalog"
+import { threadMatchesQuery } from "../../presentation-shared/thread-title"
 import { filterCommandMenuItems } from "../../presentation-shared/command-menu-policy"
 import { answersByQuestionId } from "../../presentation-shared/interaction-policy"
 import {
@@ -103,6 +104,7 @@ export type ThreadPickerItem = {
   firstMessage: string
   latestMessage: string
   messageCount: number
+  title: string | null
 }
 
 /** 五类业务选择器共用的稳定标识。Agent 浮层只浏览，不切换当前 Agent。 */
@@ -2074,6 +2076,7 @@ function threadItems(items: readonly ThreadSummary[]): readonly ThreadPickerItem
     firstMessage: thread.first_message,
     latestMessage: thread.latest_message,
     messageCount: thread.message_count,
+    title: thread.title,
   }))
 }
 
@@ -2086,7 +2089,11 @@ function filterSkills(skills: readonly SkillMenuItem[], query: string): readonly
 function filterThreads(threads: readonly ThreadPickerItem[], query: string): readonly ThreadPickerItem[] {
   const needle = query.trim().toLowerCase()
   if (!needle) return threads
-  return threads.filter(thread => [thread.firstMessage, thread.latestMessage].some(value => value.toLowerCase().includes(needle)))
+  return threads.filter(thread => threadMatchesQuery({
+    title: thread.title,
+    first_message: thread.firstMessage,
+    latest_message: thread.latestMessage,
+  }, query))
 }
 
 function filterModels(models: readonly ModelProfile[], query: string): readonly ModelProfile[] {

@@ -60,6 +60,7 @@ async def test_thread_rpc_requires_capability_and_only_lists_current_project(tmp
         "first_message": "恢复这个 thread",
         "latest_message": "恢复这个 thread",
         "message_count": 1,
+        "title": None,
     }]
 
     await server.dispatch(_request("threads.open", {"thread_id": "thread-1"}, "open"))

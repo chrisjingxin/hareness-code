@@ -13,6 +13,7 @@ from harness_agent.protocol.generated import ContextCompactParams, EventEnvelope
 from harness_agent.protocol.runtime import (
     validate_interaction_params,
     validate_interaction_result,
+    validate_notification_params,
     validate_operation_params,
     validate_operation_result,
     validate_protocol_error_data,
@@ -452,5 +453,7 @@ def _validate(fixture: dict[str, Any]) -> None:
         validate_interaction_params(fixture["name"], fixture["value"])
     elif kind == "interaction.result":
         validate_interaction_result(fixture["name"], fixture["value"])
+    elif kind == "notification.params":
+        validate_notification_params(fixture["name"], fixture["value"])
     else:
         validate_protocol_error_data(fixture["value"])

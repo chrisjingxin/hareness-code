@@ -133,6 +133,7 @@ from harness_agent.protocol.generated import (
     ThreadsOpenParams,
     ThreadsRedoParams,
     ThreadsSideQuestionParams,
+    ThreadsSetTitleParams,
     ThreadsUndoParams,
 )
 from harness_agent.threads.git_checkpoints import GitCheckpointService
@@ -388,6 +389,9 @@ class AgentHost:
         self._agent_engine_snapshot_lock = asyncio.Lock()
         self._run_event_tasks: set[asyncio.Task[None]] = set()
         self._dispatch_tasks: set[asyncio.Task[None]] = set()
+        self._title_autogen_tasks: set[asyncio.Task[None]] = set()
+        self._title_autogen_started: set[str] = set()
+        self._title_autogen_timeout_seconds = 15.0
         # 运行工具继续使用 canonical realpath；Settings binding 另外保留用户
         # 选择的 lexical workspace path，以便 symlink 切换不能复用旧 credential。
         self._settings_workspace = (workspace or Path.cwd()).expanduser().absolute()
@@ -550,6 +554,7 @@ class AgentHost:
             METHOD["THREADS_LIST_TURNS"]: self._handle_threads_list_turns,
             METHOD["THREADS_UNDO"]: self._handle_threads_undo,
             METHOD["THREADS_REDO"]: self._handle_threads_redo,
+            METHOD["THREADS_SET_TITLE"]: self._handle_threads_set_title,
             METHOD["GOAL_INSPECT"]: self._handle_goal_inspect,
             METHOD["GOAL_REQUEST"]: self._handle_goal_request,
             METHOD["GOAL_MUTATE"]: self._handle_goal_mutate,
@@ -675,6 +680,8 @@ class AgentHost:
             await asyncio.gather(*tuple(self._run_event_tasks), return_exceptions=True)
         if self._dispatch_tasks:
             await asyncio.gather(*tuple(self._dispatch_tasks), return_exceptions=True)
+        if self._title_autogen_tasks:
+            await asyncio.gather(*tuple(self._title_autogen_tasks), return_exceptions=True)
         pending_requests = sum(
             len(connection.pending_requests) for connection in self._connections.values()
         )
@@ -1432,6 +1439,13 @@ class AgentHost:
                 "accepted": execution.accepted,
             },
         )
+        if isinstance(typed_input, UserRunInput):
+            self._schedule_thread_title_autogen(
+                thread_id=execution.ref.thread_id,
+                user_message=typed_input.message,
+                requested_profile_id=command.requested_primary_profile,
+                owner_connection_id=connection.connection_id,
+            )
         task = asyncio.create_task(
             self._fanout_run_execution(execution),
             name=f"harness-run-events-{execution.ref.run_id}",
@@ -2098,6 +2112,175 @@ class AgentHost:
         parsed = ThreadsListParams.model_validate(params)
         threads = await (await self._ensure_thread_persistence()).list_threads(parsed.limit)
         return {"threads": [_thread_summary_payload(thread) for thread in threads]}
+
+    async def _handle_threads_set_title(self, params: dict[str, Any], _id: str) -> dict[str, object]:
+        """把当前 project 的 thread 标题写成用户给定值。"""
+        self._require_threads_capability()
+        parsed = ThreadsSetTitleParams.model_validate(params)
+        persistence = await self._ensure_thread_persistence()
+        try:
+            summary = await persistence.set_user_title(parsed.thread_id, parsed.title)
+        except ThreadPersistenceError as exc:
+            code = str(exc)
+            if code == "TITLE_EMPTY":
+                raise RpcError(-32602, "TITLE_EMPTY") from exc
+            if code == "THREAD_NOT_FOUND":
+                raise RpcError(-32004, "THREAD_NOT_FOUND") from exc
+            raise
+        payload = _thread_summary_payload(summary)
+        await self._broadcast_thread_summary(
+            parsed.thread_id,
+            payload,
+            owner_connection_id=self._current_connection().connection_id,
+        )
+        return {"thread": payload}
+
+    def _schedule_thread_title_autogen(
+        self,
+        *,
+        thread_id: str,
+        user_message: str,
+        requested_profile_id: str | None,
+        owner_connection_id: str,
+    ) -> None:
+        """第一条用户消息受理后启动旁路起名；不阻塞 run.start。"""
+        if not self._thread_persistence_enabled():
+            return
+        if thread_id in self._title_autogen_started:
+            return
+        self._title_autogen_started.add(thread_id)
+        task = asyncio.create_task(
+            self._run_thread_title_autogen(
+                thread_id=thread_id,
+                user_message=user_message,
+                requested_profile_id=requested_profile_id,
+                owner_connection_id=owner_connection_id,
+            ),
+            name=f"harness-thread-title-{thread_id}",
+        )
+        self._title_autogen_tasks.add(task)
+        task.add_done_callback(self._title_autogen_tasks.discard)
+
+    async def _run_thread_title_autogen(
+        self,
+        *,
+        thread_id: str,
+        user_message: str,
+        requested_profile_id: str | None,
+        owner_connection_id: str,
+    ) -> None:
+        """一次自动起名：失败静默，成功才写入并通知。"""
+        try:
+            persistence = await self._ensure_thread_persistence()
+            opened = await persistence.open_thread(thread_id)
+            if opened.summary.message_count != 1 or opened.summary.title is not None:
+                return
+            model_settings = self._title_model_settings(requested_profile_id)
+            if model_settings is None:
+                return
+            raw = await asyncio.wait_for(
+                self._draft_thread_title(
+                    model_settings=model_settings,
+                    user_message=user_message,
+                ),
+                timeout=self._title_autogen_timeout_seconds,
+            )
+            summary = await persistence.apply_auto_title(thread_id, raw)
+            if summary is None:
+                return
+            await self._broadcast_thread_summary(
+                thread_id,
+                _thread_summary_payload(summary),
+                owner_connection_id=owner_connection_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return
+
+    def _title_model_settings(self, requested_profile_id: str | None) -> Any | None:
+        """解析这次 Run 绑定/请求的模型；配置不可用时跳过起名。"""
+        try:
+            self._load_config()
+        except Exception:
+            return None
+        if self._config is None:
+            return None
+        profile_id = requested_profile_id
+        if profile_id is None and self._config.model_catalog is not None:
+            profile_id = self._config.model_catalog.default_profile
+        try:
+            return self._config.require_model(profile_id)
+        except Exception:
+            return None
+
+    async def _draft_thread_title(self, *, model_settings: Any, user_message: str) -> str:
+        """0 工具单轮起名；不写 Transcript。"""
+        from harness_agent.extensions.providers.harness_gateway import (
+            create_openai_compatible_model,
+        )
+        from harness_agent.runtime.provider_retry import (
+            BoundedProviderRetry,
+            run_with_provider_retry,
+        )
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        provider_lease = await self._provider_client_pool.acquire(model_settings)
+        try:
+            model = create_openai_compatible_model(
+                model_settings,
+                async_client=provider_lease.value,
+            )
+            response = await run_with_provider_retry(
+                lambda: model.ainvoke(
+                    [
+                        SystemMessage(
+                            content="用对方语言起一个不超过 20 字的会话标题，只输出标题本身。"
+                        ),
+                        HumanMessage(content=user_message),
+                    ]
+                ),
+                BoundedProviderRetry(
+                    max_attempts=max(1, int(getattr(model_settings, "max_retries", 0)) + 1)
+                ),
+            )
+            content = response.content
+            return content if isinstance(content, str) else str(content)
+        finally:
+            await provider_lease.release()
+
+    async def _broadcast_thread_summary(
+        self,
+        thread_id: str,
+        payload: Mapping[str, object],
+        *,
+        owner_connection_id: str,
+    ) -> None:
+        """把已写入的标题发给 owner 和正在 watch 该 thread 的 threads.read 连接。"""
+        message = {
+            "jsonrpc": "2.0",
+            "method": METHOD["THREAD_SUMMARY"],
+            "params": dict(payload),
+        }
+        targets = [
+            connection
+            for connection in self._connections.values()
+            if not connection.closed
+            and CAPABILITY["THREADS_READ"] in connection.enabled_capabilities
+            and (
+                connection.connection_id == owner_connection_id
+                or thread_id in self._connection_watches(connection)
+            )
+        ]
+        if not targets:
+            return
+        results = await asyncio.gather(
+            *(self._send_to(connection, message) for connection in targets),
+            return_exceptions=True,
+        )
+        for connection, result in zip(targets, results, strict=True):
+            if isinstance(result, Exception) and connection is not self._owner_connection:
+                asyncio.create_task(self.close_connection(connection))
 
     async def _handle_threads_open(
         self,
@@ -5570,6 +5753,7 @@ def _thread_summary_payload(summary: Any) -> dict[str, object]:
         "first_message": summary.first_message,
         "latest_message": summary.latest_message,
         "message_count": summary.message_count,
+        "title": summary.title,
     }
 
 

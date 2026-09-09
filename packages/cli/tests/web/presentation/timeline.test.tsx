@@ -78,6 +78,47 @@ describe("Timeline", () => {
     }
   })
 
+  test("goal-evaluation 使用中文结果与准则清单，不回显 satisfied", () => {
+    const interactive = makeInteractive({
+      timeline: [{
+        type: "goal-evaluation",
+        evaluation: {
+          id: "eval-1",
+          runId: "run-1",
+          phase: "result",
+          iteration: 1,
+          result: "satisfied",
+          explanation: "所有验收准则均已满足。",
+          graderProfileId: "fast",
+          criteria: [
+            { criterion_id: "c1", text: "根目录存在 wc.py", passed: true, gap: null },
+            { criterion_id: "c2", text: "支持管道输入", passed: false, gap: "stdin 未处理" },
+          ],
+        },
+      }],
+    })
+    const handle = render(
+      <Timeline snapshot={makeSnapshot({ interactive })} dispatch={() => {}} />,
+    )
+    try {
+      const card = handle.container.querySelector(".timeline-goal-evaluation")
+      expect(card).not.toBeNull()
+      expect(card?.getAttribute("data-result")).toBe("satisfied")
+      expect(card?.getAttribute("aria-label")).toBe("验收通过 · 第 1 轮")
+      expect(handle.container.textContent).toContain("验收通过 · 第 1 轮")
+      expect(handle.container.textContent).toContain("fast")
+      expect(handle.container.textContent).toContain("根目录存在 wc.py")
+      expect(handle.container.textContent).toContain("stdin 未处理")
+      expect(handle.container.textContent).not.toContain("satisfied")
+      const rows = handle.container.querySelectorAll(".goal-evaluation-criterion")
+      expect(rows.length).toBe(2)
+      expect(rows[0]?.getAttribute("data-passed")).toBe("true")
+      expect(rows[1]?.getAttribute("data-passed")).toBe("false")
+    } finally {
+      handle.unmount()
+    }
+  })
+
   test("自动滚动跟随：贴底时新消息滚到底，用户上滚后保持位置（滚动容器是 .timeline-scroll）", () => {
     // 生产结构：.timeline-scroll 是滚动容器，Timeline 的 .timeline 是不滚动的内容层。
     const first = [message({ id: "a1", role: "assistant", content: "第一条", runId: "run-1" })]

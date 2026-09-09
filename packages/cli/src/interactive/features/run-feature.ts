@@ -134,6 +134,7 @@ export class RunFeature {
       onEvent: (event: any) => void
       onRunFinish: (actualModel?: ModelProfile, context?: Record<string, unknown>, outcome?: "completed" | "cancelled" | "failed") => void
       onAbandonInteraction: () => void
+      onAccepted?: () => void
     },
   ): Promise<IntentOutcome> {
     let requestedSkill: RequestedSkill | undefined
@@ -157,6 +158,7 @@ export class RunFeature {
       onEvent: (event: any) => void
       onRunFinish: (actualModel?: ModelProfile, context?: Record<string, unknown>, outcome?: "completed" | "cancelled" | "failed") => void
       onAbandonInteraction: () => void
+      onAccepted?: () => void
       armedSkill?: SkillSummary
       requestedSkill?: RequestedSkill
     },
@@ -185,7 +187,10 @@ export class RunFeature {
         : startInternalRun(current, run.ref))
 
       // accepted 被拒绝：当前 Run 立即收敛为 failed，不残留 activeRun。
-      void run.accepted.catch(error => {
+      void run.accepted.then(() => {
+        if (this.activeRunHandle?.ref.runId !== run.ref.runId) return
+        options.onAccepted?.()
+      }).catch(error => {
         if (this.activeRunHandle?.ref.runId !== run.ref.runId) return
         this.activeRunHandle = null
         ctx.commit(current => markRunFailed(current, run.ref.runId, errorMessage(error)))

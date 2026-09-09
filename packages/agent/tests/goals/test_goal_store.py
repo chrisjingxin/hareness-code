@@ -211,14 +211,14 @@ async def test_goal_activity_restore_is_ordered_and_bounded_to_latest_fifty(tmp_
 
 @pytest.mark.asyncio
 async def test_fresh_database_uses_schema_v19_and_goal_tables(tmp_path: Path) -> None:
-    """ThreadPersistence 的 canonical bootstrap 必须建立 v19 Goal 表。"""
+    """ThreadPersistence 的 canonical bootstrap 必须建立 Goal 表（当前 schema 含 v20 标题列）。"""
     project = tmp_path / "project"
     project.mkdir()
     persistence = await ThreadPersistence.open(project=project, home=tmp_path)
     database_path = persistence.database_path
     await persistence.close()
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 19
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 20
         tables = {
             row[0]
             for row in connection.execute(
@@ -262,7 +262,7 @@ async def test_v18_database_migrates_through_canonical_worker(tmp_path: Path) ->
     finally:
         await migrated.close()
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 19
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 20
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@ import { ContextWidget } from "./sidebar/context-widget"
 import { CwdWidget } from "./sidebar/cwd-widget"
 import { FileTreeWidget, fileTypeBadge } from "./sidebar/file-tree-widget"
 import { McpWidget } from "./sidebar/mcp-widget"
+import { currentThreadDisplayTitle } from "../../presentation-shared/thread-title"
 import { createScrollAcceleration } from "./scroll"
 import { markdownSyntax, tuiTheme } from "./theme"
 import { getCommonSyntaxClient } from "../platform/syntax-parsers"
@@ -349,6 +350,14 @@ export function Sidebar(props: SidebarProps) {
             <text fg={tuiTheme.muted}>x</text>
           </box>
         </box>
+        {props.interactive ? (
+          <text fg={tuiTheme.muted} wrapMode="none" overflow="hidden">
+            {currentThreadDisplayTitle({
+              currentThreadId: props.interactive.currentThreadId,
+              threads: props.interactive.catalogs.threads.items,
+            })}
+          </text>
+        ) : null}
         <box flexDirection="row" gap={3} paddingTop={1}>
           <box
             border={activeTab === "files" ? ["bottom"] : undefined}

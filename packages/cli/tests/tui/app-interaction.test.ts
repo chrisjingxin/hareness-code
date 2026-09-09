@@ -989,6 +989,7 @@ function createMockClient() {
               first_message: "此前的需求",
               latest_message: "此前的回答",
               message_count: 2,
+              title: null,
             }, {
               thread_id: "opaque-thread-2",
               created_at_ms: 3,
@@ -996,6 +997,7 @@ function createMockClient() {
               first_message: "修复索引结果",
               latest_message: "需要继续处理索引",
               message_count: 4,
+              title: null,
             }],
           },
         })}

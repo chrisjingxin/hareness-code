@@ -8,7 +8,39 @@ import {
   isGroupExpandedByDefault,
   itemActivityKey,
   segmentTimeline,
+  withoutSupersededGoalChecking,
 } from "../../src/presentation-shared/timeline-activity-groups"
+
+test("同一轮验收 result 到达后不再展示 checking", () => {
+  const timeline: TimelineItem[] = [
+    {
+      type: "goal-evaluation",
+      evaluation: {
+        id: "checking",
+        runId: "run-1",
+        phase: "checking",
+        iteration: 1,
+        graderProfileId: "fast",
+      },
+    },
+    {
+      type: "goal-evaluation",
+      evaluation: {
+        id: "result",
+        runId: "run-1",
+        phase: "result",
+        iteration: 1,
+        result: "satisfied",
+        graderProfileId: "fast",
+      },
+    },
+  ]
+  const visible = withoutSupersededGoalChecking(timeline)
+  expect(visible).toHaveLength(1)
+  expect(visible[0]?.type === "goal-evaluation" && visible[0].evaluation.phase).toBe("result")
+  const segments = segmentTimeline(timeline)
+  expect(segments).toHaveLength(1)
+})
 
 test("Build 无 scope 条目保持扁平，不生成 activity 分组", () => {
   const timeline: TimelineItem[] = [

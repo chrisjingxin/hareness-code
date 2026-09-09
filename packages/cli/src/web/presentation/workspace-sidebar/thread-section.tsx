@@ -6,6 +6,7 @@ import { MessageCircle, Search } from "lucide-react"
 
 import type { ThreadSummary } from "@za38/protocol"
 
+import { threadDisplayTitle, threadMatchesQuery } from "../../../presentation-shared/thread-title"
 import type { WebAdapterSnapshot, WebIntent } from "../../application/adapter"
 
 /** 渲染 Thread 搜索与列表；搜索词是分区本地状态，不进 Adapter（桌面侧栏纯表现行为）。 */
@@ -117,7 +118,7 @@ function ThreadList({
               <span className="thread-item-icon" aria-hidden="true">
                 <MessageCircle size={15} strokeWidth={1.8} />
               </span>
-              <span className="thread-item-title">{item.first_message || item.latest_message || "（无标题）"}</span>
+              <span className="thread-item-title">{threadDisplayTitle(item)}</span>
               <span className="thread-item-summary">{threadSubtitle(item, currentThreadId, busy, interaction)}</span>
               <span className="thread-item-meta">{formatUpdated(item.updated_at_ms)}</span>
             </button>
@@ -147,10 +148,7 @@ function filterThreads(
 ): readonly ThreadSummary[] {
   const needle = query.trim().toLowerCase()
   if (!needle) return items
-  return items.filter(item => {
-    const haystack = `${item.first_message}\n${item.latest_message}`.toLowerCase()
-    return haystack.includes(needle)
-  })
+  return items.filter(item => threadMatchesQuery(item, query))
 }
 
 /** 把更新时间折叠成短标签，与 TUI Picker 的展示口径保持一致。 */

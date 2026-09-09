@@ -3,7 +3,7 @@
 import { TextAttributes, type ScrollBoxRenderable } from "@opentui/core"
 import { type ReactNode, type RefObject, useMemo, useState } from "react"
 
-import type { ComposeSummaryCard, ConversationMessage, InteractionCard, ReasoningCard, TimelineItem } from "../../interactive/state"
+import type { ComposeSummaryCard, ConversationMessage, GoalEvaluationCard, InteractionCard, ReasoningCard, TimelineItem } from "../../interactive/state"
 import type { InteractiveSnapshot } from "../../interactive/types"
 import { formatContext, formatDuration, formatElapsed, formatUsage } from "../../presentation-shared/formatters"
 import { childTimelineEmptyMessage } from "../../presentation-shared/child-timeline-empty"
@@ -17,7 +17,7 @@ import {
   segmentTimeline,
   type TimelineActivityGroup,
 } from "../../presentation-shared/timeline-activity-groups"
-import { activityLabel, interactionStatusLabel, progressPhaseLabel } from "../../presentation-shared/timeline-presenter"
+import { activityLabel, goalEvaluationTitle, interactionStatusLabel, progressPhaseLabel } from "../../presentation-shared/timeline-presenter"
 import { nextThinkingExpanded, thinkingVisibleBody } from "../../presentation-shared/paint-budget"
 import { getCommonSyntaxClient } from "../platform/syntax-parsers"
 import { useRunElapsed, useSpinner } from "./input-bar"
@@ -203,44 +203,47 @@ function TimelineRow(props: {
 
 /** 独立验收过程：不伪装成 assistant 或普通工具。 */
 function GoalEvaluationRow(props: {
-  evaluation: {
-    phase: string
-    result?: string
-    explanation?: string
-    iteration: number
-    criteria?: Array<{ criterion_id: string; text?: string; passed: boolean; gap: string | null }>
-    graderProfileId: string
-  }
+  evaluation: GoalEvaluationCard
   goalCriteria?: readonly { criterion_id: string; text: string }[]
 }) {
-  const title = props.evaluation.phase === "checking"
-    ? `验收中 · 第 ${props.evaluation.iteration} 轮`
-    : `验收${goalResultLabel(props.evaluation.result)} · 第 ${props.evaluation.iteration} 轮`
+  const title = goalEvaluationTitle(props.evaluation.phase, props.evaluation.iteration, props.evaluation.result)
+  const accent = goalEvaluationAccent(props.evaluation.phase, props.evaluation.result)
   const textMap = new Map((props.goalCriteria ?? []).map(c => [c.criterion_id, c.text]))
-  const details = [
-    props.evaluation.explanation,
-    ...(props.evaluation.criteria ?? []).map((item, index) => {
-      const text = item.text ?? textMap.get(item.criterion_id)
-      const label = text ? `${index + 1}. ${text}` : item.criterion_id
-      return item.passed ? `✓ ${label}` : `✗ ${label}${item.gap ? `：${item.gap}` : ""}`
-    }),
-    props.evaluation.graderProfileId ? `grader: ${props.evaluation.graderProfileId}` : "",
-  ].filter(Boolean).join("\n")
+  const criteria = props.evaluation.criteria ?? []
   return (
-    <box marginTop={1} marginLeft={2} marginRight={2}>
-      <text fg={tuiTheme.muted}>{title}</text>
-      {details ? <text content={details} fg={tuiTheme.text} /> : null}
+    <box marginTop={1} marginLeft={2} marginRight={2} flexDirection="column" gap={0}>
+      <box flexDirection="row" gap={1}>
+        <text fg={accent} content={title} />
+        {props.evaluation.graderProfileId ? (
+          <text fg={tuiTheme.subtle} content={`· ${props.evaluation.graderProfileId}`} />
+        ) : null}
+      </box>
+      {props.evaluation.explanation ? (
+        <text content={props.evaluation.explanation} fg={tuiTheme.muted} />
+      ) : null}
+      {criteria.map((item, index) => {
+        const text = item.text ?? textMap.get(item.criterion_id)
+        const label = text ? `${index + 1}. ${text}` : item.criterion_id
+        const line = item.passed ? `✓ ${label}` : `✗ ${label}${item.gap ? `  ${item.gap}` : ""}`
+        return (
+          <text
+            key={item.criterion_id}
+            content={line}
+            fg={item.passed ? tuiTheme.success : tuiTheme.danger}
+          />
+        )
+      })}
     </box>
   )
 }
 
-function goalResultLabel(result?: string): string {
-  if (result === "satisfied") return "通过"
-  if (result === "needs_revision") return "未通过"
-  if (result === "max_iterations_reached") return "已达次数上限"
-  if (result === "grader_error") return "执行失败"
-  if (result === "failed") return "失败"
-  return ""
+function goalEvaluationAccent(phase: GoalEvaluationCard["phase"], result?: string): string {
+  if (phase === "checking") return tuiTheme.thinking
+  if (result === "satisfied") return tuiTheme.success
+  if (result === "needs_revision" || result === "failed" || result === "grader_error" || result === "max_iterations_reached") {
+    return tuiTheme.warning
+  }
+  return tuiTheme.muted
 }
 
 /** 阶段 Runtime 摘要：非 assistant 文本，仅展示有界结果。 */

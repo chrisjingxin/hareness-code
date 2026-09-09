@@ -409,15 +409,53 @@ test("goal.evaluation 进入独立 Timeline 项且不伪装 assistant", () => {
     grader_profile_id: "fast",
   }))
   const items = state.timeline.filter(item => item.type === "goal-evaluation")
-  expect(items).toHaveLength(2)
+  expect(items).toHaveLength(1)
   if (items[0]?.type === "goal-evaluation") {
-    expect(items[0].evaluation.phase).toBe("checking")
-  }
-  if (items[1]?.type === "goal-evaluation") {
-    expect(items[1].evaluation.result).toBe("needs_revision")
-    expect(items[1].evaluation.explanation).toBe("缺少测试")
+    expect(items[0].evaluation.phase).toBe("result")
+    expect(items[0].evaluation.result).toBe("needs_revision")
+    expect(items[0].evaluation.explanation).toBe("缺少测试")
   }
   expect(state.timeline.some(item => item.type === "message" && item.message.role === "assistant")).toBeFalse()
+})
+
+test("goal.evaluation 不同轮次各自保留终态卡片", () => {
+  let state = startRun(createInitialState(), run, "/goal 完成任务")
+  state = applyAgentEvent(state, event("goal.evaluation", 1, {
+    goal_id: "goal-1",
+    goal_revision: 1,
+    grading_run_id: "grade-1",
+    iteration: 1,
+    phase: "checking",
+    grader_profile_id: "fast",
+  }))
+  state = applyAgentEvent(state, event("goal.evaluation", 2, {
+    goal_id: "goal-1",
+    goal_revision: 1,
+    grading_run_id: "grade-1",
+    iteration: 1,
+    phase: "result",
+    result: "needs_revision",
+    explanation: "缺少测试",
+    grader_profile_id: "fast",
+  }))
+  state = applyAgentEvent(state, event("goal.evaluation", 3, {
+    goal_id: "goal-1",
+    goal_revision: 1,
+    grading_run_id: "grade-2",
+    iteration: 2,
+    phase: "checking",
+    grader_profile_id: "fast",
+  }))
+  const items = state.timeline.filter(item => item.type === "goal-evaluation")
+  expect(items).toHaveLength(2)
+  if (items[0]?.type === "goal-evaluation") {
+    expect(items[0].evaluation.iteration).toBe(1)
+    expect(items[0].evaluation.phase).toBe("result")
+  }
+  if (items[1]?.type === "goal-evaluation") {
+    expect(items[1].evaluation.iteration).toBe(2)
+    expect(items[1].evaluation.phase).toBe("checking")
+  }
 })
 
 test("goal.evaluation 映射当前目标 criteria 的中文 text 文本", () => {

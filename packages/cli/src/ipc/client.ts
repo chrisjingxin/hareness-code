@@ -64,6 +64,7 @@ import {
   type ThreadsListResult,
   type ThreadsListTurnsResult,
   type ThreadsOpenResult,
+  type ThreadsSetTitleResult,
   type ThreadsRedoParams,
   type ThreadsRedoResult,
   type ThreadsSideQuestionParams,
@@ -380,6 +381,11 @@ export class AgentClient {
   /** 打开当前 project 的既有 thread，并返回可以重新构造时间线的消息。 */
   openThread(threadId: string): Promise<ThreadsOpenResult> {
     return this.request(Method.THREADS_OPEN, { thread_id: threadId })
+  }
+
+  /** 为当前 project 的 thread 设置用户短标题。 */
+  setThreadTitle(threadId: string, title: string): Promise<ThreadsSetTitleResult> {
+    return this.request(Method.THREADS_SET_TITLE, { thread_id: threadId, title })
   }
 
   /** 读取当前 Thread 的 Goal projection。 */

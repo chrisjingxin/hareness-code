@@ -961,7 +961,7 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
               created_at_ms: event.timestamp_ms ?? 0,
             }
           : next.goalEvaluation,
-        timeline: [...next.timeline, { type: "goal-evaluation", evaluation }],
+        timeline: upsertGoalEvaluation(next.timeline, evaluation),
       }
     }
     case EventType.COMPOSE_SUMMARY: {
@@ -1152,6 +1152,30 @@ function finishAssistant(timeline: TimelineItem[], runId: string, suffix = "", i
       },
     },
   ]
+}
+
+/** 同一 Run 的同一轮验收：result 覆盖 checking，避免完成后还转圈。 */
+function upsertGoalEvaluation(timeline: TimelineItem[], evaluation: GoalEvaluationCard): TimelineItem[] {
+  const index = timeline.findIndex(item =>
+    item.type === "goal-evaluation"
+    && item.evaluation.runId === evaluation.runId
+    && item.evaluation.iteration === evaluation.iteration
+  )
+  if (index < 0) return [...timeline, { type: "goal-evaluation", evaluation }]
+  const existing = timeline[index]
+  if (
+    existing?.type === "goal-evaluation"
+    && existing.evaluation.phase === "result"
+    && evaluation.phase === "checking"
+  ) {
+    return timeline
+  }
+  const next = existing?.type === "goal-evaluation"
+    ? { ...evaluation, id: existing.evaluation.id }
+    : evaluation
+  return timeline.map((item, itemIndex) => (
+    itemIndex === index ? { type: "goal-evaluation", evaluation: next } : item
+  ))
 }
 
 function updateTool(timeline: TimelineItem[], tool: ToolCard): TimelineItem[] {

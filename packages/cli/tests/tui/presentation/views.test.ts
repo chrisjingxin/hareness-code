@@ -799,6 +799,52 @@ test("thread 通过原生 Markdown renderer 隐藏标题和代码围栏标记", 
   }
 })
 
+test("goal-evaluation 在时间线显示中文结果、准则分行与 grader 标签", async () => {
+  const run = { threadId: "thread-goal-eval", runId: "run-goal-eval" }
+  const started = startRun(createInitialState(), run, "实现 wc")
+  const state: InteractiveState = {
+    ...started,
+    activeRun: null,
+    activity: { kind: "completed", label: "已完成" },
+    timeline: [
+      started.timeline[0]!,
+      {
+        type: "goal-evaluation",
+        evaluation: {
+          id: "eval-1",
+          runId: run.runId,
+          phase: "result",
+          iteration: 1,
+          result: "satisfied",
+          explanation: "所有验收准则均已满足。",
+          graderProfileId: "fast",
+          criteria: [
+            { criterion_id: "c1", text: "根目录存在 wc.py", passed: true, gap: null },
+            { criterion_id: "c2", text: "支持管道输入", passed: false, gap: "stdin 未处理" },
+          ],
+        },
+      },
+    ],
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(snapshotOf(state), 100, 28)), { width: 100, height: 28 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("验收通过")
+    expect(frame).toContain("第 1 轮")
+    expect(frame).toContain("fast")
+    expect(frame).toContain("根目录存在 wc.py")
+    expect(frame).toContain("stdin 未处理")
+    expect(frame).not.toContain("satisfied")
+    expect(frame).not.toContain("grader:")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
 test("审批 pending 时底部是 Dock，输入栏失焦且时间线没有审批选择器", async () => {
   const run = { threadId: "thread-1", runId: "run-1" }
   const started = startRun(createInitialState(), run, "写入文件")
@@ -1493,6 +1539,7 @@ test("Skills 与 Threads 选择器压暗底层 thread，但不压暗自身面板
           firstMessage: "恢复索引",
           latestMessage: "索引已修复",
           messageCount: 2,
+          title: null,
         }],
         query: "",
         selectedIndex: 0,

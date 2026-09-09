@@ -108,6 +108,15 @@ class ToolCallingFakeChatModel(GenericFakeChatModel):
         return self
 
 
+def _drop_thread_title_columns(connection: sqlite3.Connection) -> None:
+    """模拟 v6 之前的 harness_threads 列集，去掉 v20 标题列。"""
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(harness_threads)")}
+    if "title" in columns:
+        connection.execute("ALTER TABLE harness_threads DROP COLUMN title")
+    if "title_origin" in columns:
+        connection.execute("ALTER TABLE harness_threads DROP COLUMN title_origin")
+
+
 def _downgrade_to_v6(database: Path, *, drop_artifact_metadata: bool = False) -> None:
     """把当前测试库还原为精确 v6 形状，不触碰生产数据。
 
@@ -129,6 +138,7 @@ def _downgrade_to_v6(database: Path, *, drop_artifact_metadata: bool = False) ->
             "ALTER TABLE harness_context_artifacts DROP COLUMN content_sha256"
         )
         connection.execute("ALTER TABLE harness_context_artifacts DROP COLUMN byte_length")
+        _drop_thread_title_columns(connection)
         connection.execute("PRAGMA user_version=6")
         connection.commit()
     finally:
@@ -460,6 +470,7 @@ async def test_thread_persistence_migrates_and_reads_legacy_model_bindings(tmp_p
             "ALTER TABLE harness_context_artifacts DROP COLUMN content_sha256"
         )
         connection.execute("ALTER TABLE harness_context_artifacts DROP COLUMN byte_length")
+        _drop_thread_title_columns(connection)
         connection.execute(
             """
             INSERT INTO harness_thread_model_bindings (

@@ -173,6 +173,21 @@ test("StatusModal 正确统计 Timeline 消息、工具调用与 Token 估算", 
   const snapshot = {
     ...controller.getSnapshot(),
     currentThreadId: "thread-abc-12345678",
+    catalogs: {
+      ...controller.getSnapshot().catalogs,
+      threads: {
+        status: "ready" as const,
+        items: [{
+          thread_id: "thread-abc-12345678",
+          created_at_ms: 1,
+          updated_at_ms: 2,
+          first_message: "你好，请帮我重构代码",
+          latest_message: "好的，我先读取文件。",
+          message_count: 2,
+          title: "重构代码",
+        }],
+      },
+    },
     timeline: [
       { type: "message" as const, message: { id: "m1", role: "user" as const, content: "你好，请帮我重构代码" } },
       { type: "message" as const, message: { id: "m2", role: "assistant" as const, content: "好的，我先读取文件。" } },
@@ -195,7 +210,8 @@ test("StatusModal 正确统计 Timeline 消息、工具调用与 Token 估算", 
 
     const output = setup.captureCharFrame()
     expect(output).toContain("2 消息 · 1 工具")
-    expect(output).toContain("thread-abc-1")
+    expect(output).toContain("重构代码")
+    expect(output).not.toContain("thread-abc")
   } finally {
     setup?.renderer.destroy()
     await controller.close()

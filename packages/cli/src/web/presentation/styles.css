@@ -578,6 +578,100 @@ pre, code { font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Co
   color: var(--muted);
   margin-bottom: 4px;
 }
+.timeline-goal-evaluation {
+  padding: 10px 12px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-surface);
+  background: var(--surface);
+}
+.timeline-goal-evaluation[data-phase="checking"] {
+  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+}
+.timeline-goal-evaluation[data-result="satisfied"] {
+  border-left-color: var(--success);
+  background: color-mix(in srgb, var(--success) 8%, var(--surface));
+}
+.timeline-goal-evaluation[data-result="needs_revision"],
+.timeline-goal-evaluation[data-result="failed"],
+.timeline-goal-evaluation[data-result="grader_error"],
+.timeline-goal-evaluation[data-result="max_iterations_reached"] {
+  border-left-color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 8%, var(--surface));
+}
+.goal-evaluation-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.goal-evaluation-icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  color: var(--accent);
+}
+.timeline-goal-evaluation[data-result="satisfied"] .goal-evaluation-icon { color: var(--success); }
+.timeline-goal-evaluation[data-result="needs_revision"] .goal-evaluation-icon,
+.timeline-goal-evaluation[data-result="failed"] .goal-evaluation-icon,
+.timeline-goal-evaluation[data-result="grader_error"] .goal-evaluation-icon,
+.timeline-goal-evaluation[data-result="max_iterations_reached"] .goal-evaluation-icon { color: var(--warning); }
+.goal-evaluation-title {
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text);
+}
+.goal-evaluation-grader {
+  margin-left: auto;
+  padding: 1px 7px;
+  border: 1px solid var(--line);
+  border-radius: 9999px;
+  color: var(--muted);
+  font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.goal-evaluation-text {
+  margin: 8px 0 0;
+  color: var(--text-soft);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.goal-evaluation-criteria {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.goal-evaluation-criterion {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-soft);
+}
+.goal-evaluation-mark {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 18px;
+  flex: 0 0 16px;
+  color: var(--success);
+}
+.goal-evaluation-criterion[data-passed="false"] { color: var(--danger-text); }
+.goal-evaluation-criterion[data-passed="false"] .goal-evaluation-mark { color: var(--danger); }
+.goal-evaluation-criterion-body { min-width: 0; overflow-wrap: anywhere; }
+.goal-evaluation-criterion-index { margin-right: 4px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.goal-evaluation-gap {
+  display: block;
+  margin-top: 2px;
+  color: var(--warning-text);
+  font-size: 12px;
+}
 @media (prefers-reduced-motion: reduce) {
   .run-progress-spinner.spinning {
     animation: none;
@@ -1364,6 +1458,8 @@ pre, code { font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Co
 .markdown h4, .markdown h5, .markdown h6 { font-size: .95rem; }
 .markdown ul, .markdown ol { margin: 7px 0; padding-left: 22px; }
 .markdown li { margin: 3px 0; }
+.markdown li > p { margin: 0; }
+.markdown li > p + p { margin-top: 6px; }
 .markdown blockquote { margin: 10px 0; padding: 2px 12px; border-left: 3px solid var(--line-strong); color: var(--muted); }
 .markdown code { padding: 1px 5px; border-radius: var(--radius-control); background: var(--code-bg); color: var(--inline-code-text); font-size: .86em; }
 .markdown a { color: var(--link-text); text-decoration: underline; text-underline-offset: 2px; }
@@ -1882,6 +1978,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .timeline-tool,
 .reasoning,
 .timeline-interaction,
+.timeline-goal-evaluation,
 .timeline-agent-group > .timeline-tool,
 .timeline-agent-group > .reasoning {
   width: calc(100% - 34px);

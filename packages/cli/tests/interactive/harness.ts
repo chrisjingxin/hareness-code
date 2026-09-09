@@ -8,6 +8,7 @@ import {
   type InteractionResponse,
   type ModelProfile,
   type RunInput,
+  type ThreadSummary,
 } from "@za38/protocol"
 
 import type { InteractiveAgentPort, InteractiveAgentRun, InteractiveRunCompletion } from "../../src/interactive/agent-port"
@@ -83,6 +84,7 @@ function createPort(options: {
   const calls: string[] = []
   const runHandles: Array<{ threadId: string; runId: string }> = []
   let protocolErrorListener: ((error: Error) => void) | undefined
+  let threadSummaryListener: ((thread: ThreadSummary) => void) | undefined
   let closeListener: ((error: Error) => void) | undefined
   let interactionHandler: ((request: InteractionRequestEnvelope) => Promise<InteractionResponse>) | undefined
   const abandoned: string[] = []
@@ -139,6 +141,7 @@ function createPort(options: {
     failRunWithEvent: (threadId: string, runId: string) => void
     sendInteraction: (request: InteractionRequestEnvelope) => Promise<InteractionResponse>
     protocolError: (message: string) => void
+    emitThreadSummary: (thread: ThreadSummary) => void
     closeConnection: (message: string) => void
     setProfiles: (next: ModelProfile[]) => void
     setThreadSelection: (next: string | null) => void
@@ -151,6 +154,10 @@ function createPort(options: {
     onProtocolError(listener) {
       protocolErrorListener = listener
       return () => { if (protocolErrorListener === listener) protocolErrorListener = undefined }
+    },
+    onThreadSummary(listener) {
+      threadSummaryListener = listener
+      return () => { if (threadSummaryListener === listener) threadSummaryListener = undefined }
     },
     onClose(listener) {
       closeListener = listener
@@ -207,6 +214,10 @@ function createPort(options: {
     async listThreads() {
       calls.push("threads.list")
       return { threads: [threadSummary("thread-1", "第一条历史"), threadSummary("thread-2", "第二条历史")] }
+    },
+    async setThreadTitle(threadId, title) {
+      calls.push("threads.set_title")
+      return { thread: { ...threadSummary(threadId, "第一条历史"), title } }
     },
     async openThread(threadId) {
       calls.push("threads.open")
@@ -369,6 +380,9 @@ function createPort(options: {
     },
     protocolError(message) {
       protocolErrorListener?.(new Error(message))
+    },
+    emitThreadSummary(thread) {
+      threadSummaryListener?.(thread)
     },
     closeConnection(message) {
       closeListener?.(new Error(message))
@@ -550,7 +564,7 @@ export function notices(snapshot: InteractiveSnapshot): string {
 }
 
 export function threadSummary(threadId: string, message: string) {
-  return { thread_id: threadId, created_at_ms: 1, updated_at_ms: 2, first_message: message, latest_message: message, message_count: 2 }
+  return { thread_id: threadId, created_at_ms: 1, updated_at_ms: 2, first_message: message, latest_message: message, message_count: 2, title: null }
 }
 
 export function skill(id: string, enabled: boolean) {

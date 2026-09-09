@@ -6,7 +6,7 @@ import type { SidebarState } from "../application/adapter"
 import { modeAccent, tuiTheme } from "./theme"
 import { OverlayShell } from "./overlays"
 import { workspaceLabel, executionStatusLabel, approvalModeLabel } from "../../interactive/runtime"
-import { gitWorkspaceLabel } from "../../presentation-shared"
+import { currentThreadDisplayTitle, gitWorkspaceLabel } from "../../presentation-shared"
 
 export type StatusModalProps = {
   visible: boolean
@@ -183,7 +183,10 @@ export function StatusModal(props: StatusModalProps): ReactNode {
                 <box paddingTop={1} flexDirection="column" gap={0}>
                   <text fg={tuiTheme.text}>
                     <span style={{ fg: tuiTheme.muted }}>会话: </span>
-                    {interactive.currentThreadId ? `${interactive.currentThreadId.slice(0, 12)}…` : "新会话"}
+                    {currentThreadDisplayTitle({
+                      currentThreadId: interactive.currentThreadId,
+                      threads: interactive.catalogs.threads.items,
+                    })}
                     <span style={{ fg: tuiTheme.muted }}> ({stats.messages} 消息 · {stats.toolCalls} 工具)</span>
                   </text>
                   <text fg={tuiTheme.text}>

@@ -15,6 +15,7 @@ type Metadata = {
   max_tool_payload_bytes: number
   operations: Record<string, ContractEntry>
   events: Record<string, ContractEntry>
+  notifications?: Record<string, ContractEntry>
   interactions: Record<string, ContractEntry>
   capabilities: string[]
   error_codes: Record<string, { jsonrpc_code: number; retryable: boolean }>
@@ -69,7 +70,11 @@ function renderTypeScript(root: Schema, meta: Metadata, digest: string): string 
   const interactionMap = Object.entries(meta.interactions)
     .map(([method, entry]) => `  ${JSON.stringify(method)}: { params: ${typeFromRef(entry.params!)}; result: ${typeFromRef(entry.result!)} }`)
     .join("\n")
-  const methodEntries = [...Object.keys(meta.operations), "event", ...Object.keys(meta.interactions)]
+  const notifications = meta.notifications ?? {}
+  const notificationMap = Object.entries(notifications)
+    .map(([method, entry]) => `  ${JSON.stringify(method)}: { params: ${typeFromRef(entry.params!)} }`)
+    .join("\n")
+  const methodEntries = [...Object.keys(meta.operations), "event", ...Object.keys(meta.interactions), ...Object.keys(notifications)]
     .map(method => `  ${constant(method)}: ${JSON.stringify(method)},`)
     .join("\n")
 
@@ -83,6 +88,7 @@ export const MAX_TOOL_PAYLOAD_BYTES = ${meta.max_tool_payload_bytes} as const
 export const CLIENT_METHODS = ${JSON.stringify(Object.keys(meta.operations))} as const
 export const EVENT_TYPES = ${JSON.stringify(Object.keys(meta.events))} as const
 export const INTERACTION_METHODS = ${JSON.stringify(Object.keys(meta.interactions))} as const
+export const NOTIFICATION_METHODS = ${JSON.stringify(Object.keys(notifications))} as const
 export const SERVER_CAPABILITIES = ${JSON.stringify(meta.capabilities)} as const
 export const OPERATION_CAPABILITIES = ${JSON.stringify(Object.fromEntries(Object.entries(meta.operations).map(([name, entry]) => [name, entry.capability ?? null])))} as const
 export const OPERATION_MIN_MINOR = ${JSON.stringify(Object.fromEntries(Object.entries(meta.operations).filter(([, entry]) => entry.min_minor !== undefined).map(([name, entry]) => [name, entry.min_minor])))} as const
@@ -135,6 +141,10 @@ export interface InteractionMap {
 ${interactionMap}
 }
 export type InteractionMethod = keyof InteractionMap
+export interface NotificationMap {
+${notificationMap}
+}
+export type NotificationName = keyof NotificationMap
 export type InteractionRequest = {
   [M in InteractionMethod]: { method: M; id: string; params: InteractionMap[M]["params"] }
 }[InteractionMethod]
@@ -161,6 +171,7 @@ function renderValidators(root: Schema, meta: Metadata): string {
     refs.add(entry.result!)
   }
   for (const entry of Object.values(meta.events)) refs.add(entry.payload!)
+  for (const entry of Object.values(meta.notifications ?? {})) refs.add(entry.params!)
   for (const entry of Object.values(meta.interactions)) {
     refs.add(entry.params!)
     refs.add(entry.result!)
@@ -257,6 +268,9 @@ function renderContractFixtures(root: Schema, meta: Metadata): string {
   for (const [name, entry] of Object.entries(meta.interactions)) {
     addFixtureGroup(root, valid, invalid, "interaction.params", name, entry.params!)
     addFixtureGroup(root, valid, invalid, "interaction.result", name, entry.result!)
+  }
+  for (const [name, entry] of Object.entries(meta.notifications ?? {})) {
+    addFixtureGroup(root, valid, invalid, "notification.params", name, entry.params!)
   }
   addFixtureGroup(root, valid, invalid, "error", "ProtocolErrorData", "#/$defs/protocolErrorData")
   for (const [name, entry] of Object.entries(meta.error_codes)) {
@@ -383,13 +397,14 @@ MAX_TOOL_PAYLOAD_BYTES = ${meta.max_tool_payload_bytes}
 CLIENT_METHODS = ${pythonLiteral(Object.keys(meta.operations))}
 EVENT_TYPES = ${pythonLiteral(Object.keys(meta.events))}
 INTERACTION_METHODS = ${pythonLiteral(Object.keys(meta.interactions))}
+NOTIFICATION_METHODS = ${pythonLiteral(Object.keys(meta.notifications ?? {}))}
 SERVER_CAPABILITIES = ${pythonLiteral(meta.capabilities)}
 OPERATION_CAPABILITIES = ${pythonLiteral(Object.fromEntries(operations.map(([name, entry]) => [name, entry.capability ?? null])))}
 OPERATION_MIN_MINOR = ${pythonLiteral(Object.fromEntries(operations.filter(([, entry]) => entry.min_minor !== undefined).map(([name, entry]) => [name, entry.min_minor])))}
 CONTROLLED_OPERATIONS = ${pythonLiteral(Object.entries(meta.operations).filter(([, entry]) => entry.controlled).map(([name]) => name))}
 INTERACTION_HANDLES = ${pythonLiteral(Object.fromEntries(Object.entries(meta.interactions).map(([name, entry]) => [name, entry.handle])))}
 ERROR_CODES = ${pythonLiteral(Object.fromEntries(Object.entries(meta.error_codes).map(([name, entry]) => [name, { "jsonrpc_code": entry.jsonrpc_code, "retryable": entry.retryable }])))}
-METHOD = ${pythonLiteral(Object.fromEntries([...Object.keys(meta.operations), "event", ...Object.keys(meta.interactions)].map(value => [constant(value), value])))}
+METHOD = ${pythonLiteral(Object.fromEntries([...Object.keys(meta.operations), "event", ...Object.keys(meta.interactions), ...Object.keys(meta.notifications ?? {})].map(value => [constant(value), value])))}
 CAPABILITY = ${pythonLiteral(Object.fromEntries(meta.capabilities.map(value => [constant(value), value])))}
 EVENT_TYPE = ${pythonLiteral(Object.fromEntries(Object.keys(meta.events).map(value => [constant(value), value])))}
 

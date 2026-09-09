@@ -250,6 +250,7 @@ test("TuiAdapter 与 Gateway 联动完成 undo 完整生命周期", async () => 
           first_message: "hi",
           latest_message: "hi",
           message_count: 1,
+          title: null,
         },
         messages: [],
         plan: { has_plan: false, plan_markdown: "", plan_virtual_path: "/.harness/plan.md" as const, plan_display_path: "/.harness/plan.md" },

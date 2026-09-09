@@ -107,6 +107,21 @@ export function itemActivityKey(item: TimelineItem): string | null {
   return `${runId}:${fields.activityId}`
 }
 
+/** 同一轮已有 result 时不再展示 checking，避免完成后还转圈。 */
+export function withoutSupersededGoalChecking(timeline: readonly TimelineItem[]): TimelineItem[] {
+  const completed = new Set<string>()
+  for (const item of timeline) {
+    if (item.type === "goal-evaluation" && item.evaluation.phase === "result") {
+      completed.add(`${item.evaluation.runId}:${item.evaluation.iteration}`)
+    }
+  }
+  if (completed.size === 0) return [...timeline]
+  return timeline.filter(item => {
+    if (item.type !== "goal-evaluation" || item.evaluation.phase !== "checking") return true
+    return !completed.has(`${item.evaluation.runId}:${item.evaluation.iteration}`)
+  })
+}
+
 /**
  * 按 Host sequence 顺序把 timeline 切成 flat/group 段。
  * 同一 activity 的连续条目合成一组；中间插入的 root 项打断分组。
@@ -122,7 +137,7 @@ export function segmentTimeline(timeline: readonly TimelineItem[]): TimelineSegm
     }
   }
 
-  for (const item of timeline) {
+  for (const item of withoutSupersededGoalChecking(timeline)) {
     const key = itemActivityKey(item)
     if (key === null) {
       flush()

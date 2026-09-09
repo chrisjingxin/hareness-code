@@ -17,6 +17,11 @@ import {
 } from "../../src/interactive/commands"
 import { dispatchSlashCommand } from "../../src/interactive/command-dispatcher"
 
+test("/title 解析为 thread.title，/rename 不是命令", () => {
+  expect(parseSlashCommand("/title 修索引")).toEqual({ id: "thread.title", name: "title", argument: "修索引" })
+  expect(parseSlashCommand("/rename")).toBeNull()
+})
+
 test("Registry 以 canonical ID 解析核心 Slash Command 与别名", () => {
   expect(parseSlashCommand("/q")).toEqual({ id: "system.quit", name: "quit", argument: undefined })
   expect(parseSlashCommand("/new")).toEqual({ id: "thread.new", name: "new", argument: undefined })
@@ -67,6 +72,15 @@ test("Dispatcher 仅按稳定 ID 返回 semantic operation，并统一处理兼�
     commandContext: defaultCommandContext({ capabilities: ["models.read"] }),
   })).toEqual({ type: "present", target: "models", initialQuery: "pro" })
   expect(dispatchSlashCommand(compact, base)).toEqual({ type: "compact", threadId: "thread-1" })
+  const title = parseSlashCommand("/title 修索引")
+  const titleEmpty = parseSlashCommand("/title")
+  if (!title || !titleEmpty) throw new Error("expected /title")
+  expect(dispatchSlashCommand(titleEmpty, base)).toEqual({ type: "notice", message: "用法：/title <短标题>" })
+  expect(dispatchSlashCommand(title, base)).toMatchObject({
+    type: "rpc",
+    method: "threads.set_title",
+    params: { thread_id: "thread-1", title: "修索引" },
+  })
 })
 
 test("/mcp 空参查询状态，add/remove 解析为语义操作", () => {
@@ -380,7 +394,9 @@ test("执行中只放行显式 runtime allowed 的命令，其余失败关闭", 
   const compact = commandRegistry.get("context.compact")!
   const skills = commandRegistry.get("skills.open")!
   const newWork = commandRegistry.get("compose.new-work")!
+  const title = commandRegistry.get("thread.title")!
   expect(commandRegistry.availability(status, runningBuild)).toEqual({ state: "available" })
+  expect(commandRegistry.availability(title, runningBuild)).toEqual({ state: "available" })
   expect(commandRegistry.availability(help, runningBuild)).toEqual({ state: "available" })
   expect(commandRegistry.availability(btw, runningBuild)).toEqual({ state: "available" })
   expect(commandRegistry.availability(goal, runningBuild)).toEqual({ state: "available" })

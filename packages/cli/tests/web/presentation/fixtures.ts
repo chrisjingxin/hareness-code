@@ -139,6 +139,7 @@ export function makeThread(overrides: Partial<ThreadSummary> = {}): ThreadSummar
     first_message: "first user prompt",
     latest_message: "latest assistant reply",
     message_count: 3,
+    title: null,
     ...overrides,
   }
 }

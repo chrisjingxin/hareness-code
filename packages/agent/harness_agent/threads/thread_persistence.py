@@ -74,6 +74,7 @@ from harness_agent.threads.thread_records import (
     _message_content,
     _normalize_message,
     _normalize_transcript_tool_calls,
+    normalize_thread_title,
     _now_ms,
     _payload_content,
     _preview,
@@ -91,7 +92,7 @@ from harness_agent.threads.thread_records import (
     workspace_fingerprint,
 )
 
-_SCHEMA_VERSION = 19
+_SCHEMA_VERSION = 20
 _MIGRATION_STATE_VERSION = 2
 _MIGRATION_STATE_VERSION_LEGACY = 1
 _MIGRATION_LOCK_SUFFIX = ".migration.lock"
@@ -4783,7 +4784,8 @@ class ThreadPersistence:
                            updated_at_ms,
                            first_message,
                            latest_message,
-                           message_count
+                           message_count,
+                           title
                     FROM harness_threads
                     WHERE project_fingerprint = ?
                     ORDER BY updated_at_ms DESC, thread_id ASC LIMIT ?
@@ -4795,6 +4797,104 @@ class ThreadPersistence:
             return tuple(_summary(row) for row in rows)
         except aiosqlite.Error as exc:
             raise ThreadPersistenceError(f"CHECKPOINT_LIST_FAILED: {exc}") from exc
+
+    async def set_user_title(self, thread_id: str, raw: str) -> ThreadSummary:
+        """把当前 thread 的标题写成用户给定值，不刷新活动时间。"""
+        written = await self._write_title(
+            thread_id,
+            normalize_thread_title(raw),
+            origin="user",
+            only_if_unset=False,
+        )
+        if written is None:
+            raise ThreadPersistenceError("THREAD_NOT_FOUND")
+        return written
+
+    async def apply_auto_title(self, thread_id: str, raw: str) -> ThreadSummary | None:
+        """仅在尚无标题时写入自动起名结果；已被占用时返回 None。"""
+        return await self._write_title(
+            thread_id,
+            normalize_thread_title(raw),
+            origin="auto",
+            only_if_unset=True,
+        )
+
+    async def _write_title(
+        self,
+        thread_id: str,
+        title: str,
+        *,
+        origin: Literal["user", "auto"],
+        only_if_unset: bool,
+    ) -> ThreadSummary | None:
+        """写入规范化标题；``only_if_unset`` 时已有 origin 则不覆盖。"""
+        self._ensure_open()
+        try:
+            async with self._lock:
+                if only_if_unset:
+                    cursor = await self._connection.execute(
+                        """
+                        UPDATE harness_threads
+                        SET title = ?, title_origin = ?
+                        WHERE project_fingerprint = ?
+                          AND thread_id = ?
+                          AND title_origin IS NULL
+                        """,
+                        (title, origin, self._project_fingerprint, thread_id),
+                    )
+                else:
+                    cursor = await self._connection.execute(
+                        """
+                        UPDATE harness_threads
+                        SET title = ?, title_origin = ?
+                        WHERE project_fingerprint = ?
+                          AND thread_id = ?
+                        """,
+                        (title, origin, self._project_fingerprint, thread_id),
+                    )
+                changed = cursor.rowcount
+                await cursor.close()
+                if changed == 0:
+                    exists = await self._connection.execute(
+                        """
+                        SELECT 1
+                        FROM harness_threads
+                        WHERE project_fingerprint = ?
+                          AND thread_id = ?
+                        """,
+                        (self._project_fingerprint, thread_id),
+                    )
+                    row = await exists.fetchone()
+                    await exists.close()
+                    await self._connection.commit()
+                    if row is None:
+                        raise ThreadPersistenceError("THREAD_NOT_FOUND")
+                    return None
+                cursor = await self._connection.execute(
+                    """
+                    SELECT thread_id,
+                           created_at_ms,
+                           updated_at_ms,
+                           first_message,
+                           latest_message,
+                           message_count,
+                           title
+                    FROM harness_threads
+                    WHERE project_fingerprint = ?
+                      AND thread_id = ?
+                    """,
+                    (self._project_fingerprint, thread_id),
+                )
+                summary_row = await cursor.fetchone()
+                await cursor.close()
+                await self._connection.commit()
+            if summary_row is None:
+                raise ThreadPersistenceError("THREAD_NOT_FOUND")
+            return _summary(summary_row)
+        except ThreadPersistenceError:
+            raise
+        except aiosqlite.Error as exc:
+            raise ThreadPersistenceError(f"THREAD_TITLE_WRITE_FAILED: {exc}") from exc
 
     async def load_thread_activity_ms(self, thread_id: str) -> int | None:
         """读取当前 project/thread 的最后活动时间，缺失时返回 ``None``。"""
@@ -4833,7 +4933,8 @@ class ThreadPersistence:
                                updated_at_ms,
                                first_message,
                                latest_message,
-                               message_count
+                               message_count,
+                               title
                         FROM harness_threads
                         WHERE project_fingerprint = ?
                           AND thread_id = ?
@@ -5698,6 +5799,9 @@ class ThreadPersistence:
             if version < 19:
                 await self._add_goal_tables()
                 version = 19
+            if version < 20:
+                await self._add_thread_title_columns()
+                version = 20
             await self._connection.execute(f"PRAGMA user_version={version}")
             final_fingerprint = await self._database_fingerprint_async()
             await self._validate_final_database_async(final_fingerprint)
@@ -6142,6 +6246,7 @@ class ThreadPersistence:
                             "first_message",
                             "latest_message",
                             "message_count",
+                            *(("title", "title_origin") if version >= 20 else ()),
                         ),
                     ),
                     (
@@ -8334,6 +8439,23 @@ class ThreadPersistence:
             )
             """
         )
+
+    async def _add_thread_title_columns(self) -> None:
+        """v20：Thread 短标题与来源；列已存在时跳过（从含 v20 列的库降标再升级）。"""
+        columns = await self._table_columns_async("harness_threads")
+        if "title" not in columns:
+            await self._connection.execute(
+                "ALTER TABLE harness_threads ADD COLUMN title TEXT"
+            )
+        if "title_origin" not in columns:
+            await self._connection.execute(
+                """
+                ALTER TABLE harness_threads
+                ADD COLUMN title_origin TEXT
+                CHECK (title_origin IS NULL OR title_origin IN ('auto', 'user'))
+                """
+            )
+
     async def record_git_checkpoint(
         self, thread_id: str, turn_id: str, run_id: str | None, tree_oid: str
     ) -> None:
@@ -8780,6 +8902,8 @@ def _migration_validate_final_schema_sync(connection: sqlite3.Connection) -> Non
             "first_message",
             "latest_message",
             "message_count",
+            "title",
+            "title_origin",
         ),
         "checkpoints": (
             "thread_id",

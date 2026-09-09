@@ -160,7 +160,7 @@ test("/plan-view 读取当前 thread 计划为只读预览，关闭后不产生�
   const harness = makeHarness({
     initialThreadId: "thread-plan-view",
     openThreadImpl: async threadId => ({
-      thread: { thread_id: threadId, created_at_ms: 1, updated_at_ms: 2, first_message: "规划", latest_message: "规划", message_count: 1 },
+      thread: { thread_id: threadId, created_at_ms: 1, updated_at_ms: 2, first_message: "规划", latest_message: "规划", message_count: 1, title: null },
       messages: [{ kind: "user", content: "规划" }],
       plan: {
         has_plan: true,
@@ -193,7 +193,7 @@ test("执行中 /plan-view 无挂起审批时返回 inspect-overlay，不进入 
   const harness = makeHarness({
     initialThreadId: "thread-plan-view",
     openThreadImpl: async threadId => ({
-      thread: { thread_id: threadId, created_at_ms: 1, updated_at_ms: 2, first_message: "规划", latest_message: "规划", message_count: 1 },
+      thread: { thread_id: threadId, created_at_ms: 1, updated_at_ms: 2, first_message: "规划", latest_message: "规划", message_count: 1, title: null },
       messages: [{ kind: "user", content: "规划" }],
       plan: {
         has_plan: true,

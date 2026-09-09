@@ -73,6 +73,21 @@ export class CatalogFeature {
     else await this.refreshMcpCatalog(ctx)
   }
 
+  /** 按 thread_id 合并一条摘要，供 /title 与自动起名立刻更新列表。 */
+  upsertThread(thread: ThreadSummary, ctx: FeatureContext): void {
+    const items = this.state.threads.items
+    const index = items.findIndex(item => item.thread_id === thread.thread_id)
+    const next = index >= 0
+      ? items.map((item, itemIndex) => itemIndex === index ? thread : item)
+      : [...items, thread]
+    this.state.threads = {
+      status: "ready",
+      items: sortThreadsByRecency(next),
+      epoch: this.state.threads.epoch,
+    }
+    ctx.publish()
+  }
+
   /** 读取 Thread catalog；异步结果只允许写回对应打开轮次。 */
   async refreshThreadCatalog(ctx: FeatureContext): Promise<void> {
     const epoch = ++this.state.threads.epoch

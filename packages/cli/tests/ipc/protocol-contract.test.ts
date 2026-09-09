@@ -9,15 +9,19 @@ import {
   PROTOCOL_VERSION,
   validateInteractionParams,
   validateInteractionResult,
+  validateNotificationParams,
   validateOperationParams,
   validateOperationResult,
   validateProtocolErrorData,
+  EVENT_TYPES,
+  NOTIFICATION_METHODS,
   type InteractionMethod,
+  type NotificationName,
   type OperationName,
 } from "@za38/protocol"
 
 type Fixture = {
-  kind: "operation.params" | "operation.result" | "event" | "interaction.params" | "interaction.result" | "error"
+  kind: "operation.params" | "operation.result" | "event" | "interaction.params" | "interaction.result" | "notification.params" | "error"
   name: string
   value: unknown
 }
@@ -26,10 +30,25 @@ const fixtures = JSON.parse(
   await readFile(resolve(import.meta.dir, "../../../protocol/fixtures/v3-contract.json"), "utf8"),
 ) as { valid: Fixture[]; invalid: Fixture[] }
 
-test("Settings、Plugin 与 Goal RPC 在 canonical v3 contract 中要求 minor 8", () => {
-  expect(PROTOCOL_VERSION).toEqual({ major: 3, minor: 8 })
+test("Settings、Plugin 与 Goal RPC 在 canonical v3 contract 中要求 minor 8；set_title 要求 9", () => {
+  expect(PROTOCOL_VERSION).toEqual({ major: 3, minor: 9 })
   expect(OPERATION_MIN_MINOR["commands.bind"]).toBe(6)
   expect(OPERATION_MIN_MINOR["goal.inspect"]).toBe(8)
+  expect(OPERATION_MIN_MINOR["threads.set_title"]).toBe(9)
+})
+
+test("thread.summary 是 notification，不是 Timeline Event", () => {
+  expect(NOTIFICATION_METHODS).toContain("thread.summary")
+  expect(EVENT_TYPES).not.toContain("thread.summary")
+  expect(() => validateNotificationParams("thread.summary", {
+    thread_id: "thread-1",
+    created_at_ms: 1,
+    updated_at_ms: 1,
+    first_message: "x",
+    latest_message: "x",
+    message_count: 1,
+    title: "修索引",
+  })).not.toThrow()
 })
 
 test("TypeScript 接受全部共享有效 fixture", () => {
@@ -397,6 +416,8 @@ function validate(fixture: Fixture): void {
     validateInteractionParams(fixture.name as InteractionMethod, fixture.value)
   } else if (fixture.kind === "interaction.result") {
     validateInteractionResult(fixture.name as InteractionMethod, fixture.value)
+  } else if (fixture.kind === "notification.params") {
+    validateNotificationParams(fixture.name as NotificationName, fixture.value)
   } else {
     validateProtocolErrorData(fixture.value)
   }

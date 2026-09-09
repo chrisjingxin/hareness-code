@@ -26,6 +26,7 @@ export type CommandPickerTarget = "skills" | "threads" | "models" | "agents" | "
  * React callback 或 TUI local action；Controller 解释这些语义并完成所有 Agent effect。 */
 export type CommandRpcMethod =
   | "threads.open"
+  | "threads.set_title"
   | "agents.list"
   | "teams.list"
   | "teams.inspect"
@@ -156,6 +157,21 @@ const builtinHandlers: Readonly<Record<string, CommandHandler>> = {
   "thread.resume": context => context.command.argument
     ? notice("/resume 不接受 thread_id；请在选择器中选择要恢复的 thread。")
     : { type: "present", target: "threads" },
+  "thread.title": context => {
+    const title = context.command.argument?.trim() ?? ""
+    if (!title) return notice("用法：/title <短标题>")
+    if (!context.threadId) return notice("当前没有可用 thread。")
+    return {
+      type: "rpc",
+      method: "threads.set_title",
+      params: { thread_id: context.threadId, title },
+      onSuccess: value => {
+        const named = (value as { thread?: { title?: string | null } }).thread?.title?.trim()
+        return notice(named ? `已将标题设为「${named}」` : "已更新标题")
+      },
+      onError: error => notice(`设置标题失败：${errorMessage(error)}`),
+    }
+  },
   "model.select": context => ({ type: "present", target: "models", initialQuery: context.command.argument }),
   "skills.open": () => ({ type: "present", target: "skills" }),
   "agents.list": context => context.command.argument

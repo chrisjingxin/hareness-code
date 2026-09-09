@@ -4,7 +4,7 @@
   "title": "Harness Agent Protocol v3",
   "x-harness": {
     "major": 3,
-    "minor": 8,
+    "minor": 9,
     "max_frame_bytes": 8388608,
     "max_tool_payload_bytes": 1048576,
     "operations": {
@@ -122,6 +122,13 @@
         "result": "#/$defs/threadsRedoResult",
         "capability": "threads.read",
         "controlled": true
+      },
+      "threads.set_title": {
+        "params": "#/$defs/threadsSetTitleParams",
+        "result": "#/$defs/threadsSetTitleResult",
+        "capability": "threads.read",
+        "controlled": true,
+        "min_minor": 9
       },
       "models.list": {
         "params": "#/$defs/modelsListParams",
@@ -375,6 +382,12 @@
       },
       "goal.changed": {
         "payload": "#/$defs/goalChangedPayload"
+      }
+    },
+    "notifications": {
+      "thread.summary": {
+        "params": "#/$defs/threadSummary",
+        "min_minor": 9
       }
     },
     "interactions": {
@@ -632,6 +645,10 @@
         "retryable": false
       },
       "GOAL_ALREADY_COMPLETE": {
+        "jsonrpc_code": -32602,
+        "retryable": false
+      },
+      "TITLE_EMPTY": {
         "jsonrpc_code": -32602,
         "retryable": false
       },
@@ -1911,7 +1928,8 @@
         "updated_at_ms",
         "first_message",
         "latest_message",
-        "message_count"
+        "message_count",
+        "title"
       ],
       "properties": {
         "thread_id": {
@@ -1934,6 +1952,12 @@
         "message_count": {
           "type": "integer",
           "minimum": 0
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false
@@ -2329,6 +2353,35 @@
         },
         "reverted_turn_id": {
           "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "threadsSetTitleParams": {
+      "type": "object",
+      "required": [
+        "thread_id",
+        "title"
+      ],
+      "properties": {
+        "thread_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "threadsSetTitleResult": {
+      "type": "object",
+      "required": [
+        "thread"
+      ],
+      "properties": {
+        "thread": {
+          "$ref": "#/$defs/threadSummary"
         }
       },
       "additionalProperties": false

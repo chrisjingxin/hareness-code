@@ -104,6 +104,26 @@ describe("WorkspaceSidebar", () => {
     }
   })
 
+  test("Thread 主标题优先显示 title，搜索能命中标题", () => {
+    const interactive = makeInteractive({
+      catalogs: {
+        ...makeInteractive().catalogs,
+        threads: makeCatalog([
+          makeThread({ thread_id: "t1", title: "修索引", first_message: "请检查当前改动" }),
+          makeThread({ thread_id: "t2", first_message: "另一条" }),
+        ]),
+      },
+    })
+    const handle = mountSidebar(makeSnapshot({ interactive }), [])
+    try {
+      const items = handle.container.querySelectorAll<HTMLButtonElement>(".thread-item")
+      expect(items[0]?.querySelector(".thread-item-title")?.textContent).toBe("修索引")
+      expect(items[1]?.querySelector(".thread-item-title")?.textContent).toBe("另一条")
+    } finally {
+      handle.unmount()
+    }
+  })
+
   test("Thread 搜索框渲染且列表展示全部项；Files 分区同屏", () => {
     const interactive = makeInteractive({
       catalogs: {

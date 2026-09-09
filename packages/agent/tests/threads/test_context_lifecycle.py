@@ -815,6 +815,12 @@ async def test_verified_legacy_prompt_epoch_migrates_once_to_readable_snapshot(
             connection.execute(
                 "ALTER TABLE harness_prompt_epochs DROP COLUMN prefix_change_reason"
             )
+        if source_version <= 6:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(harness_threads)")}
+            if "title" in columns:
+                connection.execute("ALTER TABLE harness_threads DROP COLUMN title")
+            if "title_origin" in columns:
+                connection.execute("ALTER TABLE harness_threads DROP COLUMN title_origin")
         connection.execute(f"PRAGMA user_version={source_version}")
         connection.commit()
     finally:

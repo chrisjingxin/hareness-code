@@ -797,6 +797,124 @@ async def test_proposal_adapter_fails_after_two_clarification_rounds(tmp_path: P
         await persistence.close()
 
 
+class _Gateway502(RuntimeError):
+    """复现网关 502：status_code 可分类，str() 与 SDK 文案一致。"""
+
+    status_code = 502
+
+    def __str__(self) -> str:
+        return "Error code: 502"
+
+
+@pytest.mark.asyncio
+async def test_proposal_adapter_retries_transient_gateway_error_then_reviews(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", _no_sleep)
+
+    project = tmp_path / "project"
+    project.mkdir()
+    persistence = await ThreadPersistence.open(project=project, home=tmp_path)
+    try:
+        store = persistence.goal_store()
+        await store.request(
+            thread_id="thread-1",
+            request_id="request-1",
+            kind="create",
+            input_text="完成协议升级",
+            expected_goal_id=None,
+            expected_revision=None,
+            ready=True,
+            now_ms=1,
+        )
+        calls = 0
+
+        async def draft(_context: GoalProposalContext) -> GoalDraft:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise _Gateway502()
+            return GoalDraft("完成协议升级", (), ("契约测试通过",))
+
+        reservation = _Reservation()
+        adapter = GoalProposalRunAdapter(
+            lambda _run: _async_value(GoalProposalServices(store, draft, lambda: 2))
+        )
+        port = _ProposalPort({"decision": "accepted"}, reservation)
+        outcome = await adapter.execute(
+            _proposal_run(reservation, provider_retry_attempts=2),
+            port,
+        )
+
+        assert calls == 2
+        assert outcome is None
+        goal = (await store.inspect("thread-1")).goal
+        assert goal is not None
+        assert goal.criteria[0].text == "契约测试通过"
+    finally:
+        await persistence.close()
+
+
+@pytest.mark.asyncio
+async def test_proposal_adapter_exhausted_gateway_error_is_stable_and_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", _no_sleep)
+
+    project = tmp_path / "project"
+    project.mkdir()
+    persistence = await ThreadPersistence.open(project=project, home=tmp_path)
+    try:
+        store = persistence.goal_store()
+        await store.request(
+            thread_id="thread-1",
+            request_id="request-1",
+            kind="create",
+            input_text="完成协议升级",
+            expected_goal_id=None,
+            expected_revision=None,
+            ready=True,
+            now_ms=1,
+        )
+        calls = 0
+
+        async def draft(_context: GoalProposalContext) -> GoalDraft:
+            nonlocal calls
+            calls += 1
+            raise _Gateway502()
+
+        reservation = _Reservation()
+        adapter = GoalProposalRunAdapter(
+            lambda _run: _async_value(GoalProposalServices(store, draft, lambda: 2))
+        )
+        outcome = await adapter.execute(
+            _proposal_run(reservation, provider_retry_attempts=2),
+            _ProposalPort({"decision": "accepted"}, reservation),
+        )
+
+        assert calls == 2
+        assert outcome is not None
+        assert outcome.status == "failed"
+        assert outcome.code == "PROVIDER_RETRY_EXHAUSTED"
+        assert outcome.retryable is True
+        assert "Error code" not in outcome.message
+        assert "502" not in outcome.message
+        pending = (await store.inspect("thread-1")).pending
+        assert pending is not None
+        assert pending.status == "failed"
+        assert pending.error_code == "PROVIDER_RETRY_EXHAUSTED"
+    finally:
+        await persistence.close()
+
+
 class _MultiStepProposalPort(_ProposalPort):
     def __init__(
         self,
@@ -830,13 +948,20 @@ class _MultiStepProposalPort(_ProposalPort):
         return InteractionResult(self.question_responses.pop(0))
 
 
-def _proposal_run(reservation: _Reservation):
+def _proposal_run(
+    reservation: _Reservation,
+    *,
+    provider_retry_attempts: int | None = None,
+):
     return SimpleNamespace(
         start=SimpleNamespace(input=GoalProposalRunInput("request-1")),
         thread_id="thread-1",
         run_id="run-1",
         context_summary={},
-        preparation=SimpleNamespace(snapshot_reservation=reservation),
+        preparation=SimpleNamespace(
+            snapshot_reservation=reservation,
+            provider_retry_attempts=provider_retry_attempts,
+        ),
     )
 
 

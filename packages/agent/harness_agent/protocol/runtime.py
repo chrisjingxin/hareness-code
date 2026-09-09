@@ -98,6 +98,11 @@ def validate_interaction_params(method: str, value: object) -> None:
     validate_ref(_entry("interactions", method)["params"], value)
 
 
+def validate_notification_params(method: str, value: object) -> None:
+    """校验非 Event 的 JSON-RPC 通知参数。"""
+    validate_ref(_entry("notifications", method)["params"], value)
+
+
 def validate_protocol_error_data(value: object) -> None:
     """校验客户端可分支处理的稳定业务错误。"""
     validate_ref("#/$defs/protocolErrorData", value)

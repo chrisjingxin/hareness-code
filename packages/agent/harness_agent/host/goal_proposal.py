@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
@@ -12,8 +13,19 @@ from harness_agent.goals.proposal import (
     GoalProposalContext,
     GoalProposalServices,
 )
-from harness_agent.host.run_execution import AdapterOutcome, RUN_PROGRESS, RUN_STARTED
+from harness_agent.host.run_execution import (
+    AdapterOutcome,
+    RUN_PROGRESS,
+    RUN_STARTED,
+    _provider_retry_for_run,
+)
 from harness_agent.runtime.interactions import InteractionRequest
+from harness_agent.runtime.provider_retry import (
+    is_provider_error,
+    is_provider_rate_limited,
+    is_provider_transient,
+    run_with_provider_retry,
+)
 
 
 class GoalProposalRunAdapter:
@@ -59,7 +71,23 @@ class GoalProposalRunAdapter:
                     now_ms=services.now_ms(),
                 )
                 port.emit(run, RUN_PROGRESS, {"phase": "model", "elapsed_ms": 0})
-                generated = await services.draft(context)
+                try:
+                    generated = await run_with_provider_retry(
+                        lambda: services.draft(context),
+                        _provider_retry_for_run(run),
+                        sleep=asyncio.sleep,
+                    )
+                except Exception as exc:  # noqa: BLE001 - provider 错误收敛为稳定终态
+                    if not is_provider_error(exc):
+                        raise
+                    outcome = _provider_draft_outcome(exc)
+                    await services.store.set_proposal_status(
+                        pending.request_id,
+                        status="failed",
+                        error_code=outcome.code,
+                        now_ms=services.now_ms(),
+                    )
+                    return outcome
                 if isinstance(generated, GoalClarification):
                     if clarification_round >= GOAL_MAX_CLARIFICATION_ROUNDS:
                         await services.store.set_proposal_status(
@@ -180,6 +208,30 @@ class GoalProposalRunAdapter:
             {"reason": "proposal_applied", "goal": goal_to_wire(applied.goal)},
         )
         return None
+
+
+def _provider_draft_outcome(error: BaseException) -> AdapterOutcome:
+    """把 draft 的 provider 故障收敛成不泄露上游正文的 adapter 终态。"""
+    if is_provider_rate_limited(error):
+        return AdapterOutcome(
+            "failed",
+            "PROVIDER_RATE_LIMITED",
+            "Provider rate limit budget exhausted",
+            retryable=True,
+        )
+    if is_provider_transient(error):
+        return AdapterOutcome(
+            "failed",
+            "PROVIDER_RETRY_EXHAUSTED",
+            "Provider retry budget exhausted",
+            retryable=True,
+        )
+    return AdapterOutcome(
+        "failed",
+        "PROVIDER_REQUEST_REJECTED",
+        "Provider rejected the model request",
+        retryable=False,
+    )
 
 
 def _question_payload(

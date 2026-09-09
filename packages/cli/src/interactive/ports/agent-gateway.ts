@@ -38,6 +38,8 @@ import {
   type ThreadsOpenResult,
   type ThreadsRedoParams,
   type ThreadsRedoResult,
+  type ThreadSummary,
+  type ThreadsSetTitleResult,
   type ThreadsSideQuestionParams,
   type ThreadsSideQuestionResult,
   type ThreadsUndoParams,
@@ -94,6 +96,8 @@ export interface InteractiveAgentRun {
 export interface AgentGateway {
   /** 订阅协议帧错误；返回取消函数。 */
   onProtocolError(listener: (error: Error) => void): () => void
+  /** 订阅 thread.summary 通知；返回取消函数。 */
+  onThreadSummary(listener: (thread: ThreadSummary) => void): () => void
   /** 订阅连接关闭；返回取消函数。 */
   onClose(listener: (error: Error) => void): () => void
   /** 注册反向 Interaction 处理器；返回取消函数。 */
@@ -109,6 +113,7 @@ export interface AgentGateway {
   commitConfig(expectedRevision: string, changes: ConfigChange[]): Promise<{ revision: string; changes: readonly unknown[]; applies_to: readonly string[] }>
   listThreads(): Promise<ThreadsListResult>
   openThread(threadId: string): Promise<ThreadsOpenResult>
+  setThreadTitle(threadId: string, title: string): Promise<ThreadsSetTitleResult>
   inspectGoal(threadId: string): Promise<GoalInspectResult>
   requestGoal(params: GoalRequestParams): Promise<GoalRequestResult>
   mutateGoal(params: GoalMutateParams): Promise<GoalMutateResult>
@@ -154,9 +159,14 @@ export function createFallbackNoopGateway(): AgentGateway {
     },
     async cancel() { return { run_id: "", cancelled: false } },
     async listThreads() { return { threads: [] } },
+    async setThreadTitle(threadId, title) {
+      return {
+        thread: { thread_id: threadId, created_at_ms: 0, updated_at_ms: 0, first_message: "", latest_message: "", message_count: 0, title },
+      }
+    },
     async openThread(id) {
       return {
-        thread: { thread_id: id, created_at_ms: 0, updated_at_ms: 0, first_message: "", latest_message: "", message_count: 0 },
+        thread: { thread_id: id, created_at_ms: 0, updated_at_ms: 0, first_message: "", latest_message: "", message_count: 0, title: null },
         messages: [],
         plan: { has_plan: false, plan_markdown: "", plan_virtual_path: "/.harness/plan.md" as const, plan_display_path: `~/.harness/plans/${id}.md` },
         goal: null,
@@ -216,6 +226,7 @@ export function createFallbackNoopGateway(): AgentGateway {
     async abandonCompose() { return { progress: null } },
     abandonInteraction() {},
     onProtocolError() { return () => {} },
+    onThreadSummary() { return () => {} },
     onClose() { return () => {} },
     setInteractionHandler() { return () => {} },
   }

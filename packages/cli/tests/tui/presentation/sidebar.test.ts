@@ -151,6 +151,51 @@ test("computeSidebarVisibility: 首页与显式模式计算", () => {
   expect(computeSidebarVisibility(drawerOpenState, 100, true).visible).toBe(false)
 })
 
+test("Sidebar 标题区显示当前 thread 短标题，不展示 thread_id", async () => {
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(Sidebar, {
+      sidebar: {
+        mode: "show",
+        drawerOpen: true,
+        focus: "sidebar",
+        activeTab: "files",
+        fileTree: { status: "ready", rows: [], selectedIndex: 0, selectedPath: null, limited: false },
+        preview: null,
+      },
+      interactive: {
+        ...sidebarInteractive,
+        catalogs: {
+          ...sidebarInteractive.catalogs,
+          threads: {
+            status: "ready",
+            items: [{
+              thread_id: "thread-1",
+              created_at_ms: 1,
+              updated_at_ms: 2,
+              first_message: "请检查当前改动并且这段很长",
+              latest_message: "好的",
+              message_count: 2,
+              title: "修索引",
+            }],
+          },
+        },
+      },
+      terminalWidth: 140,
+      terminalHeight: 40,
+      onToggle: () => undefined,
+    }), { width: 140, height: 40 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const output = setup.captureCharFrame()
+    expect(output).toContain("修索引")
+    expect(output).not.toContain("thread-1")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
 test("Sidebar 94x32 覆盖面板贴右，不会收缩到左侧", async () => {
   const width = 94
   const height = 32

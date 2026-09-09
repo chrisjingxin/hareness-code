@@ -7,6 +7,7 @@ import type { AgentSummary } from "@za38/protocol"
 
 import type { SkillMenuItem } from "../../interactive/commands"
 import { agentBrowsePurpose, agentKindLabel } from "../../presentation-shared/agent-catalog"
+import { threadDisplayTitle } from "../../presentation-shared/thread-title"
 import { SearchPicker, type SearchPickerRenderContext } from "./overlays"
 import { tuiTheme } from "./theme"
 import type { ThreadPickerItem } from "./types"
@@ -191,7 +192,7 @@ function threadPickerRow(thread: ThreadPickerItem, context: SearchPickerRenderCo
   const meta = `${threadUpdatedLabel(thread.updatedAtMs)} · ${thread.messageCount} 条消息`
   return (
     <>
-      <text width={summaryWidth} fg={context.selected ? tuiTheme.background : tuiTheme.primary} wrapMode="none" overflow="hidden">{shorten(thread.firstMessage, summaryWidth)}</text>
+      <text width={summaryWidth} fg={context.selected ? tuiTheme.background : tuiTheme.primary} wrapMode="none" overflow="hidden">{shorten(threadDisplayTitle({ title: thread.title, first_message: thread.firstMessage, latest_message: thread.latestMessage }), summaryWidth)}</text>
       {!context.compact ? <text flexGrow={1} fg={context.selected ? tuiTheme.background : tuiTheme.muted} wrapMode="none" overflow="hidden">{shorten(meta, Math.max(18, context.width - summaryWidth - 10))}</text> : null}
     </>
   )

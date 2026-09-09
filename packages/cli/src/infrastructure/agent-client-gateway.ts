@@ -29,7 +29,9 @@ import type {
   TeamsRunResult,
   ThreadsListResult,
   ThreadsListTurnsResult,
+  ThreadSummary,
   ThreadsOpenResult,
+  ThreadsSetTitleResult,
   ThreadsRedoParams,
   ThreadsRedoResult,
   ThreadsSideQuestionParams,
@@ -38,6 +40,7 @@ import type {
   ThreadsUndoResult,
 } from "@za38/protocol"
 
+import { Method, validateNotificationParams } from "@za38/protocol"
 import { AgentClient, JsonRpcRemoteError } from "../ipc/client"
 import {
   AgentGatewayError,
@@ -53,6 +56,14 @@ export class AgentClientGateway implements AgentGateway {
   onProtocolError(listener: (error: Error) => void): () => void {
     this.client.on("protocolError", listener)
     return () => this.client.off("protocolError", listener)
+  }
+
+  onThreadSummary(listener: (thread: ThreadSummary) => void): () => void {
+    const handler = (params: unknown) => {
+      listener(validateNotificationParams(Method.THREAD_SUMMARY, params))
+    }
+    this.client.on(Method.THREAD_SUMMARY, handler)
+    return () => this.client.off(Method.THREAD_SUMMARY, handler)
   }
 
   onClose(listener: (error: Error) => void): () => void {
@@ -138,6 +149,14 @@ export class AgentClientGateway implements AgentGateway {
   async openThread(threadId: string): Promise<ThreadsOpenResult> {
     try {
       return await this.client.openThread(threadId)
+    } catch (error) {
+      throw this.wrapError(error)
+    }
+  }
+
+  async setThreadTitle(threadId: string, title: string): Promise<ThreadsSetTitleResult> {
+    try {
+      return await this.client.setThreadTitle(threadId, title)
     } catch (error) {
       throw this.wrapError(error)
     }

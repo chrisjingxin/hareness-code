@@ -1,6 +1,6 @@
 /** Interactive Core 薄协调器：只做 intent 路由、listener 管理、snapshot 组装与 Feature 生命周期编排；具体业务逻辑在 features/ 下按 Feature 拆分。 */
 
-import { Capability, type ModelProfile } from "@za38/protocol"
+import { Capability, type ModelProfile, type ThreadSummary } from "@za38/protocol"
 import { contextCompactNotice, type CommandResult, type CommandRpcMethod, dispatchSlashCommand } from "./command-dispatcher"
 import { builtinCommandCapabilities } from "./commands"
 import { CatalogFeature, CommandFeature, formatMcpStatusNotice, GoalFeature, InteractionFeature, McpFeature, ModelFeature, PLAN_IMPLEMENT_PROMPT, RunFeature, SkillFeature, ThreadFeature, TimelineFeature, type FeatureContext } from "./features"
@@ -20,6 +20,7 @@ export class InteractiveControllerImpl implements InteractiveController {
   private readonly listeners = new Set<(snapshot: InteractiveSnapshot) => void>()
   private readonly clearInteractionHandler: () => void
   private readonly unsubscribeProtocolError: () => void
+  private readonly unsubscribeThreadSummary: () => void
   private readonly unsubscribeClose: () => void
   private state: InteractiveState
   private snapshot: InteractiveSnapshot
@@ -77,6 +78,11 @@ export class InteractiveControllerImpl implements InteractiveController {
       if (this.closed) return
       this.connection = { status: "protocol-error", message: error.message }
       this.commit(current => appendNotice(current, `protocol-error: ${error.message}`))
+    }) ?? (() => {})
+
+    this.unsubscribeThreadSummary = this.gateway.onThreadSummary?.(thread => {
+      if (this.closed) return
+      this.catalogFeature.upsertThread(thread, this.featureContext)
     }) ?? (() => {})
 
     this.unsubscribeClose = this.gateway.onClose?.(error => {
@@ -243,6 +249,7 @@ export class InteractiveControllerImpl implements InteractiveController {
     if (this.closed) return
     this.closed = true
     this.unsubscribeProtocolError()
+    this.unsubscribeThreadSummary()
     this.unsubscribeClose()
     this.clearInteractionHandler()
     this.interactionFeature.close(this.featureContext)
@@ -290,6 +297,7 @@ export class InteractiveControllerImpl implements InteractiveController {
       onEvent: event => this.timelineFeature.processAgentEvent(event, this.featureContext),
       onRunFinish: (actualModel?: ModelProfile, context?: Record<string, unknown>) => this.finishRun(actualModel, context),
       onAbandonInteraction: () => this.interactionFeature.abandonPendingInteraction(this.featureContext),
+      onAccepted: () => { void this.catalogFeature.refreshThreadCatalog(this.featureContext) },
     })
   }
   private finishRun(
@@ -343,6 +351,7 @@ export class InteractiveControllerImpl implements InteractiveController {
         outcome === "completed",
       ),
       onAbandonInteraction: () => this.interactionFeature.abandonPendingInteraction(this.featureContext),
+      onAccepted: () => { void this.catalogFeature.refreshThreadCatalog(this.featureContext) },
     })
   }
 
@@ -362,6 +371,7 @@ export class InteractiveControllerImpl implements InteractiveController {
       onEvent: event => this.timelineFeature.processAgentEvent(event, this.featureContext),
       onRunFinish: (actualModel, context) => this.finishRun(actualModel, context),
       onAbandonInteraction: () => this.interactionFeature.abandonPendingInteraction(this.featureContext),
+      onAccepted: () => { void this.catalogFeature.refreshThreadCatalog(this.featureContext) },
     })
   }
 
@@ -398,6 +408,7 @@ export class InteractiveControllerImpl implements InteractiveController {
       onEvent: event => this.timelineFeature.processAgentEvent(event, this.featureContext),
       onRunFinish: (actualModel?: ModelProfile, context?: Record<string, unknown>) => this.finishRun(actualModel, context),
       onAbandonInteraction: () => this.interactionFeature.abandonPendingInteraction(this.featureContext),
+      onAccepted: () => { void this.catalogFeature.refreshThreadCatalog(this.featureContext) },
     })
   }
   private async applyCommandResult(result: CommandResult): Promise<IntentOutcome> {
@@ -527,11 +538,16 @@ export class InteractiveControllerImpl implements InteractiveController {
           onEvent: event => this.timelineFeature.processAgentEvent(event, this.featureContext),
           onRunFinish: (actualModel?: ModelProfile, context?: Record<string, unknown>) => this.finishRun(actualModel, context),
           onAbandonInteraction: () => this.interactionFeature.abandonPendingInteraction(this.featureContext),
+      onAccepted: () => { void this.catalogFeature.refreshThreadCatalog(this.featureContext) },
         })
       }
       case "rpc":
         try {
           const value = await this.invokeCommandRpc(result.method, result.params)
+          if (result.method === "threads.set_title") {
+            const thread = (value as { thread?: ThreadSummary }).thread
+            if (thread) this.catalogFeature.upsertThread(thread, this.featureContext)
+          }
           return this.applyCommandResult(result.onSuccess(value))
         } catch (error) {
           return this.applyCommandResult(result.onError(error))
@@ -548,6 +564,14 @@ export class InteractiveControllerImpl implements InteractiveController {
           return Promise.reject(new Error("Thread 参数无效"))
         }
         return this.gateway.openThread(params.thread_id)
+      case "threads.set_title": {
+        const threadId = params.thread_id
+        const title = params.title
+        if (typeof threadId !== "string" || !threadId || typeof title !== "string") {
+          return Promise.reject(new Error("Thread 标题参数无效"))
+        }
+        return this.gateway.setThreadTitle(threadId, title)
+      }
       case "agents.list":
         return this.gateway.listAgents()
       case "teams.list":

@@ -357,7 +357,8 @@
           "updated_at_ms": 1,
           "first_message": "x",
           "latest_message": "x",
-          "message_count": 1
+          "message_count": 1,
+          "title": "x"
         },
         "messages": [],
         "plan": {
@@ -426,7 +427,8 @@
           "updated_at_ms": 1,
           "first_message": "x",
           "latest_message": "x",
-          "message_count": 1
+          "message_count": 1,
+          "title": "x"
         },
         "messages": [],
         "plan": {
@@ -561,6 +563,31 @@
       "value": {
         "success": false,
         "restored_to_turn_id": "x"
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.set_title",
+      "case": "valid",
+      "value": {
+        "thread_id": "x",
+        "title": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.set_title",
+      "case": "valid",
+      "value": {
+        "thread": {
+          "thread_id": "x",
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "first_message": "x",
+          "latest_message": "x",
+          "message_count": 1,
+          "title": "x"
+        }
       }
     },
     {
@@ -1927,6 +1954,20 @@
       }
     },
     {
+      "kind": "notification.params",
+      "name": "thread.summary",
+      "case": "valid",
+      "value": {
+        "thread_id": "x",
+        "created_at_ms": 1,
+        "updated_at_ms": 1,
+        "first_message": "x",
+        "latest_message": "x",
+        "message_count": 1,
+        "title": "x"
+      }
+    },
+    {
       "kind": "error",
       "name": "ProtocolErrorData",
       "case": "valid",
@@ -2382,6 +2423,15 @@
       "case": "valid",
       "value": {
         "code": "GOAL_ALREADY_COMPLETE",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "TITLE_EMPTY",
+      "case": "valid",
+      "value": {
+        "code": "TITLE_EMPTY",
         "retryable": false
       }
     },
@@ -3310,7 +3360,8 @@
           "updated_at_ms": 1,
           "first_message": "x",
           "latest_message": "x",
-          "message_count": 1
+          "message_count": 1,
+          "title": "x"
         },
         "messages": [],
         "plan": {
@@ -3452,7 +3503,8 @@
           "updated_at_ms": 1,
           "first_message": "x",
           "latest_message": "x",
-          "message_count": 1
+          "message_count": 1,
+          "title": "x"
         },
         "messages": [],
         "plan": {
@@ -3784,6 +3836,59 @@
       "value": {
         "restored_to_turn_id": "x"
       }
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.set_title",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.set_title",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "title": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.set_title",
+      "case": "missing_field",
+      "value": {
+        "title": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.set_title",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.set_title",
+      "case": "extra_field",
+      "value": {
+        "thread": {
+          "thread_id": "x",
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "first_message": "x",
+          "latest_message": "x",
+          "message_count": 1,
+          "title": "x"
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.set_title",
+      "case": "missing_field",
+      "value": {}
     },
     {
       "kind": "operation.params",
@@ -6759,6 +6864,40 @@
       "value": null
     },
     {
+      "kind": "notification.params",
+      "name": "thread.summary",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "notification.params",
+      "name": "thread.summary",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "created_at_ms": 1,
+        "updated_at_ms": 1,
+        "first_message": "x",
+        "latest_message": "x",
+        "message_count": 1,
+        "title": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "notification.params",
+      "name": "thread.summary",
+      "case": "missing_field",
+      "value": {
+        "created_at_ms": 1,
+        "updated_at_ms": 1,
+        "first_message": "x",
+        "latest_message": "x",
+        "message_count": 1,
+        "title": "x"
+      }
+    },
+    {
       "kind": "error",
       "name": "ProtocolErrorData",
       "case": "wrong_type",
@@ -7079,6 +7218,12 @@
     {
       "kind": "error",
       "name": "GOAL_ALREADY_COMPLETE",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "TITLE_EMPTY",
       "case": "wrong_type",
       "value": null
     },

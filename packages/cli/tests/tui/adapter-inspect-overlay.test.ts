@@ -29,7 +29,7 @@ test("执行中 /goal 打开 inspect overlay，Esc 关闭后 Run 继续", async 
     capabilities: [Capability.GOAL_READ, Capability.GOAL_MANAGE],
     initialThreadId: "thread-goal",
     openThreadImpl: async threadId => ({
-      thread: { thread_id: threadId, created_at_ms: 1, updated_at_ms: 2, first_message: "", latest_message: "", message_count: 0 },
+      thread: { thread_id: threadId, created_at_ms: 1, updated_at_ms: 2, first_message: "", latest_message: "", message_count: 0, title: null },
       messages: [],
       plan: { has_plan: false, plan_markdown: "", plan_virtual_path: "/.harness/plan.md", plan_display_path: `~/.harness/plans/${threadId}.md` },
       goal: goalProjection(),
@@ -83,7 +83,7 @@ test("审批到来时关闭 Goal/Status/BTW overlay", async () => {
     capabilities: [Capability.GOAL_READ, Capability.GOAL_MANAGE],
     initialThreadId: "thread-goal",
     openThreadImpl: async threadId => ({
-      thread: { thread_id: threadId, created_at_ms: 1, updated_at_ms: 2, first_message: "", latest_message: "", message_count: 0 },
+      thread: { thread_id: threadId, created_at_ms: 1, updated_at_ms: 2, first_message: "", latest_message: "", message_count: 0, title: null },
       messages: [],
       plan: { has_plan: false, plan_markdown: "", plan_virtual_path: "/.harness/plan.md", plan_display_path: `~/.harness/plans/${threadId}.md` },
       goal: goalProjection(),
