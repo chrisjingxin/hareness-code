@@ -174,7 +174,7 @@ function isInteractiveIntent(value: unknown): value is InteractiveIntent {
       return exactFields(value, ["type"])
     case "catalog.refresh":
       return exactFields(value, ["type", "catalog"])
-        && (value.catalog === "threads" || value.catalog === "models" || value.catalog === "skills" || value.catalog === "mcp")
+        && (value.catalog === "threads" || value.catalog === "models" || value.catalog === "skills" || value.catalog === "mcp" || value.catalog === "agents")
     case "thread.open":
       return exactFields(value, ["type", "threadId"]) && isNonEmptyString(value.threadId, 256)
     case "model.select":

@@ -81,6 +81,7 @@ const clientMessages: WebUiClientMessage[] = [
   { type: "interactive.intent", requestId: "r-2", revision: 0, intent: { type: "command.execute", commandId: "clear", argument: "" } },
   { type: "interactive.intent", requestId: "r-3", revision: 3, intent: { type: "run.cancel" } },
   { type: "interactive.intent", requestId: "r-4", revision: 1, intent: { type: "catalog.refresh", catalog: "mcp" } },
+  { type: "interactive.intent", requestId: "r-4-agents", revision: 1, intent: { type: "catalog.refresh", catalog: "agents" } },
   { type: "interactive.intent", requestId: "r-5", revision: 1, intent: { type: "thread.open", threadId: "t-1" } },
   { type: "interactive.intent", requestId: "r-6", revision: 1, intent: { type: "model.select", profileId: "fast" } },
   { type: "interactive.intent", requestId: "r-7", revision: 1, intent: { type: "skill.arm", skillId: "user/demo" } },
@@ -231,6 +232,7 @@ test("interactive.intent：各 type 的最小字段校验", () => {
   expect(parseClientFrame(frame({ type: "run.cancel", extra: 1 }))).toBeUndefined()
   // catalog.refresh 未知 catalog
   expect(parseClientFrame(frame({ type: "catalog.refresh", catalog: "unknown" }))).toBeUndefined()
+  expect(parseClientFrame(frame({ type: "catalog.refresh", catalog: "agents", extra: 1 }))).toBeUndefined()
   // model.select / skill.arm 缺 id
   expect(parseClientFrame(frame({ type: "model.select" }))).toBeUndefined()
   expect(parseClientFrame(frame({ type: "skill.arm" }))).toBeUndefined()
