@@ -31,7 +31,7 @@ def _write_skill(root: Path) -> None:
 
 async def test_virtual_files_read_skills_and_thread_scoped_history(tmp_path: Path):
     """正文/资源按 read_file 分页返回，历史只允许当前 project 和 thread 读取。"""
-    from harness_agent.extensions.skills import SkillRegistry
+    from harness_agent.extensions.plugin_skills import SkillRegistry
     from harness_agent.threads.thread_persistence import CommitContextRewrite, ContextArtifactDraft, ThreadPersistence
     from harness_agent.threads.virtual_files import HarnessVirtualBackend
 
@@ -118,7 +118,7 @@ def test_ensure_plan_file_never_truncates_existing_draft(tmp_path: Path) -> None
 
 async def test_virtual_skill_success_logs_identity_without_content(tmp_path: Path) -> None:
     """正文与资源成功分页后记 identity；失败读取不伪造成功事件。"""
-    from harness_agent.extensions.skills import SkillRegistry
+    from harness_agent.extensions.plugin_skills import SkillRegistry
     from harness_agent.threads.virtual_files import HarnessVirtualBackend
 
     workspace = tmp_path / "workspace"
@@ -156,7 +156,7 @@ async def test_virtual_skill_reads_are_isolated_between_old_and_new_snapshots(
     tmp_path: Path,
 ):
     """旧 Run 的虚拟正文/资源不随磁盘修改或删除串到下一 Run。"""
-    from harness_agent.extensions.skills import SkillRegistry
+    from harness_agent.extensions.plugin_skills import SkillRegistry
     from harness_agent.threads.virtual_files import HarnessVirtualBackend
 
     workspace = tmp_path / "workspace"
@@ -229,7 +229,7 @@ async def test_run_scoped_virtual_backend_isolates_shared_graph_history(
 
     from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
     from harness_agent.runtime.run_context import RunContext
-    from harness_agent.extensions.skills import SkillRegistry
+    from harness_agent.extensions.plugin_skills import SkillRegistry
     from harness_agent.threads.thread_persistence import CommitContextRewrite, ContextArtifactDraft, ThreadPersistence
     from harness_agent.threads.virtual_files import mount_run_scoped_virtual_files
 
@@ -298,7 +298,7 @@ async def test_run_scoped_virtual_backend_requires_the_run_skill_snapshot(
 
     from harness_agent.threads.context_lifecycle import ContextLifecycle
     from harness_agent.runtime.run_context import RunContext, RunContextError
-    from harness_agent.extensions.skills import SkillRegistry
+    from harness_agent.extensions.plugin_skills import SkillRegistry
     from harness_agent.threads.virtual_files import mount_run_scoped_virtual_files
 
     workspace = tmp_path / "workspace"
@@ -365,7 +365,7 @@ def test_run_scoped_virtual_backend_observes_runtime_plan_activation(
     """同一 Run 的运行时 flag 打开后，新解析的虚拟后端允许写计划文件。"""
     from deepagents.backends import LocalShellBackend
 
-    from harness_agent.extensions.skills import SkillRegistry
+    from harness_agent.extensions.plugin_skills import SkillRegistry
     from harness_agent.runtime.run_context import RunContext
     from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
     from harness_agent.threads.virtual_files import mount_run_scoped_virtual_files

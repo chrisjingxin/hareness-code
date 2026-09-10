@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping
 
@@ -37,16 +37,6 @@ _TEMPLATE_PLACEHOLDER_PATTERN = re.compile(
 )
 
 
-class ComposeStage(str, Enum):
-    """Compose 五阶段；顺序由状态机推进，模型不能自行跳阶段。"""
-
-    UNDERSTAND = "understand"
-    PLAN = "plan"
-    BUILD = "build"
-    VERIFY = "verify"
-    REVIEW = "review"
-
-
 class StageState(str, Enum):
     """单个阶段的确定性状态。"""
 
@@ -57,17 +47,6 @@ class StageState(str, Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     BLOCKED = "blocked"
-
-
-class ComposeRunStatus(str, Enum):
-    """Run 级状态；终态由 RunCoordinator 唯一收敛到 wire。"""
-
-    RUNNING = "running"
-    WAITING_USER = "waiting_user"
-    BLOCKED = "blocked"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
 
 
 class ThreadMode(str, Enum):
@@ -269,73 +248,6 @@ class ComposeTask:
     def to_projection(self) -> dict[str, object]:
         """只暴露 wire 允许的 id/title/status。"""
         return {"id": self.id, "title": self.title, "status": self.status.value}
-
-
-@dataclass(frozen=True, slots=True)
-class EvidenceItem:
-    """Verify 命令的 projection 条目；label 是命令的稳定身份。"""
-
-    label: str
-    status: EvidenceStatus
-
-
-@dataclass(slots=True)
-class ComposeRunState:
-    """Compose Run 的唯一状态事实；由 ComposeStateMachine 推进。
-
-    状态机每次 transition 都先拷贝再修改，实例自身不可复用；非 frozen
-    是为了允许 handler 在一次拷贝上完成多字段更新。
-    """
-
-    thread_id: str
-    run_id: str
-    revision: int = 0
-    stage: ComposeStage = ComposeStage.UNDERSTAND
-    status: ComposeRunStatus = ComposeRunStatus.RUNNING
-    stages: dict[ComposeStage, StageState] = field(default_factory=dict)
-    stage_attempts: dict[ComposeStage, int] = field(default_factory=dict)
-    schema_retry_used: dict[ComposeStage, bool] = field(default_factory=dict)
-    understanding_artifact_id: str | None = None
-    plan_artifact_id: str | None = None
-    tasks: tuple[ComposeTask, ...] = ()
-    verification_evidence_id: str | None = None
-    review_report_id: str | None = None
-    evidence: tuple[EvidenceItem, ...] = ()
-    verify_fix_round: int = 0
-    review_fix_round: int = 0
-    blocked_reason: str | None = None
-
-    @property
-    def terminal(self) -> bool:
-        """Run 是否已进入唯一终态。"""
-        return self.status in {
-            ComposeRunStatus.COMPLETED,
-            ComposeRunStatus.FAILED,
-            ComposeRunStatus.BLOCKED,
-            ComposeRunStatus.CANCELLED,
-        }
-
-    def projection(self) -> dict[str, object]:
-        """生成有界完整 projection；不含 artifact 正文、Prompt 或内部配置。"""
-        return {
-            "revision": self.revision,
-            "stage": self.stage.value,
-            "status": self.status.value,
-            "stages": [
-                {
-                    "id": stage.value,
-                    "status": self.stages.get(stage, StageState.PENDING).value,
-                    "attempts": self.stage_attempts.get(stage, 0),
-                }
-                for stage in ComposeStage
-            ],
-            "tasks": [task.to_projection() for task in self.tasks],
-            "evidence": [
-                {"label": item.label, "status": item.status.value}
-                for item in self.evidence
-            ],
-            "blocked_reason": self.blocked_reason,
-        }
 
 
 # ---------- 有界字符串辅助 ----------

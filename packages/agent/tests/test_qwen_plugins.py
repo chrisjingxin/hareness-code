@@ -19,9 +19,9 @@ from harness_agent.config.config import ExecutionSettings, ModelCatalog, ModelPr
 from harness_agent.extensions.mcp import build_mcp_snapshot
 from harness_agent.extensions.plugin_skills import (
     SkillError as PluginSkillError,
+    SkillRegistry,
     SkillRegistry as PluginSkillRegistry,
 )
-from harness_agent.extensions.skills import SkillRegistry
 from harness_agent.plugins.manager import PluginManager
 from harness_agent.plugins.model import PluginError
 from harness_agent.protocol.generated import EventEnvelope

@@ -32,12 +32,12 @@ def test_compose_engine_only_mutates_run_lifecycle_through_port() -> None:
     source = inspect.getsource(ComposeWorkItemEngine)
     assert "run.status =" not in source
     assert "run.pending_transcript" not in source
-from harness_agent.host.run_execution import (
-    MAX_TOOL_PAYLOAD_BYTES,
-    _capture_transcript_message,
-    _extract_interaction,
-    _message_text,
-    _translate_stream_event,
+from harness_agent.host.run_execution import MAX_TOOL_PAYLOAD_BYTES
+from tests.support.run_stream import (
+    capture_transcript_message as _capture_transcript_message,
+    extract_host_interaction as _extract_interaction,
+    message_text as _message_text,
+    translate_run_stream_event as _translate_stream_event,
 )
 from harness_agent.runtime.execution_binding import ExecutionRef
 from harness_agent.compose.models import ThreadMode

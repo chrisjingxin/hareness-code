@@ -183,7 +183,7 @@ from harness_agent.extensions.mcp import (
 from harness_agent.runtime.run_context import RunCancellationToken, RunContext, RunPlanConstraint
 from harness_agent.runtime.interactions import InteractionRequest
 from harness_agent.runtime.agent_engine_profile import AgentEngineProfile
-from harness_agent.runtime.resource_ownership import (
+from harness_agent.runtime.resource_lifecycle import (
     ResourceScope,
     SharedResourceLease,
     SharedResourceOwner,
@@ -4292,12 +4292,13 @@ class AgentHost:
                 config,
             )
             registry = await self._refresh_skill_catalog_locked()
-            profile = await self._resolve_agent_engine_profile(
+            spec = await self._resolve_agent_engine_spec(
                 thread_id,
                 config,
                 resolved_binding,
                 skill_registry=registry,
             )
+            profile = spec.runtime_profile
         pool = self._ensure_agent_engine_pool(config)
         lease = await pool.acquire(profile)
         return lease, lease.engine
@@ -4380,24 +4381,6 @@ class AgentHost:
         # 同一 Key 保留第一次解析出的对象，保证 Pool builder 与 RunContext
         # 取回的是同一个快照，而不是后续请求重新拼出的近似对象。
         return self._resolved_agent_specs.setdefault(profile.profile_key, spec)
-
-    async def _resolve_agent_engine_profile(
-        self,
-        thread_id: str,
-        config: Za38Config,
-        resolved_binding: ResolvedExecutionBinding,
-        *,
-        skill_registry: SkillRegistry,
-    ) -> AgentEngineProfile:
-        """兼容现有调用方，只返回由 ResolvedAgentSpec 生成的 Profile。"""
-        return (
-            await self._resolve_agent_engine_spec(
-                thread_id,
-                config,
-                resolved_binding,
-                skill_registry=skill_registry,
-            )
-        ).runtime_profile
 
     async def _invalidate_profiles_for_snapshot(
         self,

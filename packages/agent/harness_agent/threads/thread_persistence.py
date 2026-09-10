@@ -2951,17 +2951,6 @@ class ThreadPersistence:
             lock=self._lock,
         )
 
-    def compose_artifact_store(self) -> "ComposeArtifactStore":
-        """返回借用同一连接和事务锁的项目级 Compose artifact 存储。"""
-        self._ensure_open()
-        from harness_agent.threads.compose_artifact_store import ComposeArtifactStore
-
-        return ComposeArtifactStore(
-            self._connection,
-            project_fingerprint=self._project_fingerprint,
-            lock=self._lock,
-        )
-
     def compose_activity_store(self) -> "ComposeActivityStore":
         """返回借用同一连接和事务锁的 Compose activity 审计存储。"""
         self._ensure_open()

@@ -22,7 +22,7 @@ from deepagents.backends.protocol import (
 )
 from langgraph.runtime import get_runtime
 
-from harness_agent.extensions.skills import SkillError, SkillRegistry
+from harness_agent.extensions.plugin_skills import SkillError, SkillRegistry
 from harness_agent.diagnostic_log.runtime import ensure_log
 from harness_agent.runtime.run_context import plan_constraint_active, require_run_context
 from harness_agent.tools.plan_file import (

@@ -69,7 +69,7 @@ from harness_agent.runtime.run_context import (
     RunContext,
 )
 from harness_agent.runtime.approval_presentation import ApprovalPresentationStore
-from harness_agent.extensions.skills import LoadedSkill
+from harness_agent.extensions.plugin_skills import LoadedSkill
 from harness_agent.protocol.generated import PROTOCOL_MINOR
 from harness_agent.threads.thread_persistence import (
     AcceptRun,

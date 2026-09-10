@@ -43,12 +43,9 @@ from harness_agent.runtime.execution_stream import (
     bounded_json,
     content_text,
     ensure_model_round_for_assistant,
-    extract_interaction,
     message_text,
     resolve_tool_result_id,
     resolve_tool_stream_id,
-    translate_stream_event,
-    truncate_text,
 )
 from harness_agent.runtime.managed_agent_executor import (
     ManagedAgentExecutionError,
@@ -77,7 +74,6 @@ RUN_COMPLETED = "run.completed"
 RUN_CANCELLED = "run.cancelled"
 RUN_FAILED = "run.failed"
 
-# 兼容旧测试与 coordinator 的 re-export。
 __all__ = [
     "MAX_TOOL_PAYLOAD_BYTES",
     "RUN_STARTED",
@@ -1268,72 +1264,3 @@ def _run_progress_payload(run: RunState, phase: str) -> dict[str, object]:
 def _bounded_json(value: object) -> object:
     """Host 侧 re-export；实现位于 execution_stream。"""
     return bounded_json(value)
-
-
-# ---------------------------------------------------------------------------
-# 测试兼容包装：既有 host 测试仍从 run_execution 导入这些符号。
-# 关联状态统一走 StreamSession；不再维护第二条 translator 路径。
-# ---------------------------------------------------------------------------
-
-
-def _translate_stream_event(
-    event: tuple[Any, ...], run: RunState
-) -> list[tuple[str, dict[str, object]]]:
-    """测试兼容：返回 (type, payload) 列表，内部使用共享 stream translator。"""
-    session = _stream_session_for(run)
-    try:
-        return [
-            (signal.type, dict(signal.payload))
-            for signal in translate_stream_event(
-                event, session, content_visibility="passthrough"
-            )
-        ]
-    except ExecutionStreamError as exc:
-        raise _run_error(exc.code, exc.message) from exc
-
-
-def _extract_interaction(
-    event: tuple[Any, ...],
-    *,
-    needs_user_decision: Callable[[str, Mapping[str, object]], bool] | None = None,
-) -> tuple[Any, dict[str, object] | None]:
-    """测试兼容：返回 Host InteractionRequest 或 None。"""
-    request, auto = extract_interaction(
-        event, needs_user_decision=needs_user_decision
-    )
-    if request is None:
-        return None, auto
-    return _to_host_interaction(request), auto
-
-
-def _message_text(message: object) -> str:
-    """测试兼容。"""
-    return message_text(message)
-
-
-def _capture_transcript_message(run: RunState, chunk: object) -> bool:
-    """测试与 Build 兼容入口：自动绑定 stream session。"""
-    return _capture_transcript_on_session(run, _stream_session_for(run), chunk)
-
-
-def _truncate_text(value: str) -> tuple[str, bool, int]:
-    """测试兼容。"""
-    return truncate_text(value)
-
-
-def _resume_value(spec: Any, response: object) -> dict[str, object]:
-    """测试兼容：接受 Host InteractionRequest。"""
-    from harness_agent.runtime.execution_stream import resume_value
-
-    if isinstance(spec, StreamInteractionRequest):
-        return resume_value(spec, response)
-    stream_spec = StreamInteractionRequest(
-        request_id=spec.request_id,
-        type=spec.type,
-        payload=spec.payload,
-        interrupt_id=spec.interrupt_id,
-        questions=spec.questions,
-        action_count=spec.action_count,
-        serial_context=spec.serial_context,
-    )
-    return resume_value(stream_spec, response)

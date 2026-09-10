@@ -501,7 +501,7 @@ async def test_smoke_with_real_harness_config_and_mock_model(tmp_path: Path) -> 
     """Smoke: 真实配置加载与构图，证明两个内置角色与 task 自动注册且可用。"""
     from harness_agent.config.config import load_config
     from harness_agent.extensions.mcp import build_mcp_snapshot
-    from harness_agent.extensions.skills import SkillRegistry
+    from harness_agent.extensions.plugin_skills import SkillRegistry
     from harness_agent.runtime.agent_spec import resolve_builtin_main_agent_spec
     from harness_agent.runtime.execution_binding import (
         ExecutionMode,

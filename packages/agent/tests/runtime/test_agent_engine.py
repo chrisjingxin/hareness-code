@@ -331,7 +331,7 @@ async def test_engine_close_continues_after_resource_failure_and_is_idempotent()
 def test_engine_resource_bundle_rejects_borrowed_host_resource_closer():
     """AgentEngine Bundle 不能登记借用的 Host 资源关闭器。"""
     from harness_agent.runtime.agent_engine import AgentEngineCloseAdapter
-    from harness_agent.runtime.resource_ownership import ResourceAccess, ResourceScope
+    from harness_agent.runtime.resource_lifecycle import ResourceAccess, ResourceScope
 
     with pytest.raises(ValueError, match="RUNTIME_CLOSE_ADAPTER_INVALID"):
         AgentEngineCloseAdapter(

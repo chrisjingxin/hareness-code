@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from harness_agent.runtime.resource_ownership import ResourceScope, SharedResourceOwner
+from harness_agent.runtime.resource_lifecycle import ResourceScope, SharedResourceOwner
 
 
 async def test_retired_shared_resource_waits_for_last_engine_borrower() -> None:

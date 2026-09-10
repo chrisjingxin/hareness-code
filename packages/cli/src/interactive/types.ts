@@ -184,9 +184,6 @@ export type IntentOutcome =
   | { status: "accepted"; effects?: readonly PresentationEffect[] }
   | { status: "rejected"; code: RejectionCode; message: string }
 
-/** 兼容别名（暂保留） */
-export type InteractiveResult = PresentationEffect
-
 /** 表现层唯一的输入入口；不携带选中行、DOM event 或 OpenTUI key。 */
 export type InteractiveIntent =
   | { type: "input.submit"; value: string; mode?: "build" | "compose" | "direct_shell" }
@@ -270,15 +267,9 @@ export interface InteractiveController {
   close(): Promise<void>
 }
 
-/** 兼容导出：可注入的本地定时器。 */
-export type InteractiveScheduler = Scheduler
-
 /** 创建 InteractiveController 的依赖与一次性恢复输入。 */
 export type InteractiveControllerOptions = {
-  gateway?: AgentGateway
-  /** 兼容别名属性：AgentGateway 传入 */
-  agent?: AgentGateway
-  runtime?: InteractiveRuntime
+  gateway: AgentGateway
   baseRuntime?: InteractiveRuntime
   /** 缺省表示不做启动恢复；显式 null 进入空首页；字符串调用 canonical threads.open。 */
   initialThreadId?: string | null

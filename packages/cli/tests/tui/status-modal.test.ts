@@ -20,7 +20,7 @@ test("StatusModal visible=false 时不渲染任何内容", async () => {
     approvalMode: "default",
   }
   const controller = createInteractiveController({
-    runtime,
+    baseRuntime: runtime,
     gateway: createFallbackNoopGateway(),
     idGenerator: { uuid: () => "00000000-0000-4000-8000-000000000000" },
   })
@@ -60,7 +60,7 @@ test("StatusModal visible=true 时正确渲染 4 大卡片模块与快捷键", a
     gitWorkspace: { kind: "branch", branch: "main", root: "/test/project" },
   }
   const controller = createInteractiveController({
-    runtime,
+    baseRuntime: runtime,
     gateway: createFallbackNoopGateway(),
     idGenerator: { uuid: () => "00000000-0000-4000-8000-000000000000" },
   })
@@ -125,7 +125,7 @@ test("Adapter 执行 /status 会打开 statusModal，通过 status-close 或 Esc
     approvalMode: "default",
   }
   const controller = createInteractiveController({
-    runtime,
+    baseRuntime: runtime,
     gateway: createFallbackNoopGateway(),
     idGenerator: { uuid: () => "00000000-0000-4000-8000-000000000000" },
   })
@@ -164,7 +164,7 @@ test("StatusModal 正确统计 Timeline 消息、工具调用与 Token 估算", 
     approvalMode: "default",
   }
   const controller = createInteractiveController({
-    runtime,
+    baseRuntime: runtime,
     gateway: createFallbackNoopGateway(),
     idGenerator: { uuid: () => "00000000-0000-4000-8000-000000000000" },
   })

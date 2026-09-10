@@ -29,6 +29,21 @@ test("interactive/ 生产代码零 crypto.randomUUID() 与 Date.now() 直调（�
   }
 })
 
+test("Interactive Core 不再保留兼容别名与生产 noop gateway", async () => {
+  const files = sourceFiles(interactiveSrcDir)
+  const controller = await readFile(resolve(interactiveSrcDir, "controller.ts"), "utf8")
+  expect(controller).not.toContain("createFallbackNoopGateway")
+  expect(controller).not.toMatch(/options\.agent\b/)
+  expect(controller).not.toMatch(/options\.runtime\s*\?\?/)
+
+  for (const filePath of files) {
+    const content = await readFile(filePath, "utf8")
+    expect(content).not.toContain("export type InteractiveScheduler")
+    expect(content).not.toContain("export type InteractiveResult")
+    expect(filePath.endsWith("agent-port.ts")).toBe(false)
+  }
+})
+
 test("interactive/ 生产代码零 UI/平台库（react, @opentui, tui, web, WebSocket, node:*）", async () => {
   const files = sourceFiles(interactiveSrcDir)
 

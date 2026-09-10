@@ -17,8 +17,7 @@ from typing import Any
 
 from harness_agent.diagnostic_log.runtime import ensure_log
 from harness_agent.runtime.agent_engine_profile import AgentEngineProfile
-from harness_agent.runtime.resource_lifecycle import ResourceScope, SharedResourceLease
-from harness_agent.runtime.resource_ownership import ResourceAccess
+from harness_agent.runtime.resource_lifecycle import ResourceAccess, ResourceScope, SharedResourceLease
 
 logger = logging.getLogger(__name__)
 

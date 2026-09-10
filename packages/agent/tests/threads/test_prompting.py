@@ -17,7 +17,7 @@ def _write_skill(root: Path, name: str, description: str, body: str = "正文") 
 
 def test_skill_index_is_sorted_bounded_and_does_not_leak_body(tmp_path: Path):
     """稳定索引只应携带受限元数据，正文和宿主根目录均不能出现在 system 区段。"""
-    from harness_agent.extensions.skills import MAX_SKILL_INDEX_CHARS, SkillRegistry
+    from harness_agent.extensions.plugin_skills import MAX_SKILL_INDEX_CHARS, SkillRegistry
 
     workspace = tmp_path / "workspace"
     _write_skill(workspace / ".harness" / "skills", "zeta", "z" * 300, "SECRET_SKILL_BODY")

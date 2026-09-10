@@ -11,10 +11,11 @@ import {
   type ThreadSummary,
 } from "@za38/protocol"
 
-import type { InteractiveAgentPort, InteractiveAgentRun, InteractiveRunCompletion } from "../../src/interactive/agent-port"
+import type { AgentGateway, InteractiveAgentRun, InteractiveRunCompletion } from "../../src/interactive/ports/agent-gateway"
 import { createInteractiveController } from "../../src/interactive/controller"
 import type { CommandRegistry } from "../../src/interactive/commands"
-import type { InteractiveController, InteractiveScheduler, InteractiveSnapshot } from "../../src/interactive/types"
+import type { InteractiveController, InteractiveSnapshot } from "../../src/interactive/types"
+import type { Scheduler } from "../../src/interactive/ports"
 import type { InteractiveRuntime } from "../../src/interactive/runtime"
 
 export const runtime: InteractiveRuntime = {
@@ -51,7 +52,7 @@ export function manualScheduler() {
         entries.push(entry)
         return () => { entry.cancel = true }
       },
-    } satisfies InteractiveScheduler,
+    } satisfies Scheduler,
     /** 触发所有已到期的 timeout；返回触发的回调数。 */
     runExpired(): number {
       const now = Math.max(...entries.map(entry => entry.ms), 0)
@@ -78,8 +79,8 @@ export function manualScheduler() {
 
 /** 内存 port：记录调用、可注入 Run 事件与 Interaction。 */
 function createPort(options: {
-  compactContextImpl?: InteractiveAgentPort["compactContext"]
-  openThreadImpl?: InteractiveAgentPort["openThread"]
+  compactContextImpl?: AgentGateway["compactContext"]
+  openThreadImpl?: AgentGateway["openThread"]
 } = {}) {
   const calls: string[] = []
   const runHandles: Array<{ threadId: string; runId: string }> = []
@@ -103,16 +104,16 @@ function createPort(options: {
   let setSkillEnabledImpl: (skillId: string, enabled: boolean) => Promise<Record<string, never>> = async () => ({})
   let approvalModeRevision = 0
   let serverApprovalMode = runtime.approvalMode
-  let setApprovalModeImpl: InteractiveAgentPort["setApprovalMode"] = async (threadId, runId, approvalMode) => {
+  let setApprovalModeImpl: AgentGateway["setApprovalMode"] = async (threadId, runId, approvalMode) => {
     if (approvalMode !== serverApprovalMode) {
       serverApprovalMode = approvalMode
       approvalModeRevision += 1
     }
     return { thread_id: threadId, run_id: runId, approval_mode: serverApprovalMode, revision: approvalModeRevision }
   }
-  let compactContextImpl: InteractiveAgentPort["compactContext"] = options.compactContextImpl
+  let compactContextImpl: AgentGateway["compactContext"] = options.compactContextImpl
     ?? (async () => ({ compacted: true, context: { action: "manual_summary" } }))
-  const openThreadImpl: InteractiveAgentPort["openThread"] = options.openThreadImpl ?? (async threadId => ({
+  const openThreadImpl: AgentGateway["openThread"] = options.openThreadImpl ?? (async threadId => ({
     thread: threadSummary(threadId, "恢复的请求"),
     messages: [{ kind: "user", content: "恢复的请求" }, { kind: "tool", tool_name: "execute", content: "恢复的工具结果" }],
     plan: { has_plan: false, plan_markdown: "", plan_virtual_path: "/.harness/plan.md", plan_display_path: `~/.harness/plans/${threadId}.md` },
@@ -120,7 +121,7 @@ function createPort(options: {
     goal_pending: null,
     goal_activities: [],
   }))
-  let listAgentsImpl: InteractiveAgentPort["listAgents"] = async () => ({
+  let listAgentsImpl: AgentGateway["listAgents"] = async () => ({
     snapshot_id: "snap-builtin-1",
     agents: [
       agentSummary({
@@ -141,7 +142,7 @@ function createPort(options: {
     diagnostics: [],
   })
 
-  const port: InteractiveAgentPort & {
+  const port: AgentGateway & {
     emitEvent: (event: EventEnvelope) => void
     failRun: (threadId: string, runId: string, error: Error) => void
     completeRun: (threadId: string, runId: string) => void
@@ -156,9 +157,9 @@ function createPort(options: {
     setThreadSelection: (next: string | null) => void
     setSkillsList: (next: { skills: ReturnType<typeof skill>[] }) => void
     setSkillEnabledImpl: (impl: (skillId: string, enabled: boolean) => Promise<Record<string, never>>) => void
-    setApprovalModeImpl: (impl: InteractiveAgentPort["setApprovalMode"]) => void
-    setCompactContextImpl: (impl: InteractiveAgentPort["compactContext"]) => void
-    setListAgentsImpl: (impl: InteractiveAgentPort["listAgents"]) => void
+    setApprovalModeImpl: (impl: AgentGateway["setApprovalMode"]) => void
+    setCompactContextImpl: (impl: AgentGateway["compactContext"]) => void
+    setListAgentsImpl: (impl: AgentGateway["listAgents"]) => void
     lastRunSelection: () => { message: string; threadId: string; runId: string; mode: "build" | "compose"; modelSelection?: { primary_profile: string }; requestedSkill?: { id: string; args?: string } } | undefined
   } = {
     onProtocolError(listener) {
@@ -544,12 +545,12 @@ export function makeHarness(options: {
   configError?: boolean
   failOpenThread?: boolean
   holdConfigDetails?: boolean
-  scheduler?: InteractiveScheduler
+  scheduler?: Scheduler
   capabilities?: Capability[]
   agentCommands?: InteractiveRuntime["agentCommands"]
   commandRegistry?: CommandRegistry
-  compactContextImpl?: InteractiveAgentPort["compactContext"]
-  openThreadImpl?: InteractiveAgentPort["openThread"]
+  compactContextImpl?: AgentGateway["compactContext"]
+  openThreadImpl?: AgentGateway["openThread"]
 } = {}) {
   const portState = createPort({
     compactContextImpl: options.compactContextImpl,
@@ -563,8 +564,8 @@ export function makeHarness(options: {
     ...(options.capabilities ? { capabilities: options.capabilities } : {}),
   }
   const controller = createInteractiveController({
-    agent: portState.port,
-    runtime: runtimeOverride,
+    gateway: portState.port,
+    baseRuntime: runtimeOverride,
     ...(options.initialThreadId !== undefined ? { initialThreadId: options.initialThreadId } : {}),
     ...(options.scheduler !== undefined ? { scheduler: options.scheduler } : {}),
   })

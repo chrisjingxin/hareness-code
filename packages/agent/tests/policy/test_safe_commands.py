@@ -8,7 +8,6 @@ from __future__ import annotations
 import pytest
 
 from harness_agent.policy.safe_commands import (
-    ALWAYS_SAFE_COMMANDS,
     SAFE_GIT_SUBCOMMANDS,
     SAFE_SEARCH_COMMANDS,
     has_dangerous_args,
@@ -51,16 +50,11 @@ class TestPlatformSafeCommands:
         assert "lscpu" in linux
         assert "uptime" in linux
 
-    def test_union_exported_as_always_safe(self):
-        """ALWAYS_SAFE_COMMANDS 为三平台并集，仅作枚举。"""
-        assert "dir" in ALWAYS_SAFE_COMMANDS
-        assert "sw_vers" in ALWAYS_SAFE_COMMANDS
-        assert "ls" in ALWAYS_SAFE_COMMANDS
-        assert isinstance(ALWAYS_SAFE_COMMANDS, frozenset)
-
     def test_dangerous_commands_not_in_any_platform(self):
-        for cmd in ("rm", "chmod", "chown", "curl", "wget", "pip", "npm", "git"):
-            assert cmd not in ALWAYS_SAFE_COMMANDS
+        for platform in ("win32", "darwin", "linux"):
+            allowed = safe_commands_for_platform(platform)
+            for cmd in ("rm", "chmod", "chown", "curl", "wget", "pip", "npm", "git"):
+                assert cmd not in allowed
 
 
 # ===================================================================
@@ -129,7 +123,7 @@ class TestIsSafeCommandRoot:
         """纯空白字符串返回 False。"""
         assert is_safe_command_root("   ") is False
 
-    # --- ALWAYS_SAFE_COMMANDS ---
+    # --- 平台白名单命令根 ---
 
     @pytest.mark.parametrize("cmd", [
         "ls", "ls -la", "cat /etc/hosts", "pwd", "whoami",

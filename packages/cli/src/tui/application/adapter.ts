@@ -6,7 +6,7 @@
  */
 import type { AgentSummary, ModelProfile, ThreadSummary, TurnSummary } from "@za38/protocol"
 
-import type { InteractiveController, InteractiveIntent, InteractiveResult, InteractiveSnapshot, IntentOutcome, PresentationEffect } from "../../interactive/types"
+import type { InteractiveController, InteractiveIntent, InteractiveSnapshot, IntentOutcome, PresentationEffect } from "../../interactive/types"
 import type { ToolCard } from "../../interactive/state"
 import { selectWorkItemView, type WorkItemView } from "../../interactive/selectors"
 import { filterAgents } from "../../presentation-shared/agent-catalog"

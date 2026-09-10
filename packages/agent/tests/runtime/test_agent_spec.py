@@ -40,7 +40,7 @@ from harness_agent.runtime.execution_binding import (
     ThreadExecutionSelection,
 )
 from harness_agent.extensions.mcp import McpServerConfig, build_mcp_snapshot
-from harness_agent.extensions.skills import SkillRegistry
+from harness_agent.extensions.plugin_skills import SkillRegistry
 from harness_agent.threads.prompting import sha256_text
 
 

@@ -55,15 +55,6 @@ _WINDOWS_PS_SAFE_COMMANDS: frozenset[str] = frozenset({
     "Get-Member", "Get-Variable", "Get-Alias",
 })
 
-# 兼容旧导入：跨平台并集，仅作文档/枚举，运行时请用 safe_commands_for_platform
-ALWAYS_SAFE_COMMANDS: frozenset[str] = (
-    _COMMON_SAFE_COMMANDS
-    | _LINUX_SAFE_COMMANDS
-    | _MACOS_SAFE_COMMANDS
-    | _WINDOWS_CMD_SAFE_COMMANDS
-    | _WINDOWS_PS_SAFE_COMMANDS
-)
-
 # ===================================================================
 # 2. Git 只读子命令白名单
 # ===================================================================

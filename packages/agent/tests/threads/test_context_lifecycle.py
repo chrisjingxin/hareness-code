@@ -310,7 +310,7 @@ def test_ancestor_directories_rejects_an_invalid_repository_root(tmp_path: Path)
 
 def test_snapshot_and_prompt_index_carry_the_same_skill_catalog_identity(tmp_path: Path) -> None:
     """Context snapshot、Prompt Skill index 和 Registry 必须引用同一 ID。"""
-    from harness_agent.extensions.skills import SkillRegistry
+    from harness_agent.extensions.plugin_skills import SkillRegistry
 
     workspace = tmp_path / "project"
     workspace.mkdir()

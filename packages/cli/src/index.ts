@@ -541,7 +541,7 @@ export async function execute(
       const gateway = new AgentClientGateway(agent.client)
       controller = createInteractiveController({
         gateway,
-        runtime: agent.runtime,
+        baseRuntime: agent.runtime,
       })
       if (!command.nonInteractive) {
         // 工作区文件浏览独立于 Interactive Core；根解析失败时 explorer 自身进入 error 状态。

@@ -19,7 +19,7 @@ import {
 import type { IdGenerator } from "./ports/id-generator"
 import type { InteractiveApprovalMode } from "./runtime"
 
-/** 命令选择器目标；与 InteractiveResult.present 的 target 保持一致。 */
+/** 命令选择器目标；与 PresentationEffect.present 的 target 保持一致。 */
 export type CommandPickerTarget = "skills" | "threads" | "models" | "agents" | "status" | "undo"
 
 /** Handler 的唯一输出协议。它不返回 RPC method 字符串、success/error closure、

@@ -228,6 +228,21 @@ class SkillRegistry:
         """返回 Kimi Wire 风格的轻量 snapshot 摘要。"""
         return {"id": self.snapshot_id, "count": len(self.records)}
 
+    def verify_contents(self) -> bool:
+        """确认快照引用的 manifest 仍与扫描时一致。"""
+        try:
+            for record in self.records:
+                if record.reserved:
+                    continue
+                captured = self._snapshot_manifests.get(record.skill_id)
+                if captured is None:
+                    return False
+                if _digest_bytes(captured) != record.digest:
+                    return False
+            return True
+        except (OSError, SkillError):
+            return False
+
     def restricted(self, allowed_ids: tuple[str, ...]) -> "SkillRegistry":
         """从当前不可变快照建立角色级子集，不重新扫描磁盘或读取 PluginStore。
 
@@ -235,6 +250,8 @@ class SkillRegistry:
         只接受最终 canonical ID。未知 ID 不会被补入，命令与 Skill 使用同一安全
         边界；返回对象仍复用原记录和完整性校验逻辑。
         """
+        # 绕过 __init__ 复制实例：角色切换若重扫磁盘，Run 中途可能混入新
+        # Skill，破坏"一次 Run 只见启动期快照"的边界冻结。
         allowed = frozenset(allowed_ids)
         view = object.__new__(SkillRegistry)
         view.workspace = self.workspace
@@ -501,6 +518,8 @@ class SkillRegistry:
         records: dict[str, SkillRecord] = {}
         diagnostics = list(self._plugin_diagnostics)
         self._scan_builtin_bundle(records, diagnostics)
+        # roots 顺序即优先级：同名 skill_id 只保留先扫到的（first-wins），
+        # 内置 > user > project > market，低优先级来源记一条 duplicate 诊断。
         roots: list[tuple[str, str, Path]] = [
             ("user", "user", self.home / ".harness" / "skills"),
             ("user", "user", self.home / ".harness" / "skills" / "local"),
@@ -511,14 +530,14 @@ class SkillRegistry:
         market_root = self.home / ".harness" / "skills" / "market"
         if market_root.is_dir():
             for market in sorted(_regular_dirs(market_root)):
-                for name in sorted(_regular_dirs(market)):
-                    versions = sorted(_regular_dirs(market / name), reverse=True)
+                for skill_dir in sorted(_regular_dirs(market)):
+                    versions = sorted(_regular_dirs(skill_dir), reverse=True)
                     if versions:
                         self._scan_root(
                             records,
                             diagnostics,
                             f"market:{market.name}",
-                            f"{market.name}/{name}",
+                            f"{market.name}/{skill_dir.name}",
                             versions[0],
                         )
         for source in sorted(

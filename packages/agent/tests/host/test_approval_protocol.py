@@ -21,7 +21,10 @@ from harness_agent.host.run_coordinator import (
     UserRunInput,
     _generate_permission_rule,
 )
-from harness_agent.host.run_execution import _extract_interaction, _resume_value
+from tests.support.run_stream import (
+    extract_host_interaction as _extract_interaction,
+    resume_host_value as _resume_value,
+)
 from harness_agent.runtime.interactions import InteractionRequest, InteractionResult
 
 

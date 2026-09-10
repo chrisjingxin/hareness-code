@@ -1440,7 +1440,7 @@ function createSession(resume = false, onRequestExit: () => void = () => undefin
   const { client, requests, approvals, writeServer } = createMockClient()
   const controller = createInteractiveController({
     gateway: new AgentClientGateway(client),
-    runtime,
+    baseRuntime: runtime,
   })
   const adapter = createTuiAdapter({
     controller,

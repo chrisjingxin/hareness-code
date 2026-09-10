@@ -1502,12 +1502,13 @@ executor = "fast"
     assert server._config is not None
     resolved = await server._resolve_execution_binding("thread-model", server._config)
     registry = await server._refresh_skill_catalog()
-    agent_engine_profile = await server._resolve_agent_engine_profile(
+    spec_for_profile = await server._resolve_agent_engine_spec(
         "thread-model",
         server._config,
         resolved,
         skill_registry=registry,
     )
+    agent_engine_profile = spec_for_profile.runtime_profile
     spec = server._resolved_agent_specs[agent_engine_profile.profile_key]
     assert spec.model_settings.name == "pro-model"
     snapshot = await server._thread_persistence.load_context_snapshot(
@@ -2690,7 +2691,7 @@ def test_stream_translation_prefers_normalized_content_blocks():
         StartRun,
         UserRunInput,
     )
-    from harness_agent.host.run_execution import _translate_stream_event
+    from tests.support.run_stream import translate_run_stream_event as _translate_stream_event
 
     chunk = SimpleNamespace(
         content="",
@@ -2721,7 +2722,7 @@ def test_tool_fragments_with_missing_ids_are_merged_by_index():
         StartRun,
         UserRunInput,
     )
-    from harness_agent.host.run_execution import _translate_stream_event
+    from tests.support.run_stream import translate_run_stream_event as _translate_stream_event
 
     run = RunState(
         start=StartRun(mode="build", thread_id="thread", run_id="run", input=UserRunInput(message="执行 pwd")),
@@ -2754,7 +2755,7 @@ def test_tool_stream_reuses_index_for_later_calls_without_overwriting_history():
         StartRun,
         UserRunInput,
     )
-    from harness_agent.host.run_execution import _translate_stream_event
+    from tests.support.run_stream import translate_run_stream_event as _translate_stream_event
 
     run = RunState(
         start=StartRun(mode="build", thread_id="thread", run_id="run", input=UserRunInput(message="连续执行两次")),
@@ -3787,7 +3788,7 @@ async def test_missing_interaction_capability_fails_closed_without_reverse_reque
 def test_tool_output_is_utf8_safely_truncated():
     """超限工具输出携带截断标记和原始字节数。"""
     from harness_agent.protocol.generated import MAX_TOOL_PAYLOAD_BYTES
-    from harness_agent.host.run_execution import _truncate_text
+    from tests.support.run_stream import truncate_text as _truncate_text
 
     original = "界" * (MAX_TOOL_PAYLOAD_BYTES // 2)
     clipped, truncated, original_bytes = _truncate_text(original)
