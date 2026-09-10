@@ -5,7 +5,7 @@
 > Harness Code：`9dbc5deda02cee996ce3d19c4faf2fb4629e22ce`  
 > Deep Agents Code（下文简称 dcode）：`4338671aa1d9bd1fd70f20069aac5468697606bf`
 
-> 历史快照：本文中的任务排序和待办判断只对应上述评估提交；当前任务顺序以[架构重构计划](../../architecture/架构重构计划.md)和[任务看板](../../task/任务看板.md)为准。
+> 历史快照：本文中的任务排序和待办判断只对应上述评估提交；当前任务顺序以[任务看板](../../task/任务看板.md)为准。
 
 ## 结论先行
 
@@ -529,7 +529,7 @@ Harness 当前的主要问题不是方向错误，而是**骨架已经较重，�
 ### Harness Code
 
 - [H-Architecture]：[架构总览](../../architecture/架构总览.md)
-- [H-Refactor]：[架构重构计划](../../architecture/架构重构计划.md)
+- [H-Refactor]：[任务看板](../../task/任务看板.md)（原指向架构重构计划，该文档已删除，任务排序职责由看板承担）
 - [H-Task-085]：[HC-085 清理未接线框架](../../task/archive/HC-085-清理确认废弃实现与重复代码.md)
 - [H-Task-086]：[HC-086 提取模型绑定领域服务](../../task/archive/HC-086-集中模型选择与Run执行绑定.md)
 - [H-Package]：[`packages/agent/pyproject.toml`](../../../../packages/agent/pyproject.toml)
@@ -569,7 +569,7 @@ Harness 当前的主要问题不是方向错误，而是**骨架已经较重，�
 - [D-Filesystem]：[`deepagents/backends/filesystem.py`](https://github.com/langchain-ai/deepagents/blob/4338671aa1d9bd1fd70f20069aac5468697606bf/libs/deepagents/deepagents/backends/filesystem.py)
 
 [H-Architecture]: ../../architecture/架构总览.md
-[H-Refactor]: ../../architecture/架构重构计划.md
+[H-Refactor]: ../../task/任务看板.md
 [H-Task-085]: ../../task/archive/HC-085.md
 [H-Task-086]: ../../task/archive/HC-086.md
 [H-Package]: ../../../../packages/agent/pyproject.toml
