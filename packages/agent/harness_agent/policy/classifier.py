@@ -46,8 +46,11 @@ STAGE2_MAX_TOKENS = 600
 MAX_REJECT_STREAK = 3
 # 工具参数序列化后的展示上限，避免超长参数撑爆分类请求。
 ARGS_CLIP_CHARS = 4_000
-# 决策缓存容量：按 tool_call id 去重，防止预检与执行层重复调用分类器。
+# 决策缓存容量：按 Run 命名空间与 tool_call id 去重，防止预检与执行层重复调用分类器。
 DECISION_CACHE_LIMIT = 1_024
+
+ClassifierNamespace = tuple[str, str, str] | None
+"""分类决策的 Run 命名空间；生产路径包含 thread、run 和 execution 身份。"""
 
 _STAGE1_SYSTEM_PROMPT = """你是编码 Agent 工具调用的安全分类器。根据工具名与参数判断该操作能否自动放行，拿不准时一律 block。
 只输出一个 JSON 对象，不要任何解释或代码块：
@@ -91,6 +94,26 @@ def describe_tool_call(tool_name: str, tool_args: dict[str, Any]) -> str:
     return f"工具: {tool_name}\n参数: {args_text}"
 
 
+def classifier_namespace_for_context(context: object) -> ClassifierNamespace:
+    """从 RunContext 提取分类缓存命名空间，阻止共享 Engine 跨 Run 串缓存。"""
+    if context is None:
+        # 没有 runtime context 的静态单元测试仍共享一个明确的 unscoped 槽位；
+        # 生产共享图始终传入经过校验的 thread/run/execution 三元身份。
+        return None
+    thread_id = getattr(context, "thread_id", None)
+    run_id = getattr(context, "run_id", None)
+    execution_id = getattr(context, "execution_id", None)
+    if all(isinstance(value, str) and value for value in (thread_id, run_id, execution_id)):
+        return (thread_id, run_id, execution_id)
+    return None
+
+
+def classifier_namespace_for_request(request: object) -> ClassifierNamespace:
+    """从模型/工具请求读取当前 Run 的分类缓存命名空间。"""
+    runtime = getattr(request, "runtime", None)
+    return classifier_namespace_for_context(getattr(runtime, "context", None))
+
+
 def extract_verdict(text: str) -> dict[str, Any] | None:
     """从模型输出中提取最后一个含 decision 字段的 JSON 对象。
 
@@ -111,8 +134,9 @@ def extract_verdict(text: str) -> dict[str, Any] | None:
 class SafetyClassifier:
     """两阶段 LLM 安全分类器，附带连续拒绝计数与决策缓存。
 
-    决策缓存按 tool_call id 记录最终处置（allow/deny/ask），供 HITL 预检
-    与执行层守卫复用，保证同一次工具调用最多被分类一次。
+    决策缓存按 ``(thread_id, run_id, execution_id, tool_call_id)`` 记录最终处置
+    （allow/deny/ask），供 HITL 预检与执行层守卫复用，保证同一次工具调用最多
+    被分类一次，同时阻止兼容提供方复用短 tool_call id 时跨 Run 串状态。
     """
 
     def __init__(
@@ -135,37 +159,60 @@ class SafetyClassifier:
         self._max_reject_streak = max(1, max_reject_streak)
         self._cache_limit = max(1, cache_limit)
         self._provider_retry = provider_retry
-        self._reject_streak = 0
-        self._decisions: OrderedDict[str, tuple[str, str]] = OrderedDict()
+        # 共享 AgentEngine 复用分类器实例；连续拒绝也必须随 Run 隔离，
+        # 否则一个 Run 的危险调用会耗尽另一个 Run 的分类额度。
+        self._reject_streaks: OrderedDict[ClassifierNamespace, int] = OrderedDict()
+        self._decisions: OrderedDict[tuple[ClassifierNamespace, str], tuple[str, str]] = OrderedDict()
 
     # —— 决策缓存：预检与执行层守卫共享 ——
 
-    def record_decision(self, tool_call_id: str, decision: str, reason: str) -> None:
-        """记录一次工具调用的最终处置，供后续环节复用。"""
+    def record_decision(
+        self,
+        tool_call_id: str,
+        decision: str,
+        reason: str,
+        *,
+        namespace: ClassifierNamespace = None,
+    ) -> None:
+        """记录指定 Run 一次工具调用的最终处置，供后续环节复用。"""
         if not tool_call_id:
             return
-        self._decisions[tool_call_id] = (decision, reason)
+        key = (namespace, tool_call_id)
+        self._decisions[key] = (decision, reason)
+        self._decisions.move_to_end(key)
         while len(self._decisions) > self._cache_limit:
             self._decisions.popitem(last=False)
 
-    def lookup_decision(self, tool_call_id: str) -> tuple[str, str] | None:
-        """查询已记录的处置；未记录返回 None。"""
+    def lookup_decision(
+        self,
+        tool_call_id: str,
+        *,
+        namespace: ClassifierNamespace = None,
+    ) -> tuple[str, str] | None:
+        """查询指定 Run 已记录的处置；未记录返回 None。"""
         if not tool_call_id:
             return None
-        cached = self._decisions.get(tool_call_id)
+        key = (namespace, tool_call_id)
+        cached = self._decisions.get(key)
         if cached is not None:
-            self._decisions.move_to_end(tool_call_id)
+            self._decisions.move_to_end(key)
         return cached
 
     # —— 分类入口 ——
 
-    async def aclassify(self, tool_name: str, tool_args: dict[str, Any]) -> tuple[str, str]:
+    async def aclassify(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        *,
+        namespace: ClassifierNamespace = None,
+    ) -> tuple[str, str]:
         """异步分类一次工具调用，返回 (decision, reason)。
 
         decision 取值："allow" 自动放行；"deny" 硬拦截；"ask" 回退人工审批。
         """
-        if self._reject_streak >= self._max_reject_streak:
-            self._reject_streak = 0
+        if self._get_reject_streak(namespace) >= self._max_reject_streak:
+            self._set_reject_streak(namespace, 0)
             logger.info("approval_classifier_fallback tool=%s reason=reject_streak", tool_name)
             return "ask", "LLM 分类器连续拒绝达到阈值，回退人工审批"
 
@@ -174,22 +221,28 @@ class SafetyClassifier:
         if stage1 is None:
             # 第一阶段异常：直接进入第二阶段复核，仍有机会给出确定结论。
             stage2 = await self._invoke_stage2(prompt, first_stage=None)
-            return self._finalize(tool_name, stage2)
+            return self._finalize(tool_name, stage2, namespace)
         if (
             stage1.get("decision") == "allow"
             and stage1.get("confidence") == "high"
         ):
-            self._reject_streak = 0
+            self._set_reject_streak(namespace, 0)
             reason = f"LLM 分类器一阶段高置信度放行：{stage1.get('reason') or '无理由'}"
             logger.info("approval_classifier decision=allow stage=1 tool=%s", tool_name)
             return "allow", reason
         stage2 = await self._invoke_stage2(prompt, first_stage=stage1)
-        return self._finalize(tool_name, stage2)
+        return self._finalize(tool_name, stage2, namespace)
 
-    def classify(self, tool_name: str, tool_args: dict[str, Any]) -> tuple[str, str]:
+    def classify(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        *,
+        namespace: ClassifierNamespace = None,
+    ) -> tuple[str, str]:
         """同步分类入口：复用两阶段逻辑，供同步执行路径与测试使用。"""
-        if self._reject_streak >= self._max_reject_streak:
-            self._reject_streak = 0
+        if self._get_reject_streak(namespace) >= self._max_reject_streak:
+            self._set_reject_streak(namespace, 0)
             logger.info("approval_classifier_fallback tool=%s reason=reject_streak", tool_name)
             return "ask", "LLM 分类器连续拒绝达到阈值，回退人工审批"
 
@@ -197,42 +250,65 @@ class SafetyClassifier:
         stage1 = self._invoke_stage1_sync(prompt)
         if stage1 is None:
             stage2 = self._invoke_stage2_sync(prompt, first_stage=None)
-            return self._finalize(tool_name, stage2)
+            return self._finalize(tool_name, stage2, namespace)
         if (
             stage1.get("decision") == "allow"
             and stage1.get("confidence") == "high"
         ):
-            self._reject_streak = 0
+            self._set_reject_streak(namespace, 0)
             reason = f"LLM 分类器一阶段高置信度放行：{stage1.get('reason') or '无理由'}"
             logger.info("approval_classifier decision=allow stage=1 tool=%s", tool_name)
             return "allow", reason
         stage2 = self._invoke_stage2_sync(prompt, first_stage=stage1)
-        return self._finalize(tool_name, stage2)
+        return self._finalize(tool_name, stage2, namespace)
 
-    def reset_reject_streak(self) -> None:
-        """重置连续拒绝计数；用户通过弹窗批准后由调用方触发。"""
-        self._reject_streak = 0
+    def reset_reject_streak(self, *, namespace: ClassifierNamespace = None) -> None:
+        """重置指定 Run 的连续拒绝计数；用户通过弹窗批准后由调用方触发。"""
+        self._set_reject_streak(namespace, 0)
 
     # —— 内部实现 ——
 
-    def _finalize(self, tool_name: str, stage2: dict[str, Any] | None) -> tuple[str, str]:
+    def _finalize(
+        self,
+        tool_name: str,
+        stage2: dict[str, Any] | None,
+        namespace: ClassifierNamespace,
+    ) -> tuple[str, str]:
         """汇总第二阶段结论：allow 放行，block 计数，其余 fail-closed 回退。"""
         if stage2 is None:
             logger.info("approval_classifier_fallback tool=%s reason=unavailable", tool_name)
             return "ask", "LLM 分类器不可用或输出无法解析，回退人工审批"
         if stage2.get("decision") == "allow":
-            self._reject_streak = 0
+            self._set_reject_streak(namespace, 0)
             reason = f"LLM 分类器复核放行：{stage2.get('reason') or '无理由'}"
             logger.info("approval_classifier decision=allow stage=2 tool=%s", tool_name)
             return "allow", reason
-        self._reject_streak += 1
+        streak = self._get_reject_streak(namespace) + 1
+        self._set_reject_streak(namespace, streak)
         reason = f"LLM 分类器复核拦截：{stage2.get('reason') or '无理由'}"
         logger.info(
             "approval_classifier decision=deny stage=2 tool=%s streak=%d",
             tool_name,
-            self._reject_streak,
+            streak,
         )
         return "deny", reason
+
+    def _get_reject_streak(self, namespace: ClassifierNamespace) -> int:
+        """读取并刷新指定 Run 的连续拒绝计数。"""
+        streak = self._reject_streaks.get(namespace, 0)
+        if namespace in self._reject_streaks:
+            self._reject_streaks.move_to_end(namespace)
+        return streak
+
+    def _set_reject_streak(self, namespace: ClassifierNamespace, streak: int) -> None:
+        """写入指定 Run 的拒绝计数，并限制命名空间缓存容量。"""
+        if streak <= 0:
+            self._reject_streaks.pop(namespace, None)
+            return
+        self._reject_streaks[namespace] = streak
+        self._reject_streaks.move_to_end(namespace)
+        while len(self._reject_streaks) > self._cache_limit:
+            self._reject_streaks.popitem(last=False)
 
     def _bind(self, max_tokens: int) -> Any:
         """按阶段绑定输出预算；模型不支持绑定时退回原实例。"""

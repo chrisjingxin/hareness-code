@@ -172,6 +172,92 @@ async def test_auto_mode_preflight_uses_classifier_cache_end_to_end():
     assert any(isinstance(message, ToolMessage) for message in result["messages"])
 
 
+async def test_shared_graph_uses_new_mode_before_tool_dispatch(tmp_path: Path):
+    """同一共享图中模型返回工具调用后切到 YOLO，dispatch 必须立即采用新档位。"""
+    from langgraph.checkpoint.memory import MemorySaver
+    from harness_agent.runtime.agent import create_harness_agent
+    from harness_agent.runtime.run_context import ApprovalModeState, RunContext
+    from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
+
+    class FlipAfterFirstResponse(ToolCallingFakeChatModel):
+        """在首个模型响应与 ToolNode 之间模拟用户切档。"""
+
+        def __init__(self, state: ApprovalModeState, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self._state = state
+            self._calls = 0
+
+        def bind_tools(self, *_args: Any, **_kwargs: Any) -> Runnable:
+            return self
+
+        def _generate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any):
+            self._calls += 1
+            result = super()._generate(messages, *args, **kwargs)
+            if self._calls == 1:
+                self._state.set("yolo")
+            return result
+
+    state = ApprovalModeState("default")
+    model = FlipAfterFirstResponse(
+        state,
+        messages=iter(
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_file",
+                            "args": {"file_path": "/dynamic.txt", "content": "updated"},
+                            "id": "dynamic-write",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(content="done"),
+            ]
+        ),
+    )
+    model.profile = {"max_input_tokens": 200_000}
+    agent = create_harness_agent(
+        model,
+        cwd=str(tmp_path),
+        checkpointer=MemorySaver(),
+        approval_mode="default",
+        enable_skills=False,
+        enable_memory=False,
+        enable_ask_user=False,
+        shared_engine=True,
+    )
+    context = RunContext(
+        thread_id="dynamic-dispatch",
+        run_id="run-dynamic-dispatch",
+        approval_mode="default",
+        approval_state=state,
+        context_snapshot=prepare_embedded_context_snapshot(
+            thread_id="dynamic-dispatch",
+            system_prompt="dynamic dispatch",
+            workspace=str(tmp_path),
+            sandboxed=False,
+            provider=None,
+            approval_mode="default",
+            skill_registry=None,
+            enable_memory=False,
+            enable_skills=False,
+            enable_ask_user=False,
+        ),
+    )
+
+    result = await agent.ainvoke(
+        {"messages": [HumanMessage(content="写文件")]},
+        config={"configurable": {"thread_id": "dynamic-dispatch"}},
+        context=context,
+    )
+
+    assert "__interrupt__" not in result
+    assert (tmp_path / "dynamic.txt").read_text(encoding="utf-8") == "updated"
+    assert state.snapshot() == ("yolo", 1)
+
+
 async def test_missing_tool_call_id_survives_assistant_tool_next_model_chain() -> None:
     """合法缺失 ID 由 assistant 规范化，并贯穿 ToolNode 到下一次模型请求。"""
     from langchain_core.tools import StructuredTool

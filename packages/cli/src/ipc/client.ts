@@ -60,6 +60,7 @@ import {
   type InitializeResult,
   type RunInput,
   type RunCancelResult,
+  type RunSetApprovalModeResult,
   type ThreadModelSelection,
   type ThreadsListResult,
   type ThreadsListTurnsResult,
@@ -351,6 +352,19 @@ export class AgentClient {
   /** 请求取消指定运行。 */
   cancel(threadId: string, runId: string): Promise<RunCancelResult> {
     return this.request(Method.RUN_CANCEL, { thread_id: threadId, run_id: runId })
+  }
+
+  /** 提交活动 Run 的审批模式，并返回服务端实际 revision。 */
+  setApprovalMode(
+    threadId: string,
+    runId: string,
+    approvalMode: ApprovalMode,
+  ): Promise<RunSetApprovalModeResult> {
+    return this.request(Method.RUN_SET_APPROVAL_MODE, {
+      thread_id: threadId,
+      run_id: runId,
+      approval_mode: approvalMode,
+    })
   }
 
   /** 在当前 thread 空闲时请求 sidecar 强制生成一次结构化上下文摘要。 */

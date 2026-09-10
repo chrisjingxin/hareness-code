@@ -30,10 +30,11 @@ const fixtures = JSON.parse(
   await readFile(resolve(import.meta.dir, "../../../protocol/fixtures/v3-contract.json"), "utf8"),
 ) as { valid: Fixture[]; invalid: Fixture[] }
 
-test("Settings、Plugin 与 Goal RPC 在 canonical v3 contract 中要求 minor 8；set_title 要求 9", () => {
+test("Settings、Plugin、Goal 与审批 RPC 在 canonical v3 contract 中要求 minor 8；set_title 要求 9", () => {
   expect(PROTOCOL_VERSION).toEqual({ major: 3, minor: 9 })
   expect(OPERATION_MIN_MINOR["commands.bind"]).toBe(6)
   expect(OPERATION_MIN_MINOR["goal.inspect"]).toBe(8)
+  expect(OPERATION_MIN_MINOR["run.set_approval_mode"]).toBe(8)
   expect(OPERATION_MIN_MINOR["threads.set_title"]).toBe(9)
 })
 

@@ -144,6 +144,32 @@ test("Peer 在 run.start 中携带冻结的工作模式", async () => {
   })
 })
 
+test("Peer 通过 run.set_approval_mode 传递活动 Run 身份和目标模式", async () => {
+  const { client, stdin, stdout } = peer()
+  let request: any
+  stdin.on("data", data => {
+    request = JSON.parse(data.toString())
+    stdout.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: request.id,
+      result: {
+        thread_id: request.params.thread_id,
+        run_id: request.params.run_id,
+        approval_mode: request.params.approval_mode,
+        revision: 3,
+      },
+    }) + "\n")
+  })
+
+  const result = await client.setApprovalMode("thread-1", "run-1", "yolo")
+
+  expect(request).toMatchObject({
+    method: "run.set_approval_mode",
+    params: { thread_id: "thread-1", run_id: "run-1", approval_mode: "yolo" },
+  })
+  expect(result).toEqual({ thread_id: "thread-1", run_id: "run-1", approval_mode: "yolo", revision: 3 })
+})
+
 test("AgentRun 使用原生 UUID 并携带 Thread 模型选择", async () => {
   const { client, stdin, stdout } = peer()
   const requests: any[] = []

@@ -132,6 +132,27 @@
     },
     {
       "kind": "operation.params",
+      "name": "run.set_approval_mode",
+      "case": "valid",
+      "value": {
+        "thread_id": "x",
+        "run_id": "x",
+        "approval_mode": "plan"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "run.set_approval_mode",
+      "case": "valid",
+      "value": {
+        "thread_id": "x",
+        "run_id": "x",
+        "approval_mode": "plan",
+        "revision": 1
+      }
+    },
+    {
+      "kind": "operation.params",
       "name": "context.compact",
       "case": "valid",
       "value": {
@@ -2032,6 +2053,60 @@
     },
     {
       "kind": "error",
+      "name": "RUN_APPROVAL_MODE_BUSY",
+      "case": "valid",
+      "value": {
+        "code": "RUN_APPROVAL_MODE_BUSY",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "name": "RUN_APPROVAL_MODE_NOT_FOUND",
+      "case": "valid",
+      "value": {
+        "code": "RUN_APPROVAL_MODE_NOT_FOUND",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "RUN_APPROVAL_MODE_NOT_OWNER",
+      "case": "valid",
+      "value": {
+        "code": "RUN_APPROVAL_MODE_NOT_OWNER",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "RUN_APPROVAL_MODE_CANCELLED",
+      "case": "valid",
+      "value": {
+        "code": "RUN_APPROVAL_MODE_CANCELLED",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "RUN_APPROVAL_MODE_TERMINAL",
+      "case": "valid",
+      "value": {
+        "code": "RUN_APPROVAL_MODE_TERMINAL",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "RUN_APPROVAL_MODE_PLAN_LOCKED",
+      "case": "valid",
+      "value": {
+        "code": "RUN_APPROVAL_MODE_PLAN_LOCKED",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
       "name": "COMPOSE_NOTHING_TO_ABANDON",
       "case": "valid",
       "value": {
@@ -2844,6 +2919,60 @@
       "case": "missing_field",
       "value": {
         "run_id": "x"
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "run.set_approval_mode",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "run.set_approval_mode",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "run_id": "x",
+        "approval_mode": "plan",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "run.set_approval_mode",
+      "case": "missing_field",
+      "value": {
+        "run_id": "x",
+        "approval_mode": "plan"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "run.set_approval_mode",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "run.set_approval_mode",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "run_id": "x",
+        "approval_mode": "plan",
+        "revision": 1,
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "run.set_approval_mode",
+      "case": "missing_field",
+      "value": {
+        "run_id": "x",
+        "approval_mode": "plan",
+        "revision": 1
       }
     },
     {
@@ -6954,6 +7083,42 @@
     {
       "kind": "error",
       "name": "CONNECTION_RUN_BUSY",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "RUN_APPROVAL_MODE_BUSY",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "RUN_APPROVAL_MODE_NOT_FOUND",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "RUN_APPROVAL_MODE_NOT_OWNER",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "RUN_APPROVAL_MODE_CANCELLED",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "RUN_APPROVAL_MODE_TERMINAL",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "RUN_APPROVAL_MODE_PLAN_LOCKED",
       "case": "wrong_type",
       "value": null
     },

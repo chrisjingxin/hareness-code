@@ -174,6 +174,7 @@ class WorkspaceBoundaryMiddleware(AgentMiddleware[dict[str, Any], ContextT, Resp
                         value,
                         tool_name=tool_name,
                         field=field,
+                        request=request,
                         pending_trust=pending_trust,
                         run_id=run_id,
                     )
@@ -185,6 +186,7 @@ class WorkspaceBoundaryMiddleware(AgentMiddleware[dict[str, Any], ContextT, Resp
                         args.get("path"),
                         tool_name=tool_name,
                         field="path",
+                        request=request,
                         pending_trust=pending_trust,
                         run_id=run_id,
                     )
@@ -219,6 +221,7 @@ class WorkspaceBoundaryMiddleware(AgentMiddleware[dict[str, Any], ContextT, Resp
         *,
         tool_name: str,
         field: str,
+        request: ToolCallRequest,
         pending_trust: list[TrustCandidate] | None,
         run_id: str | None = None,
     ) -> str | None:
@@ -231,7 +234,7 @@ class WorkspaceBoundaryMiddleware(AgentMiddleware[dict[str, Any], ContextT, Resp
             raise ValueError(str(exc)) from exc
         if candidate is None:
             return backend_path
-        if self.auto_trust_session:
+        if self._auto_trust_enabled(request):
             self.registry.trust(candidate.directory, "session")
             return self.registry.resolve(str(value), run_id=run_id).backend_path
         if not self.allow_trust_prompt:
@@ -245,6 +248,18 @@ class WorkspaceBoundaryMiddleware(AgentMiddleware[dict[str, Any], ContextT, Resp
             f"路径 `{candidate.target_path}` 不在允许的工作区内，需要先信任目录 "
             f"`{candidate.directory}`"
         )
+
+    def _auto_trust_enabled(self, request: ToolCallRequest) -> bool:
+        """读取当前 Run 的 YOLO 事实；无 runtime 时保留构图期回退。"""
+        if self.auto_trust_session:
+            return True
+        from harness_agent.runtime.run_context import current_approval_mode, plan_constraint_active
+
+        runtime = getattr(request, "runtime", None)
+        context = getattr(runtime, "context", None)
+        if plan_constraint_active(context):
+            return False
+        return current_approval_mode(context) == "yolo"
 
     def allows_approval(self, request: ToolCallRequest) -> bool:
         """审批预检：合法工作区内路径、或可信任的外部路径返回 True。"""

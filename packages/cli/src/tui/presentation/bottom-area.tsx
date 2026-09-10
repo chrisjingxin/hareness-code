@@ -49,6 +49,13 @@ const APPROVAL_DOCK_DESCRIPTION_HEIGHT = 1
 const APPROVAL_SELECT_MIN_HEIGHT = 2
 const APPROVAL_SELECT_MAX_HEIGHT = 10
 const APPROVAL_PROMPT_HEIGHT = 1
+// 通用审批不展示 Diff，但仍须保留标题、可见描述、至少一行选项和确认提示。
+const APPROVAL_GENERIC_DOCK_MIN_HEIGHT =
+  APPROVAL_DOCK_PADDING_HEIGHT
+  + APPROVAL_DOCK_TITLE_HEIGHT
+  + APPROVAL_DOCK_DESCRIPTION_HEIGHT
+  + APPROVAL_SELECT_MIN_HEIGHT
+  + APPROVAL_PROMPT_HEIGHT
 const APPROVAL_DOCK_MIN_HEIGHT =
   APPROVAL_DOCK_PADDING_HEIGHT
   + APPROVAL_DOCK_TITLE_HEIGHT
@@ -224,8 +231,8 @@ export function ApprovalDock(props: {
   }, [props.approvalScrollRef, props.interaction.requestId])
   return (
     <box
-      flexShrink={hasFilePreview ? 0 : 1}
-      minHeight={hasFilePreview ? APPROVAL_DOCK_MIN_HEIGHT : 0}
+      flexShrink={0}
+      minHeight={hasFilePreview ? APPROVAL_DOCK_MIN_HEIGHT : APPROVAL_GENERIC_DOCK_MIN_HEIGHT}
       marginLeft={2}
       marginRight={2}
       marginBottom={1}

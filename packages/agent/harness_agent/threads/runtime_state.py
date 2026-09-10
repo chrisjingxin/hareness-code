@@ -243,15 +243,21 @@ class RuntimeStateRehydrator:
         profile_key = _optional_source_string(
             run_context, "profile_key", "capability_fingerprint"
         )
+        from harness_agent.runtime.run_context import current_approval_mode
+
+        live_approval_mode = current_approval_mode(run_context)
         execution_mode = (
             current_execution_policy.execution_mode
             if current_execution_policy is not None
             else run_execution_mode or state_execution_mode or ""
         )
         approval_mode = (
-            current_execution_policy.approval_mode
-            if current_execution_policy is not None
-            else run_approval_mode or state_approval_mode or ""
+            live_approval_mode
+            or (
+                current_execution_policy.approval_mode
+                if current_execution_policy is not None
+                else run_approval_mode or state_approval_mode or ""
+            )
         )
         context_snapshot_id = snapshot_id or state_snapshot_id or ""
         capability_fingerprint = (

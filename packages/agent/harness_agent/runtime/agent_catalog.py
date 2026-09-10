@@ -13,10 +13,11 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 import yaml
 from harness_agent.config.config import ConfigError, ModelCatalog
+from harness_agent.policy.approval_mode import ApprovalMode
 from harness_agent.runtime.builtin_agents import (
     BUILTIN_AGENTS,
     BUILTIN_AGENTS_BY_ID,
@@ -40,6 +41,15 @@ _APPROVAL_RANK = {
     "always": 2,
     "default": 2,
     "plan": 3,
+}
+
+_RUNTIME_APPROVAL_MODES = frozenset(
+    {"plan", "default", "auto-edit", "auto", "yolo"}
+)
+_POLICY_APPROVAL_MODE_MAP: dict[str, ApprovalMode] = {
+    "never": "yolo",
+    "on-risk": "auto-edit",
+    "always": "default",
 }
 
 
@@ -707,6 +717,18 @@ def _intersect_approval(left: str | None, right: str | None) -> str | None:
         "on-risk": "auto-edit",
         "always": "default",
     }.get(selected, selected)
+
+
+def runtime_approval_mode_limit(value: str | None) -> ApprovalMode | None:
+    """把静态 Policy/Agent 审批值转换为 Managed child 的 canonical 上限。"""
+    if value is None:
+        return None
+    if value in _RUNTIME_APPROVAL_MODES:
+        return cast(ApprovalMode, value)
+    try:
+        return _POLICY_APPROVAL_MODE_MAP[value]
+    except KeyError as exc:
+        raise AgentCatalogError("EXECUTION_POLICY_APPROVAL_UNSUPPORTED") from exc
 
 
 def _intersect_delegation(

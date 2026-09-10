@@ -67,11 +67,27 @@ class ChildStreamPorts(ExecutionStreamPorts):
 
 
 def child_context_for(parent: RunContext, *, child_ref: ExecutionRef, agent_id: str) -> RunContext:
-    """以 child execution 身份派生 RunContext，只用于 child 图内部读身份。"""
+    """以 child execution 身份派生 RunContext，并动态继承父审批交集。"""
+    from harness_agent.runtime.builtin_agents import resolve_child_approval_mode
+    from harness_agent.runtime.run_context import current_approval_mode
+
+    parent_mode = current_approval_mode(parent, fallback=parent.approval_mode)
+    if parent_mode is None:  # pragma: no cover - RunContext always has a mode
+        parent_mode = parent.approval_mode
+
+    def child_approval_mode() -> str:
+        """每次策略读取都把父当前档位映射到该 child 角色。"""
+        current_parent = current_approval_mode(parent, fallback=parent.approval_mode)
+        if current_parent is None:  # pragma: no cover - RunContext always has a mode
+            current_parent = parent.approval_mode
+        return resolve_child_approval_mode(current_parent, agent_id)
+
     return RunContext(
         thread_id=parent.thread_id,
         run_id=parent.run_id,
-        approval_mode=parent.approval_mode,
+        approval_mode=resolve_child_approval_mode(parent_mode, agent_id),
+        approval_state=parent.approval_state,
+        approval_mode_provider=child_approval_mode,
         context_snapshot=parent.context_snapshot,
         profile_key=parent.profile_key,
         execution_id=child_ref.execution_id,
@@ -80,6 +96,7 @@ def child_context_for(parent: RunContext, *, child_ref: ExecutionRef, agent_id: 
         execution_mode=ExecutionMode.INLINE,
         cancellation_token=parent.cancellation_token,
         skill_registry=parent.skill_registry,
+        plan_constraint=parent.plan_constraint,
         delegation_policy=None,
         snapshot_store=parent.snapshot_store,
         approval_presentations=parent.approval_presentations,

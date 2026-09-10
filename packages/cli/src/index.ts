@@ -106,6 +106,7 @@ export function clientCapabilities(command: Command): string[] {
     Capability.TEAMS_MANAGE,
     Capability.GOAL_READ,
     Capability.GOAL_MANAGE,
+    Capability.RUN_APPROVAL_MODE,
   )
   if (command.kind.startsWith("skills.") || (command.kind === "run" && !command.nonInteractive)) capabilities.push(Capability.SKILLS_READ)
   if (command.kind === "skills.set_enabled" || command.kind === "skills.install" || command.kind === "skills.update" || command.kind === "skills.remove") {

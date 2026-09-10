@@ -79,6 +79,7 @@ from harness_agent.runtime.agent_catalog import (
     AgentCatalogError,
     DelegationPolicy,
     PluginAgentSource,
+    runtime_approval_mode_limit,
 )
 from harness_agent.protocol.generated import (
     MAX_FRAME_BYTES,
@@ -120,6 +121,7 @@ from harness_agent.protocol.generated import (
     PluginsUpdateParams,
     QuestionResponse,
     RunCancelParams,
+    RunSetApprovalModeParams,
     RunStartParams,
     SettingsListParams,
     SettingsRemoveParams,
@@ -178,7 +180,7 @@ from harness_agent.extensions.mcp import (
     build_mcp_snapshot,
 )
 
-from harness_agent.runtime.run_context import RunCancellationToken, RunContext
+from harness_agent.runtime.run_context import RunCancellationToken, RunContext, RunPlanConstraint
 from harness_agent.runtime.interactions import InteractionRequest
 from harness_agent.runtime.agent_engine_profile import AgentEngineProfile
 from harness_agent.runtime.resource_ownership import (
@@ -268,6 +270,7 @@ ATTACHMENT_CAPABILITY_ALLOWLIST = frozenset(
     {
         CAPABILITY["HOST_CONTROL"],
         CAPABILITY["RUN_CANCEL"],
+        CAPABILITY["RUN_APPROVAL_MODE"],
         CAPABILITY["CONFIG_READ"],
         CAPABILITY["CONFIG_WRITE"],
         CAPABILITY["THREADS_READ"],
@@ -536,6 +539,7 @@ class AgentHost:
             METHOD["COMMANDS_BIND"]: self._handle_commands_bind,
             METHOD["RUN_START"]: self._handle_run_start,
             METHOD["RUN_CANCEL"]: self._handle_run_cancel,
+            METHOD["RUN_SET_APPROVAL_MODE"]: self._handle_run_set_approval_mode,
             METHOD["CONTEXT_COMPACT"]: self._handle_context_compact,
             METHOD["CONFIG_SHOW"]: self._handle_config_show,
             METHOD["CONFIG_PATH"]: self._handle_config_path,
@@ -1462,6 +1466,23 @@ class AgentHost:
         )
         return {"cancelled": result.cancelled, "run_id": result.run_id}
 
+    async def _handle_run_set_approval_mode(
+        self, params: dict[str, Any], _id: str
+    ) -> dict[str, Any]:
+        """通过 Coordinator 提交活动 Run 的审批模式，响应只回显服务端实际状态。"""
+        parsed = RunSetApprovalModeParams.model_validate(params)
+        result = await self._run_coordinator.set_approval_mode(
+            RunRef(parsed.thread_id, parsed.run_id),
+            ConnectionRef(self._current_connection().connection_id),
+            parsed.approval_mode,
+        )
+        return {
+            "thread_id": result.thread_id,
+            "run_id": result.run_id,
+            "approval_mode": result.approval_mode,
+            "revision": result.revision,
+        }
+
     async def _run_persistence_provider(self) -> ThreadPersistence | None:
         """只为默认生产 Run 打开 Thread 持久化；echo/注入 Agent 保持轻量路径。"""
         if not self._thread_persistence_enabled():
@@ -1616,6 +1637,10 @@ class AgentHost:
                 context_snapshot=context_snapshot,
                 goal_binding=goal_binding,
                 idle_duration_ms=idle_duration_ms,
+                approval_mode=(
+                    spec.effective_policy.approval_mode
+                    or spec.execution.approval_mode
+                ),
                 catalog_skill_ids=tuple(
                     record.skill_id for record in effective_registry.records
                 ),
@@ -4121,6 +4146,12 @@ class AgentHost:
             "RUN_NOT_FOUND": -32001,
             "RUN_NOT_OWNER": -32005,
             "RUN_ID_CONFLICT": -32006,
+            "RUN_APPROVAL_MODE_BUSY": -32000,
+            "RUN_APPROVAL_MODE_NOT_FOUND": -32001,
+            "RUN_APPROVAL_MODE_CANCELLED": -32001,
+            "RUN_APPROVAL_MODE_TERMINAL": -32001,
+            "RUN_APPROVAL_MODE_NOT_OWNER": -32005,
+            "RUN_APPROVAL_MODE_PLAN_LOCKED": -32602,
             "HOST_CLOSED": -32004,
             "MODEL_CONFIGURATION_REQUIRED": -32010,
             "RUN_MODEL_BINDING_UNAVAILABLE": -32010,
@@ -4748,6 +4779,22 @@ class AgentHost:
             if mcp_owner is not None:
                 self._profile_mcp_owners.setdefault(child_profile.profile_key, mcp_owner)
             await persistence.persist_agent_engine_profile(child_profile)
+            raw_child_approval_limit = getattr(definition, "approval_mode", None)
+            if raw_child_approval_limit is None:
+                raw_child_approval_limit = catalog.require_policy(
+                    definition.execution_policy_id
+                ).approval_mode
+            try:
+                child_approval_limit = runtime_approval_mode_limit(
+                    raw_child_approval_limit
+                )
+            except AgentCatalogError as exc:
+                logger.warning(
+                    "Plugin Agent %s disabled due to unsupported approval policy: %s",
+                    definition.agent_id,
+                    exc,
+                )
+                continue
 
             async def invoke(
                 command: Any,
@@ -4755,6 +4802,7 @@ class AgentHost:
                 resolved: ResolvedAgentSpec = child_spec,
                 profile: AgentEngineProfile = child_profile,
                 plugin_source: str = definition.source,
+                approval_limit: ApprovalMode | None = child_approval_limit,
             ) -> Mapping[str, Any]:
                 """构造 capture_only request，并由统一 executor 运行 Plugin Agent。"""
                 from harness_agent.plugins.runtime import (
@@ -4775,6 +4823,24 @@ class AgentHost:
                 parent_context = (
                     delegation_call.run_context if delegation_call is not None else None
                 )
+                child_approval_provider = None
+                if parent_context is not None:
+                    from harness_agent.runtime.builtin_agents import intersect_approval_modes
+                    from harness_agent.runtime.run_context import current_approval_mode
+
+                    def child_approval_provider(
+                        parent: Any = parent_context,
+                        maximum: ApprovalMode | None = approval_limit,
+                    ) -> ApprovalMode:
+                        """把父 Run 当前档位与 Managed Policy 上限求交。"""
+                        current = current_approval_mode(
+                            parent,
+                            fallback=getattr(parent, "approval_mode", "default"),
+                        ) or getattr(parent, "approval_mode", "default")
+                        if maximum is None:
+                            return current
+                        return intersect_approval_modes(current, maximum)
+
                 parent_event_port = getattr(parent_context, "event_port", None)
                 parent_log = getattr(parent_context, "diagnostic_log", None)
                 child_log = bind_execution_log(
@@ -4805,6 +4871,12 @@ class AgentHost:
                         resolved.effective_policy.approval_mode
                         or resolved.execution.approval_mode
                     ),
+                    approval_state=(
+                        getattr(parent_context, "approval_state", None)
+                        if parent_context is not None
+                        else None
+                    ),
+                    approval_mode_provider=child_approval_provider,
                     profile_key=resolved.runtime_profile.profile_key,
                     checkpoint_thread_id=checkpoint_thread_id,
                     execution_id=child_ref.execution_id,
@@ -4812,6 +4884,11 @@ class AgentHost:
                     agent_id=resolved.agent_id,
                     execution_mode=ExecutionMode.MANAGED,
                     cancellation_token=command.cancellation_token,
+                    plan_constraint=(
+                        getattr(parent_context, "plan_constraint", None)
+                        if parent_context is not None
+                        else None
+                    ) or RunPlanConstraint(),
                     delegation_policy=resolved.effective_policy.delegation,
                     workspace_root_registry=(
                         self._workspace_root_registry.readonly_view()
@@ -5138,6 +5215,7 @@ class AgentHost:
                 approval_mode,
                 getattr(spec.execution, "approval_classifier", None),
                 model,
+                dynamic=True,
             )
 
             extra_root_tools = ()
@@ -5275,9 +5353,11 @@ class AgentHost:
         approval_mode: str,
         classifier_profile_id: str | None,
         model: Any,
+        *,
+        dynamic: bool = False,
     ) -> Any:
         """为 AUTO 模式解析 LLM 安全分类器；未配专用 profile 或 profile 不可用时回退到主模型。"""
-        if approval_mode != "auto":
+        if approval_mode != "auto" and not dynamic:
             return None
         classifier = None
         if classifier_profile_id:
@@ -5359,6 +5439,7 @@ class AgentHost:
                 idle_duration_ms=run.preparation.idle_duration_ms,
             ),
             approval_mode=spec.effective_policy.approval_mode or spec.execution.approval_mode,
+            approval_state=run.approval_state,
             profile_key=profile.profile_key,
             execution_id=run.root_execution_ref.execution_id,
             parent_execution_id=run.root_execution_ref.parent_execution_id,

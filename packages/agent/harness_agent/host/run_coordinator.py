@@ -37,7 +37,7 @@ from harness_agent.runtime.interactions import (
     InteractionRequest,
     InteractionResult,
 )
-from harness_agent.policy.approval_mode import ApprovalMode
+from harness_agent.policy.approval_mode import DEFAULT_APPROVAL_MODE, ApprovalMode
 from harness_agent.policy.bash_parser import extract_command_rule as _extract_command_rule
 
 # 工作模式在 Run 受理时冻结；Compose 是代码状态机驱动的研发流程，Build 保持现有直接协作。
@@ -63,7 +63,11 @@ from harness_agent.runtime.execution_binding import (
     ResolvedExecutionBinding,
     RunExecutionBinding,
 )
-from harness_agent.runtime.run_context import RunCancellationToken, RunContext
+from harness_agent.runtime.run_context import (
+    ApprovalModeState,
+    RunCancellationToken,
+    RunContext,
+)
 from harness_agent.runtime.approval_presentation import ApprovalPresentationStore
 from harness_agent.extensions.skills import LoadedSkill
 from harness_agent.protocol.generated import PROTOCOL_MINOR
@@ -362,6 +366,8 @@ class RunPreparation:
     context_snapshot: RunContextSnapshot | None = None
     goal_binding: GoalRunBinding | None = None
     idle_duration_ms: int | None = None
+    # 受理阶段解析出的实际审批模式；它是 Run 状态的初始值而非请求回显。
+    approval_mode: ApprovalMode | None = None
     # 仅携带当前 Run 实际绑定的安全目录身份；受理日志由 Coordinator 统一投影。
     catalog_skill_ids: tuple[str, ...] = ()
     catalog_mcp_ids: tuple[str, ...] = ()
@@ -457,6 +463,16 @@ class CancelResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ApprovalModeResult:
+    """当前 Run 审批模式切换成功后的实际状态。"""
+
+    thread_id: str
+    run_id: str
+    approval_mode: ApprovalMode
+    revision: int
+
+
+@dataclass(frozen=True, slots=True)
 class RunExecution:
     """已受理 Run 的结果和后续事件流。"""
 
@@ -509,6 +525,7 @@ class RunState:
     owner: ConnectionRef
     persistence: Any | None
     preparation: RunPreparation
+    approval_state: ApprovalModeState | None = None
     root_execution: AgentExecutionBinding | None = None
     message: str = ""
     status: str = "accepted"
@@ -564,6 +581,8 @@ class RunState:
     approval_presentations: ApprovalPresentationStore = field(
         default_factory=ApprovalPresentationStore
     )
+    # 所有等待用户响应的 Interaction 都登记在此集合；切换模式必须在集合为空时线性化。
+    pending_interactions: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         """默认使用受理请求中的原始消息。"""
@@ -572,6 +591,12 @@ class RunState:
         if self.timing is None:
             self.timing = RunTimingLedger(started_at=self.started_at)
         self.diagnostic_log = ensure_log(self.diagnostic_log)
+        if self.approval_state is None:
+            self.approval_state = ApprovalModeState(
+                self.preparation.approval_mode
+                or self.start.requested_approval_mode
+                or DEFAULT_APPROVAL_MODE
+            )
 
     @property
     def ref(self) -> RunRef:
@@ -704,7 +729,9 @@ class _CoordinatorLifecyclePort:
         self, run: RunState, spec: InteractionRequest
     ) -> InteractionResult:
         """请求 owner 回答问题；状态迁移与 resolved 事件由 coordinator 拥有。"""
-        run.status = "interacting"
+        async with self._coordinator._lock:
+            run.status = "interacting"
+            run.pending_interactions.add(spec.request_id)
         kind = safe_context_value(spec.type) or "interaction"
         run.diagnostic_log.info("interaction.started", {"kind": kind, "source": "host"})
         wait_started = run.timing.begin_wait() if run.timing is not None else None
@@ -715,6 +742,10 @@ class _CoordinatorLifecyclePort:
         finally:
             if run.timing is not None and wait_started is not None:
                 run.timing.end_interaction_wait(wait_started)
+            async with self._coordinator._lock:
+                run.pending_interactions.discard(spec.request_id)
+                if run.completion is None and not run.cancel_requested:
+                    run.status = "running"
         wait_ms = 0
         if run.timing is not None and wait_started is not None:
             wait_ms = max(0, round((run.timing.clock() - wait_started) * 1000))
@@ -724,7 +755,6 @@ class _CoordinatorLifecyclePort:
             run.diagnostic_log.warn("interaction.completed", completed)
         else:
             run.diagnostic_log.info("interaction.completed", completed)
-        run.status = "running"
         self._coordinator._emit(
             run,
             INTERACTION_RESOLVED,
@@ -911,7 +941,11 @@ class RunCoordinator:
             {
                 "mode": run.start.mode,
                 "resumed": bool(run.preparation.idle_duration_ms is not None),
-                "approval_mode": run.start.requested_approval_mode or "default",
+                "approval_mode": (
+                    run.approval_state.mode
+                    if run.approval_state is not None
+                    else DEFAULT_APPROVAL_MODE
+                ),
                 "model_profile_id": profile_id,
             },
         )
@@ -1100,20 +1134,73 @@ class RunCoordinator:
 
     async def cancel(self, run: RunRef, requester: ConnectionRef) -> CancelResult:
         """只允许 owner 取消 Run，并让执行路径产生唯一取消终态。"""
-        active = await self._lookup(run)
-        if active.owner != requester:
-            raise RunError("RUN_NOT_OWNER")
-        if active.completion is not None:
-            return CancelResult(False, run.run_id)
-
-        active.cancel_requested = True
-        active.cancellation_token.cancel()
+        async with self._lock:
+            active = self._runs.get(run.thread_id)
+            if active is None or active.ref.run_id != run.run_id or active.completion is not None:
+                raise RunError("RUN_NOT_FOUND")
+            if active.owner != requester:
+                raise RunError("RUN_NOT_OWNER")
+            active.cancel_requested = True
+            active.cancellation_token.cancel()
+            task = active.task
+            status = active.status
         self._child_interactions.cancel_run(run.run_id)
         await self._execution_registry.cancel_run(active.root_execution_ref)
-        task = active.task
-        if task is not None and not task.done() and active.status != "accepted":
+        if task is not None and not task.done() and status != "accepted":
             task.cancel()
         return CancelResult(True, run.run_id)
+
+    async def set_approval_mode(
+        self,
+        run: RunRef,
+        requester: ConnectionRef,
+        approval_mode: ApprovalMode,
+    ) -> ApprovalModeResult:
+        """在 Coordinator 临界区提交当前 Run 的审批模式并返回服务端事实。"""
+        async with self._lock:
+            active = self._runs.get(run.thread_id)
+            if active is None or active.ref.run_id != run.run_id:
+                raise RunError("RUN_APPROVAL_MODE_NOT_FOUND")
+            if active.completion is not None or active.status in {
+                "completed",
+                "failed",
+                "cancelled",
+            }:
+                raise RunError("RUN_APPROVAL_MODE_TERMINAL")
+            if active.owner != requester:
+                raise RunError("RUN_APPROVAL_MODE_NOT_OWNER")
+            if active.cancel_requested or active.cancellation_token.cancelled:
+                raise RunError("RUN_APPROVAL_MODE_CANCELLED")
+            if (
+                active.pending_interactions
+                or active.pending_approvals
+                or active.status == "interacting"
+            ):
+                raise RunError("RUN_APPROVAL_MODE_BUSY", retryable=True)
+            if active.run_context is not None:
+                plan_constraint = getattr(active.run_context, "plan_constraint", None)
+                if bool(getattr(plan_constraint, "active", False)) and approval_mode != "plan":
+                    raise RunError("RUN_APPROVAL_MODE_PLAN_LOCKED")
+            if active.approval_state is None:  # pragma: no cover - post-init invariant
+                raise RunError("RUN_APPROVAL_MODE_NOT_FOUND")
+            previous_mode, _ = active.approval_state.snapshot()
+            actual_mode, revision = active.approval_state.set(approval_mode)
+            if actual_mode != previous_mode:
+                active.diagnostic_log.info(
+                    "run.approval_mode.changed",
+                    {
+                        "from": previous_mode,
+                        "to": actual_mode,
+                        "revision": revision,
+                        "source": "rpc",
+                    },
+                )
+            return ApprovalModeResult(
+                thread_id=run.thread_id,
+                run_id=run.run_id,
+                approval_mode=actual_mode,
+                revision=revision,
+            )
 
     async def owner_disconnected(self, connection: ConnectionRef) -> None:
         """取消指定 owner 拥有的 Run；其他 Connection 的 Run 不受影响。"""
@@ -1885,9 +1972,16 @@ class RunCoordinator:
                     interrupt_id=interrupt_id,
                     action_count=1,
                 )
-                run.status = "interacting"
-                result = await self._interaction_port.request(run.owner, run.ref, spec)
-                run.status = "running"
+                async with self._lock:
+                    run.status = "interacting"
+                    run.pending_interactions.add(spec.request_id)
+                try:
+                    result = await self._interaction_port.request(run.owner, run.ref, spec)
+                finally:
+                    async with self._lock:
+                        run.pending_interactions.discard(spec.request_id)
+                        if run.completion is None and not run.cancel_requested:
+                            run.status = "running"
                 self._emit(
                     run,
                     INTERACTION_RESOLVED,
@@ -1945,9 +2039,16 @@ class RunCoordinator:
                 interrupt_id=interrupt_id,
                 action_count=1,
             )
-            run.status = "interacting"
-            result = await self._interaction_port.request(run.owner, run.ref, spec)
-            run.status = "running"
+            async with self._lock:
+                run.status = "interacting"
+                run.pending_interactions.add(spec.request_id)
+            try:
+                result = await self._interaction_port.request(run.owner, run.ref, spec)
+            finally:
+                async with self._lock:
+                    run.pending_interactions.discard(spec.request_id)
+                    if run.completion is None and not run.cancel_requested:
+                        run.status = "running"
             self._emit(
                 run,
                 INTERACTION_RESOLVED,

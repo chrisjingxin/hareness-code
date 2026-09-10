@@ -34,6 +34,38 @@ class RunContextError(ValueError):
 
 
 @dataclass(slots=True)
+class ApprovalModeState:
+    """Host 拥有的单次 Run 审批状态；更新由 Coordinator 临界区串行化。"""
+
+    mode: ApprovalMode
+    revision: int = 0
+
+    def __post_init__(self) -> None:
+        """校验初始 mode/revision，避免无效权限语义进入运行时。"""
+        self._validate_mode(self.mode)
+        if not isinstance(self.revision, int) or isinstance(self.revision, bool) or self.revision < 0:
+            raise ValueError("APPROVAL_MODE_REVISION_INVALID")
+
+    def snapshot(self) -> tuple[ApprovalMode, int]:
+        """返回当前实际 mode 与单调 revision。"""
+        return self.mode, self.revision
+
+    def set(self, mode: ApprovalMode) -> tuple[ApprovalMode, int]:
+        """更新 mode；幂等重复写不推进 revision。"""
+        self._validate_mode(mode)
+        if mode != self.mode:
+            self.mode = mode
+            self.revision += 1
+        return self.snapshot()
+
+    @staticmethod
+    def _validate_mode(mode: object) -> None:
+        """只允许协议中的五种审批模式。"""
+        if mode not in {"plan", "default", "auto-edit", "auto", "yolo"}:
+            raise ValueError("APPROVAL_MODE_INVALID")
+
+
+@dataclass(slots=True)
 class RunPlanConstraint:
     """同一 Run 内可单向开启的计划约束；不进入 checkpoint 或持久化。"""
 
@@ -76,6 +108,9 @@ class RunContext:
     thread_id: str
     run_id: str
     approval_mode: ApprovalMode
+    # 根 Run 与所有 child 共享 Host-owned 状态；child 可通过 provider 暴露求交 view。
+    approval_state: ApprovalModeState | None = field(default=None, repr=False)
+    approval_mode_provider: Callable[[], ApprovalMode] | None = field(default=None, repr=False)
     # 根图 checkpoint 的内部身份；公开 thread_id 仍绑定 Transcript、Skill、
     # 诊断日志和 UI provenance，不能用内部摘要伪造对外执行来源。
     checkpoint_thread_id: str | None = None
@@ -153,9 +188,30 @@ def require_run_context(runtime: object) -> RunContext:
     return context
 
 
+def current_approval_mode(
+    context: object,
+    *,
+    fallback: ApprovalMode | None = None,
+) -> ApprovalMode | None:
+    """读取 Run 当前实际审批模式；child provider 只能返回有界求交 view。"""
+    provider = getattr(context, "approval_mode_provider", None)
+    if callable(provider):
+        mode = provider()
+        ApprovalModeState._validate_mode(mode)
+        return mode
+    state = getattr(context, "approval_state", None)
+    if isinstance(state, ApprovalModeState):
+        return state.mode
+    mode = fallback if fallback is not None else getattr(context, "approval_mode", None)
+    if mode is None:
+        return None
+    ApprovalModeState._validate_mode(mode)
+    return mode
+
+
 def plan_constraint_active(context: object) -> bool:
     """统一判定当前 Run 的计划约束：初始 plan 档位或运行时已点头。"""
-    if getattr(context, "approval_mode", None) == "plan":
+    if current_approval_mode(context) == "plan":
         return True
     constraint = getattr(context, "plan_constraint", None)
     return bool(getattr(constraint, "active", False))
@@ -191,9 +247,8 @@ class RunContextSnapshotMiddleware(AgentMiddleware):
         context = require_run_context(request.runtime)
         base_prompt = _system_message_text(request.system_message)
         prompt = _without_legacy_approval_mode_section(context.context_snapshot.system_prompt)
-        effective_mode: ApprovalMode = (
-            "plan" if plan_constraint_active(context) else context.approval_mode
-        )
+        current_mode = current_approval_mode(context, fallback=context.approval_mode)
+        effective_mode: ApprovalMode = "plan" if plan_constraint_active(context) else current_mode  # type: ignore[assignment]
         prompt = f"{prompt}{approval_mode_prompt(effective_mode)}"
         # 已信任额外根是会话内可变事实，必须在模型调用边界动态追加。
         extra_roots = _extra_roots_prompt(request.runtime)
@@ -201,6 +256,50 @@ class RunContextSnapshotMiddleware(AgentMiddleware):
             prompt = f"{prompt}{extra_roots}"
         system_prompt = f"{prompt}\n\n{base_prompt}" if base_prompt else prompt
         return await handler(request.override(system_message=SystemMessage(content=system_prompt)))
+
+
+class ApprovalModePromptMiddleware(AgentMiddleware):
+    """在不拥有根快照的 child 图中动态更新审批模式提示。"""
+
+    def __init__(self, approval_mode: ApprovalMode) -> None:
+        """保存 child 构图期回退档位；正常运行从 RunContext 读取。"""
+        super().__init__()
+        self._approval_mode = approval_mode
+
+    def _request_with_current_prompt(self, request: ModelRequest) -> ModelRequest:
+        """剥离 child 旧模式小节并追加当前有效模式事实。"""
+        runtime = getattr(request, "runtime", None)
+        context = getattr(runtime, "context", None)
+        current_mode = current_approval_mode(context, fallback=self._approval_mode)
+        effective_mode: ApprovalMode = (
+            "plan"
+            if plan_constraint_active(context)
+            else (current_mode or self._approval_mode)
+        )
+        prompt = _without_legacy_approval_mode_section(
+            _system_message_text(request.system_message)
+        )
+        return request.override(
+            system_message=SystemMessage(
+                content=f"{prompt}{approval_mode_prompt(effective_mode)}"
+            )
+        )
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        """同步模型调用使用当前 child 模式。"""
+        return handler(self._request_with_current_prompt(request))
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse | ExtendedModelResponse:
+        """异步模型调用使用当前 child 模式。"""
+        return await handler(self._request_with_current_prompt(request))
 
 
 def _extra_roots_prompt(runtime: object) -> str:

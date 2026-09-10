@@ -248,7 +248,7 @@ test("放弃计划只恢复档位，不自动开跑", async () => {
   }
 })
 
-test("active Run 时 /plan 与 Shift+Tab 只改下一轮档位，不取消当前 Run", async () => {
+test("active Run 时 /plan 与 Shift+Tab 先提交 Host，再更新当前 snapshot", async () => {
   const harness = makeHarness()
   try {
     await harness.controller.dispatch({ type: "input.submit", value: "第一次" })
@@ -258,13 +258,202 @@ test("active Run 时 /plan 与 Shift+Tab 只改下一轮档位，不取消当前
     const planOutcome = await harness.controller.dispatch({ type: "input.submit", value: "/plan" })
     expect(planOutcome).toEqual({ status: "accepted" })
     expect(harness.controller.getSnapshot().runtime.approvalMode).toBe("plan")
+    expect(harness.controller.getSnapshot().runtime.approvalModeRevision).toBe(1)
     expect(harness.controller.getSnapshot().activeRun?.runId).toBe(run.runId)
     expect(harness.calls.filter(call => call === "run.start").length).toBe(before)
+    expect(harness.calls).toContain("run.set_approval_mode")
 
     harness.port.completeRun(run.threadId, run.runId)
     await flush()
     await harness.controller.dispatch({ type: "input.submit", value: "规划问题" })
     expect(harness.port.lastRunSelection()).toMatchObject({ message: "规划问题", approvalMode: "plan" })
+  } finally {
+    await harness.controller.close()
+  }
+})
+
+test("active Run 审批 RPC 失败时保留旧 mode/revision，不污染 UI", async () => {
+  const harness = makeHarness()
+  try {
+    await harness.controller.dispatch({ type: "input.submit", value: "第一次" })
+    harness.port.setApprovalModeImpl(async () => {
+      throw new Error("RUN_APPROVAL_MODE_BUSY")
+    })
+
+    const outcome = await harness.controller.dispatch({ type: "approval-mode.set", mode: "yolo" })
+
+    expect(outcome).toEqual({
+      status: "rejected",
+      code: "agent-error",
+      message: "审批模式切换失败：RUN_APPROVAL_MODE_BUSY",
+    })
+    expect(harness.controller.getSnapshot().runtime.approvalMode).toBe("default")
+    expect(harness.controller.getSnapshot().runtime.approvalModeRevision).toBe(0)
+  } finally {
+    await harness.controller.close()
+  }
+})
+
+test("活动 Run 结束后忽略迟到的审批 RPC 响应", async () => {
+  const harness = makeHarness()
+  try {
+    await harness.controller.dispatch({ type: "input.submit", value: "第一次" })
+    const run = harness.runHandles.at(-1)!
+    let resolveResponse!: (value: any) => void
+    const response = new Promise<any>(resolve => { resolveResponse = resolve })
+    harness.port.setApprovalModeImpl(async () => response)
+
+    const outcomePromise = harness.controller.dispatch({ type: "approval-mode.set", mode: "yolo" })
+    await flush()
+    harness.port.completeRun(run.threadId, run.runId)
+    await flush()
+    resolveResponse({ thread_id: run.threadId, run_id: run.runId, approval_mode: "yolo", revision: 1 })
+
+    await expect(outcomePromise).resolves.toEqual({
+      status: "rejected",
+      code: "agent-error",
+      message: "审批模式切换失败：活动 Run 已结束，忽略旧审批模式响应",
+    })
+    expect(harness.controller.getSnapshot().runtime.approvalMode).toBe("default")
+    expect(harness.controller.getSnapshot().runtime.approvalModeRevision).toBe(0)
+  } finally {
+    await harness.controller.close()
+  }
+})
+
+test("同一 Run 的旧 revision 响应不能回退已确认的审批状态", async () => {
+  const harness = makeHarness()
+  try {
+    await harness.controller.dispatch({ type: "input.submit", value: "第一次" })
+    const run = harness.runHandles.at(-1)!
+    let callCount = 0
+    let resolveResponse!: (value: any) => void
+    const staleResponse = new Promise<any>(resolve => { resolveResponse = resolve })
+    harness.port.setApprovalModeImpl(async (threadId, runId, mode) => {
+      callCount += 1
+      if (callCount === 1) return { thread_id: threadId, run_id: runId, approval_mode: mode, revision: 2 }
+      return staleResponse
+    })
+
+    await harness.controller.dispatch({ type: "approval-mode.set", mode: "yolo" })
+    const outcomePromise = harness.controller.dispatch({ type: "approval-mode.set", mode: "default" })
+    await flush()
+    resolveResponse({ thread_id: run.threadId, run_id: run.runId, approval_mode: "default", revision: 1 })
+
+    await expect(outcomePromise).resolves.toEqual({
+      status: "rejected",
+      code: "agent-error",
+      message: "审批模式切换失败：收到过期的审批模式 revision",
+    })
+    expect(harness.controller.getSnapshot().runtime.approvalMode).toBe("yolo")
+    expect(harness.controller.getSnapshot().runtime.approvalModeRevision).toBe(2)
+  } finally {
+    await harness.controller.close()
+  }
+})
+
+test("并发活动切档按服务端确认顺序维护 plan 恢复档位", async () => {
+  const harness = makeHarness()
+  try {
+    await harness.controller.dispatch({ type: "input.submit", value: "第一次" })
+    const run = harness.runHandles.at(-1)!
+    let callCount = 0
+    let releaseFirst!: () => void
+    const firstResponse = new Promise<void>(resolve => { releaseFirst = resolve })
+    harness.port.setApprovalModeImpl(async (threadId, runId, mode) => {
+      callCount += 1
+      if (callCount === 1) {
+        await firstResponse
+        return { thread_id: threadId, run_id: runId, approval_mode: "yolo", revision: 1 }
+      }
+      return { thread_id: threadId, run_id: runId, approval_mode: mode, revision: 2 }
+    })
+
+    const yoloPromise = harness.controller.dispatch({ type: "approval-mode.set", mode: "yolo" })
+    const planPromise = harness.controller.dispatch({ type: "approval-mode.set", mode: "plan" })
+    await flush()
+    releaseFirst()
+
+    await expect(yoloPromise).resolves.toEqual({ status: "accepted" })
+    await expect(planPromise).resolves.toEqual({ status: "accepted" })
+    expect(harness.controller.getSnapshot().runtime.approvalMode).toBe("plan")
+    expect(callCount).toBe(2)
+
+    await harness.controller.dispatch({ type: "input.submit", value: "/plan exit" })
+    expect(harness.controller.getSnapshot().runtime.approvalMode).toBe("yolo")
+  } finally {
+    harness.port.completeRun(harness.runHandles.at(-1)!.threadId, harness.runHandles.at(-1)!.runId)
+    await flush()
+    await harness.controller.close()
+  }
+})
+
+test("并发活动循环切档在队列执行时读取最新确认模式", async () => {
+  const harness = makeHarness()
+  let releaseFirst: (() => void) | undefined
+  let firstPromise: Promise<unknown> | undefined
+  let secondPromise: Promise<unknown> | undefined
+  let unsubscribe: (() => void) | undefined
+  try {
+    await harness.controller.dispatch({ type: "input.submit", value: "第一次" })
+    const run = harness.runHandles.at(-1)!
+    let callCount = 0
+    const requestedModes: string[] = []
+    const firstResponse = new Promise<void>(resolve => { releaseFirst = resolve })
+    harness.port.setApprovalModeImpl(async (threadId, runId, mode) => {
+      callCount += 1
+      requestedModes.push(mode)
+      if (callCount === 1) {
+        await firstResponse
+        return { thread_id: threadId, run_id: runId, approval_mode: "auto-edit", revision: 1 }
+      }
+      return { thread_id: threadId, run_id: runId, approval_mode: mode, revision: 2 }
+    })
+
+    const revisions = [harness.controller.getSnapshot().runtime.approvalModeRevision ?? 0]
+    unsubscribe = harness.controller.subscribe(snapshot => {
+      revisions.push(snapshot.runtime.approvalModeRevision ?? 0)
+    })
+
+    firstPromise = harness.controller.dispatch({ type: "approval-mode.cycle" })
+    secondPromise = harness.controller.dispatch({ type: "approval-mode.cycle" })
+    await flush()
+    expect(requestedModes).toEqual(["auto-edit"])
+
+    releaseFirst!()
+    await expect(firstPromise).resolves.toEqual({ status: "accepted" })
+    await expect(secondPromise).resolves.toEqual({ status: "accepted" })
+    expect(requestedModes).toEqual(["auto-edit", "auto"])
+    expect(harness.controller.getSnapshot().runtime.approvalMode).toBe("auto")
+    expect(harness.controller.getSnapshot().runtime.approvalModeRevision).toBe(2)
+    expect(revisions.at(-1)).toBe(2)
+    expect(revisions.every((revision, index) => index === 0 || revision >= revisions[index - 1]!)).toBe(true)
+  } finally {
+    unsubscribe?.()
+    releaseFirst?.()
+    await Promise.allSettled([firstPromise, secondPromise].filter((promise): promise is Promise<unknown> => promise !== undefined))
+    const activeRun = harness.runHandles.at(-1)
+    if (activeRun) harness.port.completeRun(activeRun.threadId, activeRun.runId)
+    await flush()
+    await harness.controller.close()
+  }
+})
+
+test("存在 pending Interaction 时本地先拒绝审批模式切换", async () => {
+  const harness = makeHarness()
+  try {
+    await harness.controller.dispatch({ type: "input.submit", value: "需要审批" })
+    const run = harness.runHandles.at(-1)!
+    const responsePromise = harness.port.sendInteraction(approvalRequest(run.threadId, run.runId))
+    await flush()
+
+    const outcome = await harness.controller.dispatch({ type: "approval-mode.set", mode: "yolo" })
+
+    expect(outcome).toEqual({ status: "rejected", code: "busy", message: "存在待处理交互，暂不能切换审批模式" })
+    expect(harness.calls).not.toContain("run.set_approval_mode")
+    harness.port.completeRun(run.threadId, run.runId)
+    await flush()
+    await responsePromise
   } finally {
     await harness.controller.close()
   }

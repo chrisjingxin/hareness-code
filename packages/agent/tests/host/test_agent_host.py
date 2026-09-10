@@ -908,6 +908,107 @@ async def test_connection_run_busy_without_multithread(tmp_path: Path) -> None:
     await host.close()
 
 
+async def test_active_run_approval_mode_rpc_returns_server_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Host 受控 RPC 必须在线性化后返回活动 Run 的实际 mode/revision。"""
+    from harness_agent.policy import trust_gate
+
+    monkeypatch.setattr(trust_gate, "is_trusted_directory", lambda _path: True)
+    owner_frames: list[dict[str, Any]] = []
+    agent = _BlockingAgent()
+    host = AgentHost(agent=agent, config_home=tmp_path / "home", workspace=tmp_path)
+    host.send = lambda message: _append(owner_frames, message)  # type: ignore[method-assign]
+    init = _initialize("run.approval_mode")
+    init["protocol"]["max_minor"] = 8
+    await host.dispatch(_request("initialize", init, "owner-init"))
+    await host.dispatch(
+        _request(
+            "run.start",
+            {
+                "mode": "build",
+                "input": {"kind": "user", "message": "活动切换"},
+                "thread_id": "thread-mode-rpc",
+                "run_id": "run-mode-rpc",
+                "approval_mode": "default",
+            },
+            "start-mode-rpc",
+        )
+    )
+    await asyncio.wait_for(agent.started.wait(), timeout=1)
+
+    await host.dispatch(
+        _request(
+            "run.set_approval_mode",
+            {
+                "thread_id": "thread-mode-rpc",
+                "run_id": "run-mode-rpc",
+                "approval_mode": "yolo",
+            },
+            "set-mode-rpc",
+        )
+    )
+
+    assert owner_frames[-1]["result"] == {
+        "thread_id": "thread-mode-rpc",
+        "run_id": "run-mode-rpc",
+        "approval_mode": "yolo",
+        "revision": 1,
+    }
+    await host.close()
+
+
+@pytest.mark.asyncio
+async def test_active_run_approval_mode_rpc_allows_untrusted_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """生产 Host 路径允许 owner 在未受信项目中显式切换活动 Run。"""
+    from harness_agent.policy import trust_gate
+
+    monkeypatch.setattr(trust_gate, "is_trusted_directory", lambda _path: False)
+    owner_frames: list[dict[str, Any]] = []
+    agent = _BlockingAgent()
+    host = AgentHost(agent=agent, config_home=tmp_path / "home", workspace=tmp_path)
+    host.send = lambda message: _append(owner_frames, message)  # type: ignore[method-assign]
+    init = _initialize("run.approval_mode")
+    init["protocol"]["max_minor"] = 8
+    await host.dispatch(_request("initialize", init, "owner-init"))
+    await host.dispatch(
+        _request(
+            "run.start",
+            {
+                "mode": "build",
+                "input": {"kind": "user", "message": "未受信项目"},
+                "thread_id": "thread-untrusted-rpc",
+                "run_id": "run-untrusted-rpc",
+                "approval_mode": "default",
+            },
+            "start-untrusted-rpc",
+        )
+    )
+    await asyncio.wait_for(agent.started.wait(), timeout=1)
+
+    await host.dispatch(
+        _request(
+            "run.set_approval_mode",
+            {
+                "thread_id": "thread-untrusted-rpc",
+                "run_id": "run-untrusted-rpc",
+                "approval_mode": "yolo",
+            },
+            "set-untrusted-rpc",
+        )
+    )
+
+    assert owner_frames[-1]["result"] == {
+        "thread_id": "thread-untrusted-rpc",
+        "run_id": "run-untrusted-rpc",
+        "approval_mode": "yolo",
+        "revision": 1,
+    }
+    await host.close()
+
+
 async def test_multithread_owner_can_run_parallel_threads(tmp_path: Path) -> None:
     """有 run.multithread 时，同一 Connection 可在不同 Thread 并发 Run。"""
     owner_frames: list[dict[str, Any]] = []

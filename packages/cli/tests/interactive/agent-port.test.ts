@@ -51,6 +51,25 @@ test("setSkillEnabled 转发为 skills.set_enabled，参数 { id, enabled }", as
   })
 })
 
+test("setApprovalMode 转发活动 Run 身份和目标 mode，并返回 Host revision", async () => {
+  const { gateway, nextRequest } = setupPeer(({ message, stdout }) => {
+    stdout.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: message.id,
+      result: { thread_id: "thread-1", run_id: "run-1", approval_mode: "yolo", revision: 2 },
+    }) + "\n")
+  })
+  const captured = nextRequest()
+
+  const result = await gateway.setApprovalMode("thread-1", "run-1", "yolo")
+
+  expect(result).toEqual({ thread_id: "thread-1", run_id: "run-1", approval_mode: "yolo", revision: 2 })
+  expect(await captured).toMatchObject({
+    method: "run.set_approval_mode",
+    params: { thread_id: "thread-1", run_id: "run-1", approval_mode: "yolo" },
+  })
+})
+
 test("listAgents 转发为 agents.list", async () => {
   const { gateway, nextRequest } = setupPeer(({ message, stdout }) => {
     stdout.write(JSON.stringify({

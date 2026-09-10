@@ -2,6 +2,7 @@
 
 import type {
   AgentsListResult,
+  ApprovalMode,
   ConfigChange,
   ContextCompactResult,
   GoalInspectResult,
@@ -17,6 +18,7 @@ import type {
   McpStatusResult,
   ModelsListResult,
   RunCancelResult,
+  RunSetApprovalModeResult,
   SkillsListResult,
   SkillsSetEnabledResult,
   TeamDefinition,
@@ -93,6 +95,18 @@ export class AgentClientGateway implements AgentGateway {
   async cancel(threadId: string, runId: string): Promise<RunCancelResult> {
     try {
       return await this.client.cancel(threadId, runId)
+    } catch (error) {
+      throw this.wrapError(error)
+    }
+  }
+
+  async setApprovalMode(
+    threadId: string,
+    runId: string,
+    approvalMode: ApprovalMode,
+  ): Promise<RunSetApprovalModeResult> {
+    try {
+      return await this.client.setApprovalMode(threadId, runId, approvalMode)
     } catch (error) {
       throw this.wrapError(error)
     }

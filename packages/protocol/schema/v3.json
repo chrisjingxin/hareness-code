@@ -28,6 +28,13 @@
         "capability": "run.cancel",
         "controlled": true
       },
+      "run.set_approval_mode": {
+        "params": "#/$defs/runSetApprovalModeParams",
+        "result": "#/$defs/runSetApprovalModeResult",
+        "capability": "run.approval_mode",
+        "controlled": true,
+        "min_minor": 8
+      },
       "context.compact": {
         "params": "#/$defs/contextCompactParams",
         "result": "#/$defs/contextCompactResult",
@@ -424,6 +431,7 @@
     },
     "capabilities": [
       "run.cancel",
+      "run.approval_mode",
       "run.multithread",
       "host.control",
       "config.read",
@@ -471,6 +479,30 @@
       "CONNECTION_RUN_BUSY": {
         "jsonrpc_code": -32000,
         "retryable": true
+      },
+      "RUN_APPROVAL_MODE_BUSY": {
+        "jsonrpc_code": -32000,
+        "retryable": true
+      },
+      "RUN_APPROVAL_MODE_NOT_FOUND": {
+        "jsonrpc_code": -32001,
+        "retryable": false
+      },
+      "RUN_APPROVAL_MODE_NOT_OWNER": {
+        "jsonrpc_code": -32005,
+        "retryable": false
+      },
+      "RUN_APPROVAL_MODE_CANCELLED": {
+        "jsonrpc_code": -32001,
+        "retryable": false
+      },
+      "RUN_APPROVAL_MODE_TERMINAL": {
+        "jsonrpc_code": -32001,
+        "retryable": false
+      },
+      "RUN_APPROVAL_MODE_PLAN_LOCKED": {
+        "jsonrpc_code": -32602,
+        "retryable": false
       },
       "COMPOSE_NOTHING_TO_ABANDON": {
         "jsonrpc_code": -32004,
@@ -1396,6 +1428,55 @@
         },
         "run_id": {
           "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "runSetApprovalModeParams": {
+      "type": "object",
+      "required": [
+        "thread_id",
+        "run_id",
+        "approval_mode"
+      ],
+      "properties": {
+        "thread_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "approval_mode": {
+          "$ref": "#/$defs/approvalMode"
+        }
+      },
+      "additionalProperties": false
+    },
+    "runSetApprovalModeResult": {
+      "type": "object",
+      "required": [
+        "thread_id",
+        "run_id",
+        "approval_mode",
+        "revision"
+      ],
+      "properties": {
+        "thread_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "approval_mode": {
+          "$ref": "#/$defs/approvalMode"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "additionalProperties": false

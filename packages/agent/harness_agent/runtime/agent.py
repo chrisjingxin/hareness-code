@@ -218,6 +218,7 @@ def _create_controlled_inline_subagents(
     plugin_middleware: Any | None = None,
     file_tool_contract: Any | None = None,
     rules_provider: Callable[[], list[PermissionRule]] | None = None,
+    dynamic: bool = False,
 ) -> tuple[list[dict[str, Any]], Any]:
     """创建内置 Inline worker，并合并 Host 注册的 Managed Plugin target。"""
     from deepagents.middleware.filesystem import FilesystemMiddleware
@@ -249,6 +250,7 @@ def _create_controlled_inline_subagents(
     from harness_agent.runtime.execution_binding import ExecutionMode, ExecutionRef
     from harness_agent.policy.concurrency import AsyncRWLock as RuntimeAsyncRWLock
     from harness_agent.policy.concurrency_guard import ConcurrencyGuardMiddleware
+    from harness_agent.runtime.run_context import ApprovalModePromptMiddleware
 
     available_names = frozenset(
         str(getattr(tool, "name", ""))
@@ -274,6 +276,10 @@ def _create_controlled_inline_subagents(
         # 先在 ToolNode 前收敛 provider 的 tool_calls；Inline child 与 root
         # 共用同一门禁，避免子图把畸形响应写入父图或 checkpoint。
         child_middleware.append(ModelOutputGuardMiddleware())
+        if dynamic:
+            # Inline child 的 system prompt 不来自根 snapshot，必须在模型边界
+            # 移除构图期档位并读取父 Run 的实时求交视图。
+            child_middleware.append(ApprovalModePromptMiddleware(child_mode))
         if rules_provider is not None:
             child_middleware.append(DenyRulesMiddleware(rules_provider))
         child_middleware.extend(
@@ -285,8 +291,8 @@ def _create_controlled_inline_subagents(
         )
         if include_plugin and plugin_middleware is not None:
             child_middleware.append(plugin_middleware)
-        if child_mode == "plan":
-            child_middleware.append(PlanModeMiddleware())
+        if dynamic or child_mode == "plan":
+            child_middleware.append(PlanModeMiddleware(child_mode))
         workspace_guard = None
         if workspace is not None:
             from harness_agent.policy.workspace_boundary import WorkspaceBoundaryMiddleware
@@ -299,9 +305,10 @@ def _create_controlled_inline_subagents(
             )
             workspace_guard = WorkspaceBoundaryMiddleware(
                 bound,
+                auto_trust_session=(child_mode == "yolo" and not dynamic),
                 allow_trust_prompt=agent_id == "general-purpose",
             )
-            if agent_id == "general-purpose" and child_mode != "yolo":
+            if agent_id == "general-purpose" and (dynamic or child_mode != "yolo"):
                 child_middleware.append(
                     ChildHitlMiddleware(
                         agent_id=agent_id,
@@ -311,7 +318,7 @@ def _create_controlled_inline_subagents(
                     )
                 )
             child_middleware.append(workspace_guard)
-        elif agent_id == "general-purpose" and child_mode != "yolo":
+        elif agent_id == "general-purpose" and (dynamic or child_mode != "yolo"):
             child_middleware.append(
                 ChildHitlMiddleware(
                     agent_id=agent_id,
@@ -562,6 +569,7 @@ def _make_approval_preflight(
     mutation_preflight: Callable[[ToolCallRequest], bool] | None = None,
     directory_trust_check: Callable[[ToolCallRequest], bool] | None = None,
     explore_task_readonly: bool = False,
+    dynamic: bool = False,
 ) -> Callable[[ToolCallRequest], bool] | None:
     """构造审批模式感知的 HITL 组合预检，返回 True 弹窗、False 自动执行。
 
@@ -578,16 +586,23 @@ def _make_approval_preflight(
         if not isinstance(tool_args, dict):
             tool_args = {}
 
+        from harness_agent.runtime.run_context import current_approval_mode
+
         # default/auto 等图可在同一 Run 内经 enter_plan_mode 动态收紧。
         # execute 在静态 plan 和动态约束下共用三态判定；未知才弹一次审批。
         runtime_context = getattr(getattr(request, "runtime", None), "context", None)
         runtime_plan_active = plan_constraint_active(runtime_context)
-        if (approval_mode == "plan" or runtime_plan_active) and tool_name == "execute":
+        mode = (
+            current_approval_mode(runtime_context, fallback=approval_mode)
+            if dynamic
+            else approval_mode
+        ) or approval_mode
+        if (mode == "plan" or runtime_plan_active) and tool_name == "execute":
             rules = rules_provider() if rules_provider is not None else []
             if rules and evaluate_tool_rules(tool_name, tool_args, rules) == "deny":
                 return False
             return classify_plan_shell_command(tool_args.get("command")) == "ask"
-        if approval_mode == "yolo":
+        if mode == "yolo":
             # YOLO 图的 execute HITL 平时休眠，只为同一 Run 动态进入 Plan 预留。
             return False
 
@@ -659,7 +674,7 @@ def _make_approval_preflight(
         # L3.1：Shell 安全命令白名单（非 plan 模式下自动放行只读安全的命令）。
         # 预检阶段直接跳过审批弹窗，与 evaluate_permission 的 L3.1 逻辑保持一致。
         # 链式命令逐段判定：任一段不在白名单内则不跳过审批。
-        if tool_name == "execute" and approval_mode != "plan":
+        if tool_name == "execute" and mode != "plan":
             command = str(tool_args.get("command", "")).strip()
             if command:
                 segments = extract_segments(command)
@@ -670,13 +685,18 @@ def _make_approval_preflight(
                     logger.info("安全命令白名单命中但底线触发，强制审批: %s", command)
 
         # L5 auto 模式：进入四层过滤器（设计规定 ask 规则命中同样进入过滤器）。
-        if approval_mode == "auto":
+        if mode == "auto":
             if sensitive:
                 return True  # L3.5 敏感路径强制确认
             # F4 分类器缓存命中时按其结论裁决：allow/deny 均不弹窗
             # （deny 由执行层守卫硬拒绝），ask 回退弹窗人工审批。
             if classifier is not None:
-                cached = classifier.lookup_decision(str(tool_call.get("id") or ""))
+                from harness_agent.policy.classifier import classifier_namespace_for_context
+
+                cached = classifier.lookup_decision(
+                    str(tool_call.get("id") or ""),
+                    namespace=classifier_namespace_for_context(runtime_context),
+                )
                 if cached is not None:
                     return cached[0] == "ask"
             decision, _reason = evaluate_auto_mode(tool_name, tool_args, workspace_root)
@@ -690,7 +710,7 @@ def _make_approval_preflight(
 
         # auto-edit：工作区内非敏感编辑与删除自动执行；越界调用已由边界预检拒绝。
         if (
-            approval_mode == "auto-edit"
+            mode == "auto-edit"
             and get_tool_kind(tool_name) in (ToolKind.EDIT, ToolKind.DELETE)
         ):
             return False
@@ -901,17 +921,29 @@ def create_harness_agent(
     # 常驻以承接同一 Run 内用户点头进入计划；未受计划约束时透明放行。
     # 必须早于文件边界和 HITL 执行，避免先创建 mutation 审批再自动拒绝。
     agent_middleware.append(PlanModeMiddleware(approval_mode))
-    if approval_mode == "auto":
+    if approval_mode == "auto" or shared_engine:
         # F3 破坏性命令守卫：预检对 F3 deny 决策不弹窗，执行层必须兜底硬拒绝。
         # 注入分类器后守卫优先复用其决策缓存（F4 deny 同样在此强制执行）。
         agent_middleware.append(
-            AutoDestructiveGuardMiddleware(rules_provider, local_workspace, classifier)
+            AutoDestructiveGuardMiddleware(
+                rules_provider,
+                local_workspace,
+                classifier,
+                approval_mode=approval_mode,
+                dynamic=shared_engine,
+            )
         )
         if classifier is not None:
             # F4 分类器挂在模型调用链：模型返回工具调用后、HITL 预检裁决前
             # 完成两阶段分类，预检与守卫复用同一份决策缓存。
             agent_middleware.append(
-                AutoClassifierMiddleware(classifier, rules_provider, local_workspace)
+                AutoClassifierMiddleware(
+                    classifier,
+                    rules_provider,
+                    local_workspace,
+                    approval_mode=approval_mode,
+                    dynamic=shared_engine,
+                )
             )
 
     # 1. AskUserMiddleware（交互式提问，仅 interactive 模式）
@@ -1078,7 +1110,7 @@ def create_harness_agent(
         # 工作区边界委托 registry；yolo 自动授予 session 级额外根。
         workspace_guard = WorkspaceBoundaryMiddleware(
             workspace_root_registry or local_workspace,
-            auto_trust_session=(approval_mode == "yolo"),
+            auto_trust_session=(approval_mode == "yolo" and not shared_engine),
             allow_trust_prompt=True,
         )
         agent_middleware.append(workspace_guard)
@@ -1102,6 +1134,7 @@ def create_harness_agent(
             plugin_middleware=getattr(plugin_runtime, "middleware", None),
             file_tool_contract=file_tool_contract,
             rules_provider=rules_provider,
+            dynamic=shared_engine,
         )
         agent_middleware.append(delegation_middleware)
 
@@ -1219,7 +1252,7 @@ def create_harness_agent(
         workspace_guard.allows_approval if workspace_guard is not None else None,
         rules_provider,
         local_workspace,
-        classifier=classifier if approval_mode == "auto" else None,
+        classifier=classifier if (approval_mode == "auto" or shared_engine) else None,
         mutation_preflight=mutation_preflight,
         directory_trust_check=(
             (lambda request: workspace_guard.needs_directory_trust(request) is not None)
@@ -1227,6 +1260,7 @@ def create_harness_agent(
             else None
         ),
         explore_task_readonly=explore_readonly,
+        dynamic=shared_engine,
     )
     _directory_trust_tools = ("ls", "read_file", "glob", "grep", "write_file", "edit_file", "delete_file")
 
@@ -1250,6 +1284,7 @@ def create_harness_agent(
             else None
         ),
         approval_descriptions=descriptions,
+        dynamic=shared_engine,
     )
 
     # 5b. ConcurrencyGuardMiddleware（并发读写锁守卫）。HITL 在 ToolNode 执行

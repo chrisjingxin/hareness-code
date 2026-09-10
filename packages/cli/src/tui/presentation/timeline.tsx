@@ -79,7 +79,7 @@ export function ConversationTimeline(props: {
   }
 
   return (
-    <scrollbox ref={props.scrollRef} stickyScroll stickyStart="bottom" flexGrow={1} minHeight={0} scrollAcceleration={createScrollAcceleration()} viewportOptions={{ paddingRight: 1 }}>
+    <scrollbox ref={props.scrollRef} stickyScroll stickyStart="bottom" flexGrow={1} flexShrink={1} minHeight={0} scrollAcceleration={createScrollAcceleration()} viewportOptions={{ paddingRight: 1 }}>
       <box height={1} />
       {childEmptyMessage ? (
         <box marginTop={2} paddingLeft={3} paddingRight={3}>

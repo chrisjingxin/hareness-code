@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from harness_agent.policy.approval_mode import ApprovalMode
 from harness_agent.threads.prompting import canonical_json, sha256_text
 
 if TYPE_CHECKING:
@@ -160,11 +161,36 @@ BUILTIN_AGENTS_BY_ID: dict[str, BuiltinAgentRecord] = {
 }
 
 
-def resolve_child_approval_mode(parent: str, role: str) -> str:
-    """计算内置 child 有效审批模式：不得比父更松，仅 GP+default 升到 auto-edit。"""
-    if role == "general-purpose" and parent == "default":
-        return "auto-edit"
-    return parent
+_APPROVAL_MODE_ORDER: dict[ApprovalMode, int] = {
+    "plan": 0,
+    "default": 1,
+    "auto-edit": 2,
+    "auto": 3,
+    "yolo": 4,
+}
+"""审批档位的宽松度顺序；plan 另有只读约束，始终优先。"""
+
+
+def intersect_approval_modes(left: ApprovalMode, right: ApprovalMode) -> ApprovalMode:
+    """返回两个审批档位的安全交集，结果不会比任一侧更宽松。"""
+    if left == "plan" or right == "plan":
+        return "plan"
+    return left if _APPROVAL_MODE_ORDER[left] <= _APPROVAL_MODE_ORDER[right] else right
+
+
+def resolve_child_approval_mode(
+    parent: ApprovalMode,
+    role: str,
+    *,
+    maximum: ApprovalMode | None = None,
+) -> ApprovalMode:
+    """计算 child 档位，并把父实时档位与角色上限求交。"""
+    candidate: ApprovalMode = (
+        "auto-edit" if role == "general-purpose" and parent == "default" else parent
+    )
+    if maximum is not None:
+        return intersect_approval_modes(candidate, maximum)
+    return candidate
 
 
 def explore_view_is_readonly(view: object) -> bool:

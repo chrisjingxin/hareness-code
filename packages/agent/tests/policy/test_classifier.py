@@ -140,6 +140,31 @@ def test_stage2_allow_resets_reject_streak():
     assert classifier.classify("execute", {"command": "ls"})[0] == "allow"
 
 
+def test_reject_streak_is_scoped_by_run_namespace():
+    """共享分类器中一个 Run 的连续拒绝不能耗尽另一个 Run 的预算。"""
+    model = _FakeClassifierModel(
+        [
+            _BLOCK_STAGE1,
+            _STAGE2_BLOCK,
+            _BLOCK_STAGE1,
+            _STAGE2_BLOCK,
+            _ALLOW_HIGH,
+        ]
+    )
+    classifier = SafetyClassifier(model, max_reject_streak=2)
+
+    assert classifier.classify(
+        "execute", {"command": "python a1.py"}, namespace=("thread-a", "run-a", "root")
+    )[0] == "deny"
+    assert classifier.classify(
+        "execute", {"command": "python a2.py"}, namespace=("thread-a", "run-a", "root")
+    )[0] == "deny"
+    assert classifier.classify(
+        "execute", {"command": "python b.py"}, namespace=("thread-b", "run-b", "root")
+    )[0] == "allow"
+    assert model.call_count == 5
+
+
 def test_model_errors_fall_back_to_ask():
     """两阶段模型调用全部异常时 fail-closed 回退人工审批，绝不自动放行。"""
     model = _FakeClassifierModel([RuntimeError("gateway down"), RuntimeError("timeout")])

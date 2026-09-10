@@ -9,7 +9,13 @@ from typing import Any
 import pytest
 from jsonschema import ValidationError
 
-from harness_agent.protocol.generated import ContextCompactParams, EventEnvelope, RunStartParams
+from harness_agent.protocol.generated import (
+    ContextCompactParams,
+    EventEnvelope,
+    RunSetApprovalModeParams,
+    RunSetApprovalModeResult,
+    RunStartParams,
+)
 from harness_agent.protocol.runtime import (
     validate_interaction_params,
     validate_interaction_result,
@@ -79,6 +85,35 @@ def test_python_validates_thread_model_selection() -> None:
                 "thread_id": "thread-1",
                 "run_id": "run-1",
                 "model_selection": {"primary_profile": "", "unknown": True},
+            }
+        )
+
+
+def test_python_validates_active_run_approval_mode_operation() -> None:
+    """活动 Run 审批切换必须由严格的 thread/run/mode/revision 合约承载。"""
+    params = RunSetApprovalModeParams.model_validate(
+        {
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+            "approval_mode": "yolo",
+        }
+    )
+    assert params.approval_mode == "yolo"
+    result = RunSetApprovalModeResult.model_validate(
+        {
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+            "approval_mode": "yolo",
+            "revision": 1,
+        }
+    )
+    assert result.revision == 1
+    with pytest.raises(ValidationError):
+        RunSetApprovalModeParams.model_validate(
+            {
+                "thread_id": "thread-1",
+                "run_id": "run-1",
+                "approval_mode": "unknown",
             }
         )
 

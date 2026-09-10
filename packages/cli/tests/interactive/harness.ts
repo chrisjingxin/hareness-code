@@ -101,6 +101,15 @@ function createPort(options: {
     diagnostics: [],
   }
   let setSkillEnabledImpl: (skillId: string, enabled: boolean) => Promise<Record<string, never>> = async () => ({})
+  let approvalModeRevision = 0
+  let serverApprovalMode = runtime.approvalMode
+  let setApprovalModeImpl: InteractiveAgentPort["setApprovalMode"] = async (threadId, runId, approvalMode) => {
+    if (approvalMode !== serverApprovalMode) {
+      serverApprovalMode = approvalMode
+      approvalModeRevision += 1
+    }
+    return { thread_id: threadId, run_id: runId, approval_mode: serverApprovalMode, revision: approvalModeRevision }
+  }
   let compactContextImpl: InteractiveAgentPort["compactContext"] = options.compactContextImpl
     ?? (async () => ({ compacted: true, context: { action: "manual_summary" } }))
   const openThreadImpl: InteractiveAgentPort["openThread"] = options.openThreadImpl ?? (async threadId => ({
@@ -147,6 +156,7 @@ function createPort(options: {
     setThreadSelection: (next: string | null) => void
     setSkillsList: (next: { skills: ReturnType<typeof skill>[] }) => void
     setSkillEnabledImpl: (impl: (skillId: string, enabled: boolean) => Promise<Record<string, never>>) => void
+    setApprovalModeImpl: (impl: InteractiveAgentPort["setApprovalMode"]) => void
     setCompactContextImpl: (impl: InteractiveAgentPort["compactContext"]) => void
     setListAgentsImpl: (impl: InteractiveAgentPort["listAgents"]) => void
     lastRunSelection: () => { message: string; threadId: string; runId: string; mode: "build" | "compose"; modelSelection?: { primary_profile: string }; requestedSkill?: { id: string; args?: string } } | undefined
@@ -176,6 +186,8 @@ function createPort(options: {
       const sequence = ++runNumber
       const runId = input.runId ?? `run-${sequence}`
       runHandles.push({ threadId, runId })
+      serverApprovalMode = input.approvalMode ?? runtime.approvalMode
+      approvalModeRevision = 0
       return makeRunHandle({
         threadId,
         runId,
@@ -190,6 +202,10 @@ function createPort(options: {
       calls.push("run.cancel")
       const run = runHandles.at(-1)!
       return { cancelled: true, run_id: run.runId }
+    },
+    async setApprovalMode(threadId, runId, approvalMode) {
+      calls.push("run.set_approval_mode")
+      return setApprovalModeImpl(threadId, runId, approvalMode)
     },
     async compactContext(threadId) {
       calls.push("context.compact")
@@ -398,6 +414,9 @@ function createPort(options: {
     },
     setSkillEnabledImpl(impl) {
       setSkillEnabledImpl = impl
+    },
+    setApprovalModeImpl(impl) {
+      setApprovalModeImpl = impl
     },
     setCompactContextImpl(impl) {
       compactContextImpl = impl

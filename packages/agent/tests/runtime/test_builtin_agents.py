@@ -29,6 +29,7 @@ from harness_agent.runtime.agent_execution import AgentExecutionRegistry
 from harness_agent.runtime.builtin_agents import (
     EXPLORE_TOOL_ALLOWLIST,
     FORCED_EXCLUSIONS,
+    intersect_approval_modes,
     explore_view_is_readonly,
     resolve_builtin_child_view,
     resolve_child_approval_mode,
@@ -149,6 +150,19 @@ def test_resolve_child_approval_mode_only_loosens_gp_under_default() -> None:
     assert resolve_child_approval_mode("plan", "general-purpose") == "plan"
     assert resolve_child_approval_mode("default", "explore") == "default"
     assert resolve_child_approval_mode("plan", "explore") == "plan"
+
+
+def test_child_approval_mode_intersects_parent_and_child_ceiling() -> None:
+    """Inline/Managed child 的运行时档位只能取父档位与角色上限的交集。"""
+    assert intersect_approval_modes("yolo", "auto-edit") == "auto-edit"
+    assert intersect_approval_modes("auto", "default") == "default"
+    assert intersect_approval_modes("plan", "yolo") == "plan"
+    assert resolve_child_approval_mode(
+        "default", "general-purpose", maximum="default"
+    ) == "default"
+    assert resolve_child_approval_mode(
+        "default", "general-purpose", maximum="auto"
+    ) == "auto-edit"
 
 
 def test_explore_view_is_readonly() -> None:
@@ -614,4 +628,3 @@ api_key = "test"
     assert result["messages"][-1].content == "SMOKE_SUCCESS"
     executions = await registry.list(root)
     assert any(item.agent_id == "explore" and item.status is ExecutionStatus.COMPLETED for item in executions)
-

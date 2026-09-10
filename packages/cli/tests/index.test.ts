@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs"
 import { mkdtemp, readFile, realpath, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 import { tmpdir } from "node:os"
-import { Readable } from "node:stream"
+import { PassThrough, Readable } from "node:stream"
 
 import {
   clientCapabilities,
@@ -18,6 +18,9 @@ import {
   validateWorkspace,
   workspaceFingerprint,
 } from "../src/index"
+import { AgentClient } from "../src/ipc/client"
+import { StdioRpcTransport } from "../src/ipc/stdio-transport"
+import { Capability } from "@za38/protocol"
 import {
   bindPluginCommands,
   COMMANDS_BIND_MIN_MINOR,
@@ -115,6 +118,59 @@ test("无头 CLI 不声明 Interaction handler", () => {
   expect(clientCapabilities(interactive)).toContain("agents.read")
   expect(clientCapabilities(interactive)).toContain("teams.read")
   expect(clientCapabilities(interactive)).toContain("teams.manage")
+  expect(clientCapabilities(interactive)).toContain("run.approval_mode")
+})
+
+test("生产交互握手声明 run.approval_mode 后可发送活动 Run 切换 RPC", async () => {
+  const command = parseArgs([])
+  const requested = clientCapabilities(command)
+  expect(requested).toContain(Capability.RUN_APPROVAL_MODE)
+  const stdin = new PassThrough()
+  const stdout = new PassThrough()
+  const client = new AgentClient(new StdioRpcTransport(stdin, stdout))
+  const requests: Array<{ method: string; params: Record<string, unknown> }> = []
+  stdin.on("data", chunk => {
+    const message = JSON.parse(chunk.toString()) as { id: string; method: string; params: Record<string, unknown> }
+    requests.push(message)
+    if (message.method === "initialize") {
+      stdout.write(JSON.stringify({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          protocol: { major: 3, minor: 8 },
+          server: { name: "fake-agent", version: "test" },
+          connection: { id: "connection-1", role: "owner", project: { id: "project-1", label: "project" } },
+          capabilities: { available: requested, enabled: requested, handles: [] },
+          agent_commands: [],
+          skills_snapshot: { id: "skills-1", count: 0 },
+          skill_diagnostics: [],
+          limits: { max_frame_bytes: 8 * 1024 * 1024, max_tool_payload_bytes: 1024 * 1024 },
+          diagnostics: { level: "info", retention_days: 7, max_total_mib: 16, max_file_mib: 1 },
+          config_summary: null,
+          startup_error: null,
+        },
+      }) + "\n")
+      return
+    }
+    stdout.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: message.id,
+      result: { thread_id: "thread-1", run_id: "run-1", approval_mode: "yolo", revision: 1 },
+    }) + "\n")
+  })
+  try {
+    await client.initialize({
+      protocol: { major: 3, min_minor: 0, max_minor: 8 },
+      client: { name: "harness-cli", version: "test", kind: "tui" },
+      capabilities: { requests: requested, handles: [] },
+    })
+    const result = await client.setApprovalMode("thread-1", "run-1", "yolo")
+    expect(result).toEqual({ thread_id: "thread-1", run_id: "run-1", approval_mode: "yolo", revision: 1 })
+    expect(requests.map(request => request.method)).toEqual(["initialize", "run.set_approval_mode"])
+    expect(requests[0]?.params.capabilities).toMatchObject({ requests: expect.arrayContaining([Capability.RUN_APPROVAL_MODE]) })
+  } finally {
+    await client.close()
+  }
 })
 
 test("Plugin CLI 按操作声明最小读写能力", () => {

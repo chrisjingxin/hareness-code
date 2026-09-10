@@ -1,7 +1,7 @@
 /** Run Feature：管理 Run 的启动、取消、底层 Agent 订阅句柄与终态清理。 */
 
 import { EventType, type ApprovalMode, type InteractionMode, type ModelProfile, type RequestedSkill, type RunInput } from "@za38/protocol"
-import type { IntentOutcome, InteractiveAgentRun, SkillSummary } from "../ports"
+import { AgentGatewayError, type IntentOutcome, type InteractiveAgentRun, type SkillSummary } from "../ports"
 import { markCancelling, markRunFailed, startInternalRun, startRun as startRunState } from "../state"
 import { nextApprovalMode, type InteractiveApprovalMode } from "../runtime"
 import type { FeatureContext } from "./types"
@@ -40,11 +40,18 @@ function stringValue(value: unknown, fallback: string): string {
   return typeof value === "string" && value ? value : fallback
 }
 
+/** 校验 Host 返回的审批模式枚举，避免错误响应污染本地 UI 状态。 */
+function isApprovalMode(value: unknown): value is ApprovalMode {
+  return value === "plan" || value === "default" || value === "auto-edit" || value === "auto" || value === "yolo"
+}
+
 /** 批准计划后自动开实现轮的固定用户消息。 */
 export const PLAN_IMPLEMENT_PROMPT = "用户已批准计划，Plan 模式约束已解除。请读取 `/.harness/plan.md` 中的设计方案并开始实现。"
 
 export class RunFeature {
   approvalModeOverride: InteractiveApprovalMode | undefined
+  /** 活动 Run 的 Host 审批状态 revision；失败时保持上一次已确认值。 */
+  approvalModeRevision = 0
   /** 进入 plan 之前的审批档位；不在 plan 时为空。 */
   prePlanMode: InteractiveApprovalMode | undefined
   /** 进入/离开 plan 时递增，供后续计划审批校验过期切档。 */
@@ -52,6 +59,8 @@ export class RunFeature {
   private planInteractionRevision: number | undefined
   private planContinue: { decision: "approved" | "abandoned"; feedback?: string } | undefined
   private activeRunHandle: InteractiveAgentRun | null = null
+  /** 同一活动 Run 的模式 RPC 串行化，保证 prePlanMode 使用最新确认事实。 */
+  private readonly approvalModeQueues = new Map<string, Promise<void>>()
 
   /** 当前审批模式：覆盖值优先，否则回落到底层 runtime 的握手值。 */
   currentApprovalMode(fallback: InteractiveApprovalMode): ApprovalMode {
@@ -59,19 +68,113 @@ export class RunFeature {
   }
 
   /** Shift+Tab 循环：进入 plan 时记下上一档，离开 plan 时丢掉并走到 default。 */
-  cycleApprovalMode(ctx: FeatureContext): IntentOutcome {
+  async cycleApprovalMode(ctx: FeatureContext): Promise<IntentOutcome> {
+    const activeRun = ctx.getState().activeRun
+    if (activeRun) {
+      // 活动 Run 的 cycle 必须在队列真正执行时读取最新确认档位，不能在入队前冻结目标。
+      return this.enqueueActiveApprovalMode(activeRun, () => {
+        const current = this.approvalModeOverride ?? ctx.baseRuntime.approvalMode
+        return nextApprovalMode(current)
+      }, ctx)
+    }
     const current = this.approvalModeOverride ?? ctx.baseRuntime.approvalMode
-    this.applyApprovalModeChange(current, nextApprovalMode(current))
+    return this.setApprovalMode(nextApprovalMode(current), ctx)
+  }
+
+  /** 直接选择审批档位；进入/离开 plan 时维护 prePlanMode 与 revision。 */
+  async setApprovalMode(mode: InteractiveApprovalMode, ctx: FeatureContext): Promise<IntentOutcome> {
+    const activeRun = ctx.getState().activeRun
+    if (activeRun) {
+      return this.enqueueActiveApprovalMode(activeRun, () => mode, ctx)
+    }
+    const current = this.approvalModeOverride ?? ctx.baseRuntime.approvalMode
+    this.approvalModeRevision = 0
+    this.applyApprovalModeChange(current, mode)
     ctx.publish()
     return { status: "accepted" }
   }
 
-  /** 直接选择审批档位；进入/离开 plan 时维护 prePlanMode 与 revision。 */
-  setApprovalMode(mode: InteractiveApprovalMode, ctx: FeatureContext): IntentOutcome {
-    const current = this.approvalModeOverride ?? ctx.baseRuntime.approvalMode
-    this.applyApprovalModeChange(current, mode)
-    ctx.publish()
-    return { status: "accepted" }
+  /** 将活动 Run 的审批切换加入串行队列；resolveMode 在任务开始时才执行。 */
+  private enqueueActiveApprovalMode(
+    requestedRun: { threadId: string; runId: string },
+    resolveMode: () => InteractiveApprovalMode,
+    ctx: FeatureContext,
+  ): Promise<IntentOutcome> {
+    const queueKey = `${requestedRun.threadId}\u0000${requestedRun.runId}`
+    const previous = this.approvalModeQueues.get(queueKey) ?? Promise.resolve()
+    const queued = previous
+      .catch(() => undefined)
+      .then(() => this.setActiveApprovalMode(resolveMode, requestedRun, ctx))
+    let tail!: Promise<void>
+    tail = queued.then(
+      () => {
+        if (this.approvalModeQueues.get(queueKey) === tail) this.approvalModeQueues.delete(queueKey)
+      },
+      () => {
+        if (this.approvalModeQueues.get(queueKey) === tail) this.approvalModeQueues.delete(queueKey)
+      },
+    )
+    this.approvalModeQueues.set(queueKey, tail)
+    return queued
+  }
+
+  /** 串行提交一个活动 Run 的模式请求，并在响应时读取最新本地确认档位。 */
+  private async setActiveApprovalMode(
+    resolveMode: () => InteractiveApprovalMode,
+    requestedRun: { threadId: string; runId: string },
+    ctx: FeatureContext,
+  ): Promise<IntentOutcome> {
+    const currentActive = ctx.getState().activeRun
+    const activeRunHandle = this.activeRunHandle
+    if (
+      !activeRunHandle
+      || !currentActive
+      || currentActive.threadId !== requestedRun.threadId
+      || currentActive.runId !== requestedRun.runId
+      || activeRunHandle.ref.threadId !== requestedRun.threadId
+      || activeRunHandle.ref.runId !== requestedRun.runId
+    ) {
+      return {
+        status: "rejected",
+        code: "agent-error",
+        message: "审批模式切换失败：活动 Run 已结束，忽略旧审批模式响应",
+      }
+    }
+    const mode = resolveMode()
+    try {
+      const result = await ctx.gateway.setApprovalMode(requestedRun.threadId, requestedRun.runId, mode)
+      const latestActive = ctx.getState().activeRun
+      if (
+        this.activeRunHandle !== activeRunHandle
+        || !latestActive
+        || latestActive.threadId !== requestedRun.threadId
+        || latestActive.runId !== requestedRun.runId
+        || this.activeRunHandle?.ref.threadId !== requestedRun.threadId
+        || this.activeRunHandle?.ref.runId !== requestedRun.runId
+      ) {
+        throw new AgentGatewayError("RUN_APPROVAL_MODE_STALE", "活动 Run 已结束，忽略旧审批模式响应")
+      }
+      if (
+        result.thread_id !== requestedRun.threadId
+        || result.run_id !== requestedRun.runId
+        || !isApprovalMode(result.approval_mode)
+        || !Number.isInteger(result.revision)
+        || result.revision < 0
+      ) {
+        throw new AgentGatewayError("RUN_APPROVAL_MODE_RESPONSE_INVALID", "服务端返回了无效的审批模式状态")
+      }
+      if (result.revision < this.approvalModeRevision) {
+        throw new AgentGatewayError("RUN_APPROVAL_MODE_STALE_REVISION", "收到过期的审批模式 revision")
+      }
+      this.approvalModeRevision = result.revision
+      // RPC 已串行化；此处读取响应前最新的已确认 mode，不能使用入队时的旧 current。
+      const latestMode = this.approvalModeOverride ?? ctx.baseRuntime.approvalMode
+      this.applyApprovalModeChange(latestMode, result.approval_mode)
+      ctx.publish()
+      return { status: "accepted" }
+    } catch (error) {
+      return { status: "rejected", code: "agent-error", message: `审批模式切换失败：${errorMessage(error)}` }
+    }
   }
 
   /** 计划交互弹出时记下当时的 revision，供批准时校验是否中途换档。 */
@@ -100,10 +203,10 @@ export class RunFeature {
   }
 
   /** `/plan exit`：恢复进入 plan 前的档位；缺失时回退 default。 */
-  restoreApprovalMode(ctx: FeatureContext): IntentOutcome {
+  async restoreApprovalMode(ctx: FeatureContext): Promise<IntentOutcome> {
     const current = this.approvalModeOverride ?? ctx.baseRuntime.approvalMode
     if (current === "plan") {
-      this.applyApprovalModeChange(current, this.prePlanMode ?? "default")
+      return this.setApprovalMode(this.prePlanMode ?? "default", ctx)
     }
     ctx.publish()
     return { status: "accepted" }
@@ -181,6 +284,7 @@ export class RunFeature {
       })
 
       this.activeRunHandle = run
+      this.approvalModeRevision = 0
       const localDisplayPrompt = options.displayPrompt ?? (input.kind === "user" ? input.message : undefined)
       ctx.commit(current => localDisplayPrompt !== undefined
         ? startRunState(current, run.ref, localDisplayPrompt, startedAtMs)
@@ -224,6 +328,7 @@ export class RunFeature {
       void run.completion.then(completion => {
         if (this.activeRunHandle?.ref.runId !== run.ref.runId) return
         this.activeRunHandle = null
+        this.approvalModeRevision = 0
         options.onAbandonInteraction()
         options.onRunFinish(
           actualModel,

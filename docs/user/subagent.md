@@ -34,17 +34,19 @@
 
 ## 审批模式与交互规则
 
-子代理的审批模式遵循**不得比父更松**的基本原则：
+子代理不会把派出瞬间的审批档位永久冻结。每次尚未开始的 child 工具、模型和目录信任决策都会读取父 Run 当前档位，再与该角色的最大档位求交；已经开始的调用不撤销、不重放，父 Run 切换档位也不会取消正在运行的 child。
 
-1. **general-purpose 的 auto-edit 放宽**：
-   - 当父会话处于 `default` 审批模式时，`general-purpose` 子代理内部按 `auto-edit` 模式运行——工作区内的常规文件修改与编辑自动执行不再每次弹窗，大幅减少打断；
-   - 但执行命令（`execute`）、工作区外访问与敏感路径操作依然会弹出审批卡片；
-   - 当父会话处于 `plan`、`auto-edit`、`auto` 或 `yolo` 时，子代理审批模式与父会话完全一致。
+1. **general-purpose 的角色默认值**：
+   - 父会话处于 `default` 时，`general-purpose` 保留既有的角色默认 `auto-edit`，工作区内常规编辑通常不逐次弹窗；这是角色策略，不是 child 自行把父 Run 放宽；
+   - 父会话处于 `plan` 时，child 仍受 Plan 只读硬约束；一次 `enter_plan_mode` 已生效后，即使父 UI 离开 `plan`，该 Run 约束仍不能解除；
+   - 父会话处于 `auto-edit`、`auto` 或 `yolo` 时，child 使用父当前档位。执行命令、工作区外访问、敏感路径、deny/Capability/Sandbox 等硬边界始终优先。
 2. **explore 的只读免审批**：
-   - 由于 `explore` 严格受限于 5 个只读工具且不具备任何写文件或命令执行能力，主代理派出 `explore` 时自动放行，不弹派出审批。
+   - `explore` 严格受限于 `ls`、`read_file`、`glob`、`grep`、`lsp` 五个只读工具，不具备写文件或命令执行能力，派出时可自动放行；父 Run 档位变化不会扩大这组工具。
 3. **Plugin 子代理严格 Fail-Closed**：
-   - Plugin 子代理不得通过自身配置（如 `permissionMode: yolo`）自行放宽审批权限；
-   - Plugin 子代理若需要触发人工交互（如提问或未授权操作），将作为不可用操作 Fail-Closed 拒绝。
+   - Plugin 子代理的 `approvalMode` / `permissionMode` 只用于计算其最大权限，不能通过自身配置超过父 Run 当前档位；例如声明 `yolo` 也不能把 `default` 父 Run 变成 `yolo`；
+   - Plugin 子代理若需要触发人工交互（如提问或未授权操作），仍通过主会话的 Interaction 通道；没有可用通道时拒绝，不默认放行。
+
+子代理继承父 Run 的额外目录信任 registry。父档位切到 `yolo` 后，新的工作区外路径可以按当前会话规则自动获得 session 根；切回其它档位后，新的外部路径重新显示目录信任卡片。待处理的审批、问答或目录信任期间不能切换父 Run 档位；Plugin 恢复只有在对应 resumed stream 成功消费后才会提交 `on_resume_consumed` 和授权规则。
 
 ## 子代理时间线与交互
 

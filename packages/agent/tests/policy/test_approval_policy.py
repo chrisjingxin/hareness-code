@@ -20,7 +20,7 @@ from harness_agent.policy.approval_policy import (
 )
 from harness_agent.policy.classifier import SafetyClassifier
 from harness_agent.policy.permission_rules import PermissionRule
-from harness_agent.runtime.run_context import RunPlanConstraint
+from harness_agent.runtime.run_context import ApprovalModeState, RunPlanConstraint
 
 _ALL_HITL_TOOLS = {
     "execute",
@@ -59,6 +59,14 @@ def test_hitl_mapping_keeps_compaction_outside_all_approval_modes():
     assert interrupt_on_for_approval_mode("yolo") is None
     assert "compact_conversation" not in default
     assert "compact_conversation" not in auto_edit
+
+
+def test_dynamic_hitl_mapping_compiles_all_switchable_approval_channels():
+    """共享 AgentEngine 预编译全部可切换通道，由动态 preflight 控制实际暂停。"""
+    dynamic = interrupt_on_for_approval_mode("default", dynamic=True)
+    assert dynamic is not None
+    assert set(dynamic) >= _ALL_HITL_TOOLS
+    assert set(dynamic) >= _PLAN_DIRECTORY_TRUST_TOOLS | {"execute", "exit_plan_mode"}
 
 
 @pytest.mark.parametrize(
@@ -341,6 +349,19 @@ def _make_request(tool_name: str, args: dict[str, Any]) -> SimpleNamespace:
     return SimpleNamespace(tool_call={"name": tool_name, "id": f"call-{tool_name}", "args": args})
 
 
+def _with_run_mode(request: SimpleNamespace, mode: str) -> tuple[SimpleNamespace, ApprovalModeState]:
+    """给策略请求挂上可变 Run 审批状态，模拟共享 AgentEngine 的 runtime。"""
+    state = ApprovalModeState(mode)  # type: ignore[arg-type]
+    request.runtime = SimpleNamespace(
+        context=SimpleNamespace(
+            approval_mode=mode,
+            approval_state=state,
+            approval_mode_provider=None,
+        )
+    )
+    return request, state
+
+
 def _make_preflight(
     workspace: Path,
     mode: str,
@@ -387,6 +408,29 @@ class TestApprovalPreflight:
             rules=[PermissionRule(tool="execute", resource="rm *", effect="deny")],
         )
         request = _make_request("execute", {"command": "rm -rf /"})
+        assert preflight(request) is False
+
+    def test_dynamic_preflight_reads_current_run_mode(self, tmp_path: Path):
+        """共享图预检必须随同一 Run 的审批状态切换，而不是冻结初始档位。"""
+        from harness_agent.runtime.agent import _make_approval_preflight
+
+        preflight = _make_approval_preflight(
+            "default",
+            None,
+            lambda: [],
+            str(tmp_path),
+            dynamic=True,
+        )
+        assert preflight is not None
+        request, state = _with_run_mode(
+            _make_request("write_file", {"file_path": "/src/a.py", "content": "x"}),
+            "default",
+        )
+
+        assert preflight(request) is True
+        state.set("auto-edit")
+        assert preflight(request) is False
+        state.set("yolo")
         assert preflight(request) is False
 
     def test_default_allow_rule_skips_dialog_for_non_sensitive(self, tmp_path: Path):
@@ -632,6 +676,33 @@ class TestAutoDestructiveGuardMiddleware:
         assert called is False
         assert result.status == "error"
         assert "AUTO 模式拒绝 execute" in str(result.content)
+
+    def test_dynamic_guard_only_enforces_auto_mode(self):
+        """共享图的 AUTO 守卫只在当前 Run 处于 auto 时生效。"""
+        middleware = AutoDestructiveGuardMiddleware(
+            None,
+            None,
+            approval_mode="default",
+            dynamic=True,
+        )
+        request, state = _with_run_mode(
+            _make_request("execute", {"command": "rm -rf /"}),
+            "default",
+        )
+        calls: list[str] = []
+
+        def handler(_request: object) -> object:
+            calls.append("handled")
+            return object()
+
+        middleware.wrap_tool_call(request, handler)
+        assert calls == ["handled"]
+        state.set("auto")
+        result = middleware.wrap_tool_call(request, handler)
+        assert result.status == "error"
+        state.set("yolo")
+        middleware.wrap_tool_call(request, handler)
+        assert calls == ["handled", "handled"]
 
     def test_allow_rule_beats_auto_filter(self):
         """allow 规则命中时优先于 AUTO 过滤器，直接放行到 handler。"""
@@ -934,6 +1005,32 @@ class TestAutoClassifierMiddleware:
         assert classifier.lookup_decision("call-1")[0] == "allow"
         assert model.call_count == 1
 
+    def test_dynamic_classifier_is_quiet_outside_auto(self):
+        """共享图切出 AUTO 后，分类器不应继续消耗主 Run 的模型调用。"""
+        model = _ScriptedClassifierModel(
+            ['{"decision": "allow", "confidence": "high", "reason": "安全"}']
+        )
+        classifier = SafetyClassifier(model)
+        middleware = AutoClassifierMiddleware(
+            classifier,
+            None,
+            str(Path.cwd()),
+            approval_mode="default",
+            dynamic=True,
+        )
+        request, state = _with_run_mode(
+            _make_request("execute", {"command": "python deploy.py"}),
+            "default",
+        )
+        response = _make_response("call-dynamic", "execute", {"command": "python deploy.py"})
+
+        middleware.wrap_model_call(request, lambda _request: response)
+        assert model.call_count == 0
+
+        state.set("auto")
+        middleware.wrap_model_call(request, lambda _request: response)
+        assert model.call_count == 1
+
     async def test_async_classify_records_decision(self):
         """异步模型调用链同样完成分类并记录缓存。"""
         model = _ScriptedClassifierModel(
@@ -1014,3 +1111,88 @@ class TestAutoClassifierMiddleware:
 
         assert model.call_count == 0
         assert classifier.lookup_decision("call-1") == ("allow", "上一轮已分类")
+
+    def test_dynamic_shared_engine_scopes_cache_by_run(self):
+        """共享 Engine 中不同 Run 复用 call id 时必须重新分类。"""
+        model = _ScriptedClassifierModel(
+            [
+                '{"decision": "allow", "confidence": "high", "reason": "第一 Run"}',
+                '{"decision": "block", "confidence": "high", "reason": "第二 Run"}',
+                '{"decision": "block", "reason": "第二 Run 复核"}',
+            ]
+        )
+        classifier = SafetyClassifier(model)
+        middleware = AutoClassifierMiddleware(
+            classifier,
+            None,
+            str(Path.cwd()),
+            approval_mode="auto",
+            dynamic=True,
+        )
+
+        def request(thread_id: str, run_id: str, command: str) -> SimpleNamespace:
+            """构造带真实 Run 三元身份的共享 Engine 模型请求。"""
+            return SimpleNamespace(
+                runtime=SimpleNamespace(
+                    context=SimpleNamespace(
+                        thread_id=thread_id,
+                        run_id=run_id,
+                        execution_id="root",
+                        approval_mode="auto",
+                        approval_state=ApprovalModeState("auto"),
+                        approval_mode_provider=None,
+                        plan_constraint=SimpleNamespace(active=False),
+                    )
+                ),
+                command=command,
+            )
+
+        first_request = request("thread-a", "run-a", "python build.py")
+        second_request = request("thread-b", "run-b", "python deploy.py")
+        first_response = _make_response("call-1", "execute", {"command": first_request.command})
+        second_response = _make_response("call-1", "execute", {"command": second_request.command})
+        middleware.wrap_model_call(first_request, lambda _request: first_response)
+
+        tool_request = SimpleNamespace(
+            tool_call={"name": "execute", "id": "call-1", "args": {"command": first_request.command}},
+            runtime=first_request.runtime,
+        )
+        from harness_agent.runtime.agent import _make_approval_preflight
+
+        preflight = _make_approval_preflight(
+            "auto",
+            None,
+            lambda: [],
+            str(Path.cwd()),
+            classifier,
+            dynamic=True,
+        )
+        assert preflight is not None
+        assert preflight(tool_request) is False
+        guard = AutoDestructiveGuardMiddleware(
+            None,
+            str(Path.cwd()),
+            classifier,
+            approval_mode="auto",
+            dynamic=True,
+        )
+        called = False
+
+        def handler(_request: object) -> object:
+            nonlocal called
+            called = True
+            return object()
+
+        guard.wrap_tool_call(tool_request, handler)
+        assert called is True
+        assert model.call_count == 1
+
+        middleware.wrap_model_call(second_request, lambda _request: second_response)
+
+        assert model.call_count == 3
+        assert classifier.lookup_decision(
+            "call-1", namespace=("thread-a", "run-a", "root")
+        ) == ("allow", "LLM 分类器一阶段高置信度放行：第一 Run")
+        assert classifier.lookup_decision(
+            "call-1", namespace=("thread-b", "run-b", "root")
+        ) == ("deny", "LLM 分类器复核拦截：第二 Run 复核")

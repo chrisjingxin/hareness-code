@@ -56,7 +56,7 @@ class _NoopInteraction:
         return InteractionResult({"decision": "reject"})
 
 
-def _coordinator(releases: list[str]) -> RunCoordinator:
+def _coordinator(releases: list[str], *, project_dir=None) -> RunCoordinator:
     async def persistence_provider():
         return None
 
@@ -79,6 +79,7 @@ def _coordinator(releases: list[str]) -> RunCoordinator:
         preparation_provider=preparation_provider,
         runtime_provider=runtime_provider,
         interaction_port=_NoopInteraction(),
+        project_dir=project_dir,
     )
 
 
@@ -396,6 +397,137 @@ async def test_run_coordinator_enforces_owner_busy_and_single_terminal_event() -
     assert await coordinator.execution_registry.list(
         ExecutionRef.root("thread", "run-1")
     ) == ()
+
+
+@pytest.mark.asyncio
+async def test_run_coordinator_sets_active_approval_mode_with_monotonic_revision() -> None:
+    """活动 Run 的模式由 owner 提交，重复提交幂等且 revision 单调。"""
+    coordinator = _coordinator([])
+    owner = ConnectionRef("owner")
+    execution = await coordinator.start(
+        StartRun(
+            mode="build",
+            thread_id="thread-mode",
+            run_id="run-mode",
+            input=UserRunInput(message="切换"),
+            requested_approval_mode="default",
+        ),
+        owner,
+    )
+
+    first = await coordinator.set_approval_mode(execution.ref, owner, "yolo")
+    same = await coordinator.set_approval_mode(execution.ref, owner, "yolo")
+
+    assert (first.approval_mode, first.revision) == ("yolo", 1)
+    assert (same.approval_mode, same.revision) == ("yolo", 1)
+    with pytest.raises(RunError) as not_owner:
+        await coordinator.set_approval_mode(execution.ref, ConnectionRef("other"), "default")
+    assert not_owner.value.code == "RUN_APPROVAL_MODE_NOT_OWNER"
+    await _events(execution)
+
+
+@pytest.mark.asyncio
+async def test_run_coordinator_rejects_approval_mode_change_while_interaction_pending() -> None:
+    """审批、问答等 Interaction 未结束时，模式切换必须返回可重试 busy。"""
+    coordinator = _coordinator([])
+    owner = ConnectionRef("owner")
+    run = RunState(
+        start=StartRun(
+            mode="build",
+            thread_id="thread-mode-busy",
+            run_id="run-mode-busy",
+            input=UserRunInput(message="等待"),
+            requested_approval_mode="default",
+        ),
+        owner=owner,
+        persistence=None,
+        preparation=RunPreparation(),
+    )
+    run.pending_interactions.add("approval-1")
+    coordinator._runs[run.thread_id] = run
+
+    with pytest.raises(RunError) as busy:
+        await coordinator.set_approval_mode(run.ref, owner, "yolo")
+
+    assert busy.value.code == "RUN_APPROVAL_MODE_BUSY"
+    assert busy.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_run_coordinator_rejects_approval_mode_change_after_cancel_or_terminal() -> None:
+    """取消和终态与切档竞争时，切档只能观察到稳定的拒绝结果。"""
+    coordinator = _coordinator([])
+    owner = ConnectionRef("owner")
+
+    cancelled = RunState(
+        start=StartRun(
+            mode="build",
+            thread_id="thread-mode-cancelled",
+            run_id="run-mode-cancelled",
+            input=UserRunInput(message="已取消"),
+        ),
+        owner=owner,
+        persistence=None,
+        preparation=RunPreparation(),
+    )
+    cancelled.cancel_requested = True
+    cancelled.cancellation_token.cancel()
+    coordinator._runs[cancelled.thread_id] = cancelled
+    with pytest.raises(RunError) as cancelled_error:
+        await coordinator.set_approval_mode(cancelled.ref, owner, "yolo")
+    assert cancelled_error.value.code == "RUN_APPROVAL_MODE_CANCELLED"
+
+    terminal = RunState(
+        start=StartRun(
+            mode="build",
+            thread_id="thread-mode-terminal",
+            run_id="run-mode-terminal",
+            input=UserRunInput(message="已结束"),
+        ),
+        owner=owner,
+        persistence=None,
+        preparation=RunPreparation(),
+        status="completed",
+    )
+    coordinator._runs[terminal.thread_id] = terminal
+    with pytest.raises(RunError) as terminal_error:
+        await coordinator.set_approval_mode(terminal.ref, owner, "yolo")
+    assert terminal_error.value.code == "RUN_APPROVAL_MODE_TERMINAL"
+
+
+@pytest.mark.asyncio
+async def test_run_coordinator_allows_auto_modes_for_untrusted_project(
+    tmp_path, monkeypatch
+) -> None:
+    """活动 RPC 的 owner 切档不额外要求项目目录已建立信任。"""
+    from harness_agent.policy import trust_gate
+
+    monkeypatch.setattr(trust_gate, "is_trusted_directory", lambda _path: False)
+    coordinator = _coordinator([], project_dir=tmp_path)
+    owner = ConnectionRef("owner")
+    run = RunState(
+        start=StartRun(
+            mode="build",
+            thread_id="thread-mode-untrusted",
+            run_id="run-mode-untrusted",
+            input=UserRunInput(message="未受信目录"),
+            requested_approval_mode="default",
+        ),
+        owner=owner,
+        persistence=None,
+        preparation=RunPreparation(approval_mode="default"),
+    )
+    coordinator._runs[run.thread_id] = run
+
+    for target, expected_revision in (("auto", 1), ("yolo", 2)):
+        result = await coordinator.set_approval_mode(run.ref, owner, target)
+        assert result.thread_id == run.ref.thread_id
+        assert result.run_id == run.ref.run_id
+        assert result.approval_mode == target
+        assert result.revision == expected_revision
+
+    assert run.approval_state is not None
+    assert run.approval_state.snapshot() == ("yolo", 2)
 
 
 @pytest.mark.asyncio

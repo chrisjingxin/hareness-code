@@ -1011,6 +1011,130 @@ test("127x40 长 TODO 的文件审批首屏保留摘要和 Diff", async () => {
   }
 })
 
+test("长 TODO 被钉住时通用审批 Dock 在缩放和时间线滚动后仍完整可操作", async () => {
+  const { client, requests, writeServer, controller, adapter } = createSession()
+  const todos = {
+    todos: Array.from({ length: 9 }, (_, index) => ({
+      content: `阶段 ${index + 1}：${"检查审批上下文、执行快照和恢复边界，保留可复核的验证证据。".repeat(3)}`,
+      status: index === 2 ? "in_progress" : "pending",
+    })),
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        controller,
+        adapter,
+        onRequestExit: () => undefined,
+      }), { width: 127, height: 24 })
+      await setup.flush()
+      await adapter.dispatch({ type: "submit", value: "长 TODO 通用执行审批" })
+      await setup.flush()
+    })
+    const run = requests.at(-1)
+    expect(run?.message).toBe("长 TODO 通用执行审批")
+
+    await act(async () => {
+      const eventBase = {
+        thread_id: run!.threadId,
+        run_id: run!.runId,
+        timestamp_ms: Date.now(),
+      }
+      client.emit("event", { event_id: "generic-todo-run", type: "run.started", sequence: 1, payload: {}, ...eventBase })
+      client.emit("event", { event_id: "generic-todo-started", type: "tool.started", sequence: 2, payload: { tool_call_id: "todo-generic", name: "write_todos" }, ...eventBase })
+      client.emit("event", {
+        event_id: "generic-todo-delta",
+        type: "tool.delta",
+        sequence: 3,
+        payload: { tool_call_id: "todo-generic", arguments_delta: JSON.stringify(todos) },
+        ...eventBase,
+      })
+      client.emit("event", {
+        event_id: "generic-todo-completed",
+        type: "tool.completed",
+        sequence: 4,
+        payload: { tool_call_id: "todo-generic", result: { content: "", is_error: false } },
+        ...eventBase,
+      })
+      client.emit("event", {
+        event_id: "generic-todo-reasoning",
+        type: "reasoning.delta",
+        sequence: 5,
+        payload: { text: "正在根据清单检查执行前提。" },
+        ...eventBase,
+      })
+      client.emit("event", {
+        event_id: "generic-todo-execute-started",
+        type: "tool.started",
+        sequence: 6,
+        payload: { tool_call_id: "execute-generic", name: "execute" },
+        ...eventBase,
+      })
+      client.emit("event", {
+        event_id: "generic-todo-execute-completed",
+        type: "tool.completed",
+        sequence: 7,
+        payload: { tool_call_id: "execute-generic", result: { content: "准备执行审批中的操作。", is_error: false } },
+        ...eventBase,
+      })
+      client.emit("event", {
+        event_id: "generic-todo-history",
+        type: "content.delta",
+        sequence: 8,
+        payload: { text: Array.from({ length: 32 }, (_, index) => `审批时间线第 ${index + 1} 行：保留清单上下文和操作依据`).join("\n") },
+        ...eventBase,
+      })
+      await setup.flush()
+    })
+    await act(async () => {
+      writeServer({ jsonrpc: "2.0", id: "generic-todo-approval", method: "interaction.approval", params: approvalParams(run!, "执行命令需要审批") })
+      await setup.flush()
+    })
+    await setup.waitForFrame(frame => frame.includes("执行命令需要审批"))
+
+    await act(async () => {
+      setup.resize(127, 18)
+      await setup.flush()
+    })
+    let frame = setup.captureCharFrame()
+    expect(frame).toContain("需要审批")
+    expect(frame).toContain("执行命令需要审批")
+    expect(frame).toContain("▶ 允许一次")
+    expect(frame).toContain("↑↓ 选择 · Enter 确认")
+    expect(frame).toContain("v0.1.0")
+
+    await act(async () => {
+      setup.mockInput.pressArrow("down")
+      await setup.flush()
+    })
+    frame = setup.captureCharFrame()
+    expect(frame).toContain("▶ 本会话允许")
+
+    await act(async () => {
+      setup.mockInput.pressKey("j")
+      await setup.flush()
+    })
+    frame = setup.captureCharFrame()
+    expect(frame).toContain("▶ 本项目允许")
+
+    await act(async () => {
+      setup.mockInput.pressKey("HOME", { ctrl: true })
+      await setup.flush()
+    })
+    frame = setup.captureCharFrame()
+    expect(frame).toContain("需要审批")
+    expect(frame).toContain("执行命令需要审批")
+    expect(frame).toContain("▶ 本项目允许")
+    expect(frame).toContain("↑↓ 选择 · Enter 确认")
+    expect(frame).toContain("v0.1.0")
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+    await adapter.close()
+    await controller.close()
+  }
+})
+
 test("无文件预览的五项审批在受限高度滚动选择且保留底栏", async () => {
   const { client, requests, writeServer, controller, adapter } = createSession()
   const history = Array.from({ length: 32 }, (_, index) => `approval-history-${index + 1}`).join("\n")

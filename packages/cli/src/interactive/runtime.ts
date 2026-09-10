@@ -42,6 +42,8 @@ export type InteractiveRuntime = {
   executionMode: "local" | "remote-sandbox"
   sandboxProvider?: string
   approvalMode: InteractiveApprovalMode
+  /** 当前活动 Run 的 Host 审批状态 revision；空闲时为 0。 */
+  approvalModeRevision?: number
   approvalModeWarning?: string
   /** initialize 协商后的能力；缺省仅用于兼容未更新的测试运行时。 */
   capabilities?: readonly string[]

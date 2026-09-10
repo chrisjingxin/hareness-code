@@ -22,6 +22,7 @@ import {
   type ModelsListResult,
   type RunInput,
   type RunCancelResult,
+  type RunSetApprovalModeResult,
   type SkillsListResult,
   type SkillsSetEnabledResult,
   type TeamDefinition,
@@ -107,6 +108,8 @@ export interface AgentGateway {
   /** 启动一次 Run；事件流只包含该 Run 的 Event。 */
   startRun(input: AgentGatewayStartRunInput): InteractiveAgentRun
   cancel(threadId: string, runId: string): Promise<RunCancelResult>
+  /** 提交活动 Run 的审批模式；返回 Host 实际 mode/revision。 */
+  setApprovalMode(threadId: string, runId: string, approvalMode: ApprovalMode): Promise<RunSetApprovalModeResult>
   compactContext(threadId: string): Promise<ContextCompactResult>
   configDetails(): Promise<{ revision: string; fields: readonly unknown[]; immutable_fields: readonly unknown[] }>
   previewConfig(changes: ConfigChange[]): Promise<{ revision: string; changes: readonly unknown[]; applies_to: readonly string[] }>
@@ -158,6 +161,9 @@ export function createFallbackNoopGateway(): AgentGateway {
       }
     },
     async cancel() { return { run_id: "", cancelled: false } },
+    async setApprovalMode(threadId, runId, approvalMode) {
+      return { thread_id: threadId, run_id: runId, approval_mode: approvalMode, revision: 0 }
+    },
     async listThreads() { return { threads: [] } },
     async setThreadTitle(threadId, title) {
       return {

@@ -35,6 +35,45 @@ from harness_agent.threads.runtime_state import (
     RuntimeStateRehydrator,
     RuntimeStateSnapshot,
 )
+
+
+def test_runtime_state_capture_prefers_live_run_approval_mode() -> None:
+    """压缩保存的运行态必须记录切换后的实际审批档位。"""
+    from harness_agent.runtime.run_context import ApprovalModeState, RunContext
+    from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
+
+    state = ApprovalModeState("default")
+    context = RunContext(
+        thread_id="runtime-state-mode",
+        run_id="run-runtime-state-mode",
+        approval_mode="default",
+        approval_state=state,
+        context_snapshot=prepare_embedded_context_snapshot(
+            thread_id="runtime-state-mode",
+            system_prompt="runtime state",
+            workspace=".",
+            sandboxed=False,
+            provider=None,
+            approval_mode="default",
+            skill_registry=None,
+            enable_memory=False,
+            enable_skills=False,
+            enable_ask_user=False,
+        ),
+    )
+    state.set("yolo")
+
+    captured = RuntimeStateRehydrator.capture(
+        None,
+        context,
+        (),
+        current_execution_policy=RuntimeExecutionPolicy(
+            execution_mode="local",
+            approval_mode="default",
+        ),
+    )
+
+    assert captured.approval_mode == "yolo"
 from harness_agent.threads.thread_persistence import (
     AcceptRun,
     CommitContextRewrite,

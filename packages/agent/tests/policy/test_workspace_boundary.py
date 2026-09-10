@@ -19,6 +19,7 @@ from harness_agent.policy.workspace_boundary import (
     WorkspaceBoundaryMiddleware,
     WorkspacePathPolicy,
 )
+from harness_agent.runtime.run_context import ApprovalModeState
 
 
 class _ToolCallingFakeModel(FakeMessagesListChatModel):
@@ -241,6 +242,47 @@ def test_middleware_allows_approval_for_trustable_external_path(tmp_path: Path):
             return SimpleNamespace(status="ok")
 
         result = trusted.wrap_tool_call(request, handler)
+        assert invoked is True
+        assert result.status == "ok"
+    finally:
+        target.unlink(missing_ok=True)
+        outside.rmdir()
+
+
+def test_dynamic_yolo_trusts_external_path_only_for_current_run_mode(tmp_path: Path):
+    """共享图的目录信任必须读取当前 Run 档位，不能冻结初始 default。"""
+    outside = tmp_path.parent / f"hc171-dynamic-{tmp_path.name}"
+    outside.mkdir(exist_ok=True)
+    target = outside / "app.toml"
+    target.write_text("x", encoding="utf-8")
+    try:
+        state = ApprovalModeState("default")
+        context = SimpleNamespace(
+            approval_mode="default",
+            approval_state=state,
+            approval_mode_provider=None,
+            plan_constraint=SimpleNamespace(active=False),
+        )
+        middleware = WorkspaceBoundaryMiddleware(tmp_path)
+        request = SimpleNamespace(
+            tool_call={
+                "name": "read_file",
+                "id": "dynamic-trust",
+                "args": {"file_path": str(target)},
+            },
+            runtime=SimpleNamespace(context=context),
+        )
+        assert middleware.wrap_tool_call(request, lambda _request: object()).status == "error"
+
+        state.set("yolo")
+        invoked = False
+
+        def handler(_request: object) -> SimpleNamespace:
+            nonlocal invoked
+            invoked = True
+            return SimpleNamespace(status="ok")
+
+        result = middleware.wrap_tool_call(request, handler)
         assert invoked is True
         assert result.status == "ok"
     finally:

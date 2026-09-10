@@ -159,6 +159,7 @@ def interrupt_on_for_approval_mode(
     preflight: Callable[[ToolCallRequest], bool] | None = None,
     extra_interrupt_tools: frozenset[str] | None = None,
     approval_descriptions: Mapping[str, Callable[[dict[str, Any], Any, Any], str]] | None = None,
+    dynamic: bool = False,
 ) -> dict[str, Any] | None:
     """返回应由 HumanInTheLoopMiddleware 拦截的工具集合。
 
@@ -173,10 +174,20 @@ def interrupt_on_for_approval_mode(
         approval_descriptions: 每个工具可选的动态审批描述。文件 mutation 使用它展示
             prepare 阶段生成的有界 diff 预览；完整拟议内容仍由一次性计划固定，其他工具
             继续使用框架默认描述。
+        dynamic: 共享 AgentEngine 使用的动态模式开关。开启后编译所有可能在同一
+            Run 内启用的审批通道，由 ``when`` 预检按当前 Run 状态决定是否暂停。
     """
-    if approval_mode == "yolo" and preflight is None:
+    if approval_mode == "yolo" and preflight is None and not dynamic:
         return None
-    if approval_mode == "yolo":
+    if dynamic:
+        # 共享图只编译一次；模式切换不能重新创建 HumanInTheLoopMiddleware，
+        # 因此把各模式的安全上限通道合并，真正是否暂停交给动态 preflight。
+        tool_names = (
+            _DEFAULT_HITL_TOOLS
+            | _PLAN_DIRECTORY_TRUST_TOOLS
+            | {"execute", "exit_plan_mode"}
+        )
+    elif approval_mode == "yolo":
         tool_names = frozenset({"execute"})
     elif approval_mode == "plan":
         tool_names = _PLAN_DIRECTORY_TRUST_TOOLS
@@ -186,9 +197,11 @@ def interrupt_on_for_approval_mode(
         tool_names = _AUTO_EDIT_HITL_TOOLS
     else:  # auto 模式
         tool_names = _AUTO_HITL_TOOLS
-    if extra_interrupt_tools and approval_mode in {"default", "auto-edit", "auto"}:
+    if extra_interrupt_tools and (
+        dynamic or approval_mode in {"default", "auto-edit", "auto"}
+    ):
         tool_names = tool_names | extra_interrupt_tools
-    if approval_mode == "plan":
+    if approval_mode == "plan" and not dynamic:
         tool_names = tool_names | {"execute", "exit_plan_mode"}
     from langchain.agents.middleware.human_in_the_loop import InterruptOnConfig
 
@@ -472,6 +485,9 @@ class AutoDestructiveGuardMiddleware(AgentMiddleware[dict[str, Any], ContextT, R
         rules_provider: Callable[[], list[PermissionRule]] | None,
         workspace_root: str | None,
         classifier: SafetyClassifier | None = None,
+        *,
+        approval_mode: ApprovalMode = "auto",
+        dynamic: bool = False,
     ) -> None:
         """初始化 AUTO 模式破坏性命令守卫。
 
@@ -480,13 +496,31 @@ class AutoDestructiveGuardMiddleware(AgentMiddleware[dict[str, Any], ContextT, R
                 时跳过规则判断，直接进入 AUTO 四层过滤器。
             workspace_root: 工作区根目录，供 AUTO 过滤器判断路径归属。
             classifier: F4 LLM 分类器；提供时其决策缓存作为守卫依据。
+            approval_mode: 构图期模式；动态共享图只作为缺失 runtime 时的回退。
+            dynamic: 是否从当前 RunContext 读取实时模式。
         """
         self._rules_provider = rules_provider
         self._workspace_root = workspace_root
         self._classifier = classifier
+        self._approval_mode = approval_mode
+        self._dynamic = dynamic
+
+    def _is_auto_active(self, request: ToolCallRequest) -> bool:
+        """只有当前 Run 的 AUTO 档位才启用守卫；计划约束优先。"""
+        if not self._dynamic:
+            return self._approval_mode == "auto"
+        from harness_agent.runtime.run_context import current_approval_mode, plan_constraint_active
+
+        runtime = getattr(request, "runtime", None)
+        context = getattr(runtime, "context", None)
+        if plan_constraint_active(context):
+            return False
+        return current_approval_mode(context, fallback=self._approval_mode) == "auto"
 
     def _check(self, request: ToolCallRequest) -> ToolMessage | None:
         """检查工具调用是否应被 AUTO 模式硬拒绝，命中时返回错误消息。"""
+        if not self._is_auto_active(request):
+            return None
         tool_call = request.tool_call
         tool_name = str(tool_call.get("name", "unknown"))
         tool_args = tool_call.get("args") or {}
@@ -504,7 +538,12 @@ class AutoDestructiveGuardMiddleware(AgentMiddleware[dict[str, Any], ContextT, R
         # 分类器决策缓存命中时直接执行其结论：deny 硬拒绝；allow/ask 放行
         # （ask 已由 HITL 弹窗处理，用户批准后才会走到执行层）。
         if self._classifier is not None:
-            cached = self._classifier.lookup_decision(str(tool_call.get("id") or ""))
+            from harness_agent.policy.classifier import classifier_namespace_for_request
+
+            cached = self._classifier.lookup_decision(
+                str(tool_call.get("id") or ""),
+                namespace=classifier_namespace_for_request(request),
+            )
             if cached is not None:
                 decision, reason = cached
                 if decision == "deny":
@@ -573,6 +612,9 @@ class AutoClassifierMiddleware(AgentMiddleware[dict[str, Any], ContextT, Respons
         classifier: SafetyClassifier,
         rules_provider: Callable[[], list[PermissionRule]] | None,
         workspace_root: str | None,
+        *,
+        approval_mode: ApprovalMode = "auto",
+        dynamic: bool = False,
     ) -> None:
         """初始化 F4 分类器中间件。
 
@@ -580,10 +622,26 @@ class AutoClassifierMiddleware(AgentMiddleware[dict[str, Any], ContextT, Respons
             classifier: 两阶段 LLM 安全分类器，同时充当决策缓存。
             rules_provider: 返回当前合并权限规则的回调。
             workspace_root: 工作区根目录，供 AUTO 过滤器判断路径归属。
+            approval_mode: 构图期模式；动态共享图只作为缺失 runtime 时的回退。
+            dynamic: 是否从当前 RunContext 读取实时模式。
         """
         self._classifier = classifier
         self._rules_provider = rules_provider
         self._workspace_root = workspace_root
+        self._approval_mode = approval_mode
+        self._dynamic = dynamic
+
+    def _is_auto_active(self, request: object) -> bool:
+        """模型响应到达时按当前 Run 事实判断是否仍在 AUTO。"""
+        if not self._dynamic:
+            return self._approval_mode == "auto"
+        from harness_agent.runtime.run_context import current_approval_mode, plan_constraint_active
+
+        runtime = getattr(request, "runtime", None)
+        context = getattr(runtime, "context", None)
+        if plan_constraint_active(context):
+            return False
+        return current_approval_mode(context, fallback=self._approval_mode) == "auto"
 
     def _needs_classifier(self, tool_name: str, tool_args: dict[str, Any]) -> bool:
         """判断调用是否会进入 F4：规则和确定性过滤器已裁决的不需要分类。"""
@@ -601,35 +659,57 @@ class AutoClassifierMiddleware(AgentMiddleware[dict[str, Any], ContextT, Respons
         decision, _ = evaluate_auto_mode(tool_name, tool_args, self._workspace_root)
         return decision == "ask"
 
-    async def _classify_response(self, response: Any) -> None:
+    async def _classify_response(self, response: Any, request: object) -> None:
         """对模型响应中的工具调用逐个分类并记录结论。"""
-        for tool_call in _iter_response_tool_calls(response):
-            tool_call_id = str(tool_call.get("id") or "")
-            tool_name = str(tool_call.get("name") or "")
-            tool_args = tool_call.get("args") or {}
-            if not isinstance(tool_args, dict):
-                tool_args = {}
-            if not tool_name or self._classifier.lookup_decision(tool_call_id):
-                continue
-            if not self._needs_classifier(tool_name, tool_args):
-                continue
-            decision, reason = await self._classifier.aclassify(tool_name, tool_args)
-            self._classifier.record_decision(tool_call_id, decision, reason)
+        if not self._is_auto_active(request):
+            return
+        from harness_agent.policy.classifier import classifier_namespace_for_request
 
-    def _classify_response_sync(self, response: Any) -> None:
-        """同步路径分类：阻塞调用模型，仅供同步执行与测试使用。"""
+        namespace = classifier_namespace_for_request(request)
         for tool_call in _iter_response_tool_calls(response):
             tool_call_id = str(tool_call.get("id") or "")
             tool_name = str(tool_call.get("name") or "")
             tool_args = tool_call.get("args") or {}
             if not isinstance(tool_args, dict):
                 tool_args = {}
-            if not tool_name or self._classifier.lookup_decision(tool_call_id):
+            if not tool_name or self._classifier.lookup_decision(
+                tool_call_id, namespace=namespace
+            ):
                 continue
             if not self._needs_classifier(tool_name, tool_args):
                 continue
-            decision, reason = self._classifier.classify(tool_name, tool_args)
-            self._classifier.record_decision(tool_call_id, decision, reason)
+            decision, reason = await self._classifier.aclassify(
+                tool_name, tool_args, namespace=namespace
+            )
+            self._classifier.record_decision(
+                tool_call_id, decision, reason, namespace=namespace
+            )
+
+    def _classify_response_sync(self, response: Any, request: object) -> None:
+        """同步路径分类：阻塞调用模型，仅供同步执行与测试使用。"""
+        if not self._is_auto_active(request):
+            return
+        from harness_agent.policy.classifier import classifier_namespace_for_request
+
+        namespace = classifier_namespace_for_request(request)
+        for tool_call in _iter_response_tool_calls(response):
+            tool_call_id = str(tool_call.get("id") or "")
+            tool_name = str(tool_call.get("name") or "")
+            tool_args = tool_call.get("args") or {}
+            if not isinstance(tool_args, dict):
+                tool_args = {}
+            if not tool_name or self._classifier.lookup_decision(
+                tool_call_id, namespace=namespace
+            ):
+                continue
+            if not self._needs_classifier(tool_name, tool_args):
+                continue
+            decision, reason = self._classifier.classify(
+                tool_name, tool_args, namespace=namespace
+            )
+            self._classifier.record_decision(
+                tool_call_id, decision, reason, namespace=namespace
+            )
 
     def wrap_model_call(
         self,
@@ -638,7 +718,7 @@ class AutoClassifierMiddleware(AgentMiddleware[dict[str, Any], ContextT, Respons
     ) -> Any:
         """同步模型调用：先取响应，再对其中的工具调用分类。"""
         response = handler(request)
-        self._classify_response_sync(response)
+        self._classify_response_sync(response, request)
         return response
 
     async def awrap_model_call(
@@ -648,7 +728,7 @@ class AutoClassifierMiddleware(AgentMiddleware[dict[str, Any], ContextT, Respons
     ) -> Any:
         """异步模型调用：先取响应，再对其中的工具调用异步分类。"""
         response = await handler(request)
-        await self._classify_response(response)
+        await self._classify_response(response, request)
         return response
 
 

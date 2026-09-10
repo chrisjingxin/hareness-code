@@ -83,17 +83,25 @@ class ChildHitlMiddleware(AgentMiddleware):
         handler: Callable[[ToolCallRequest], Awaitable[Any]],
     ) -> Any:
         """deny 硬拒绝；allow 直接执行；ask 则请求 Host 审批。"""
+        from harness_agent.runtime.run_context import current_approval_mode, plan_constraint_active
+
         tool_call = request.tool_call
         tool_name = str(tool_call.get("name") or "unknown")
         raw_args = tool_call.get("args") or {}
         tool_args = dict(raw_args) if isinstance(raw_args, Mapping) else {}
         rules = self._rules_provider() if self._rules_provider is not None else []
-        decision = evaluate_permission(tool_name, tool_args, self._approval_mode, rules)
+        runtime = getattr(request, "runtime", None)
+        context = getattr(runtime, "context", None)
+        current_mode = current_approval_mode(context, fallback=self._approval_mode)
+        effective_mode = (
+            "plan" if plan_constraint_active(context) else current_mode
+        )
+        decision = evaluate_permission(tool_name, tool_args, effective_mode, rules)
         if decision == "deny":
             return self._reject(tool_call, f"权限规则拒绝 {tool_name}：该操作已被 deny 规则禁止，不可覆盖。")
 
         trust = None
-        if self._workspace_guard is not None:
+        if self._workspace_guard is not None and effective_mode != "yolo":
             trust = self._workspace_guard.needs_directory_trust(request)
         if trust is not None:
             allowed = await self._ask_directory_trust(tool_name, trust)
@@ -104,7 +112,7 @@ class ChildHitlMiddleware(AgentMiddleware):
                 )
             self._workspace_guard.registry.trust(trust.directory, "session")
 
-        if decision == "allow" or self._approval_mode == "yolo":
+        if decision == "allow" or effective_mode == "yolo":
             return await handler(request)
 
         approved = await self._ask_approval(tool_name, tool_args)

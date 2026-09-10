@@ -226,7 +226,7 @@ export class InteractiveControllerImpl implements InteractiveController {
         if (this.hasPendingInteraction) {
           return { status: "rejected", code: "busy", message: "存在待处理交互，暂不能切换审批模式" }
         }
-        return this.runFeature.cycleApprovalMode(this.featureContext)
+        return await this.runFeature.cycleApprovalMode(this.featureContext)
       case "work-mode.cycle":
         if (this.state.activeRun || this.hasPendingInteraction || this.state.activity.kind === "cancelling" || this.compactInFlight) {
           return { status: "rejected", code: "busy", message: "任务运行中、上下文压缩中或存在待处理交互，暂不能切换工作模式" }
@@ -237,7 +237,7 @@ export class InteractiveControllerImpl implements InteractiveController {
         if (this.hasPendingInteraction) {
           return { status: "rejected", code: "busy", message: "存在待处理交互，暂不能切换审批模式" }
         }
-        return this.runFeature.setApprovalMode(intent.mode, this.featureContext)
+        return await this.runFeature.setApprovalMode(intent.mode, this.featureContext)
       case "run.cancel":
         return this.runFeature.cancelActiveRun(this.featureContext, () => this.interactionFeature.abandonPendingInteraction(this.featureContext))
 
@@ -388,15 +388,18 @@ export class InteractiveControllerImpl implements InteractiveController {
     const decision = this.runFeature.consumePlanContinue()
     if (!decision) return
     // 等到终态事件清掉 activeRun 后再开实现轮，避免和刚结束的 plan Run 抢跑。
-    this.scheduler.setTimeout(() => this.applyPlanContinue(decision), 0)
+    this.scheduler.setTimeout(() => { void this.applyPlanContinue(decision) }, 0)
   }
-  private applyPlanContinue(continuation: { decision: "approved" | "abandoned"; feedback?: string }): void {
+  private async applyPlanContinue(continuation: { decision: "approved" | "abandoned"; feedback?: string }): Promise<void> {
+    const restoredOutcome = await this.runFeature.restoreApprovalMode(this.featureContext)
+    if (restoredOutcome.status === "rejected") {
+      this.commit(current => appendNotice(current, restoredOutcome.message))
+      return
+    }
     if (this.state.activeRun) {
-      this.runFeature.restoreApprovalMode(this.featureContext)
       this.commit(current => appendNotice(current, "已恢复进入计划前的审批档位；当前仍有任务在运行，未自动开始实现。"))
       return
     }
-    this.runFeature.restoreApprovalMode(this.featureContext)
     if (continuation.decision !== "approved") return
     const prompt = continuation.feedback
       ? `${PLAN_IMPLEMENT_PROMPT}\n\n批准时的审阅意见：\n${continuation.feedback}`
@@ -496,14 +499,16 @@ export class InteractiveControllerImpl implements InteractiveController {
       case "side-question":
         return { status: "accepted", effects: [{ type: "side-question", question: result.question, threadId: result.threadId }] }
       case "set-approval-mode": {
-        this.runFeature.setApprovalMode(result.mode, this.featureContext)
+        const modeOutcome = await this.runFeature.setApprovalMode(result.mode, this.featureContext)
+        if (modeOutcome.status === "rejected") return modeOutcome
         const noticeMessage = result.notice
         if (noticeMessage) this.commit(current => appendNotice(current, noticeMessage))
         if (result.prompt) return this.applyCommandResult({ type: "submit-prompt", prompt: result.prompt })
         return { status: "accepted" }
       }
       case "restore-approval-mode": {
-        this.runFeature.restoreApprovalMode(this.featureContext)
+        const restoreOutcome = await this.runFeature.restoreApprovalMode(this.featureContext)
+        if (restoreOutcome.status === "rejected") return restoreOutcome
         const restored = this.runFeature.currentApprovalMode(this.baseRuntime.approvalMode)
         this.commit(current => appendNotice(current, `已退出计划模式，审批恢复为 ${restored}。`))
         return { status: "accepted" }
@@ -691,7 +696,7 @@ export class InteractiveControllerImpl implements InteractiveController {
       interaction: this.interactionFeature.interactionDto(this.interactionFeature.pendingInteraction, this.clock),
       confirmation: this.confirmation,
       lastRun: this.state.lastRun ?? null,
-      runtime: { ...this.baseRuntime, approvalMode: this.runFeature.currentApprovalMode(this.baseRuntime.approvalMode), modelProfileId: this.modelFeature.requestedModelProfileId ?? undefined },
+      runtime: { ...this.baseRuntime, approvalMode: this.runFeature.currentApprovalMode(this.baseRuntime.approvalMode), approvalModeRevision: this.runFeature.approvalModeRevision, modelProfileId: this.modelFeature.requestedModelProfileId ?? undefined },
       connection: this.connection,
       catalogs: { threads: publicCatalog(this.catalogFeature.state.threads), models: publicCatalog(this.catalogFeature.state.models), skills: publicCatalog(this.catalogFeature.state.skills), mcp: publicCatalog(this.catalogFeature.state.mcp), agents: publicCatalog(this.catalogFeature.state.agents) },
       commands: this.commandFeature.buildCommandItems(this.catalogFeature.state.skills.items, this.featureContext, this.hasPendingInteraction),

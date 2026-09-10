@@ -16,6 +16,7 @@ from harness_agent.runtime.agent_catalog import (
     PluginAgentSource,
     ShellPolicy,
     StringRule,
+    runtime_approval_mode_limit,
     intersect_execution_policies,
 )
 from harness_agent.config.config import ModelCatalog, ModelProfile, ModelSettings
@@ -168,6 +169,17 @@ def test_policy_intersection_rejects_incompatible_isolation() -> None:
     target = ExecutionPolicyDefinition(policy_id="target", source="test", isolation="worktree")
     with pytest.raises(AgentCatalogError, match="ISOLATION_CONFLICT"):
         intersect_execution_policies(parent, target)
+
+
+def test_policy_approval_is_converted_to_runtime_child_limit() -> None:
+    """Managed child 必须把外部 Policy 审批语义转换为 canonical 上限。"""
+    assert runtime_approval_mode_limit("never") == "yolo"
+    assert runtime_approval_mode_limit("on-risk") == "auto-edit"
+    assert runtime_approval_mode_limit("always") == "default"
+    assert runtime_approval_mode_limit("auto") == "auto"
+    assert runtime_approval_mode_limit(None) is None
+    with pytest.raises(AgentCatalogError, match="APPROVAL_UNSUPPORTED"):
+        runtime_approval_mode_limit("unknown")
 
 
 def test_portable_yaml_agent_uses_canonical_fields_and_inherit_model(

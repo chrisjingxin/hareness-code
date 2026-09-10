@@ -1004,6 +1004,7 @@ async def test_run_coordinator_routes_child_question_through_owner_and_cleans_re
             "completion": None,
                 "cancel_requested": False,
                 "status": "running",
+                "pending_interactions": set(),
                 "timing": None,
                 "diagnostic_log": type(
                 "Log",

@@ -26,7 +26,7 @@ from harness_agent.runtime.run_context import RunContext
 from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
 
 
-def _context(*, port=None) -> RunContext:
+def _context(*, port=None, approval_state=None, approval_mode_provider=None, approval_mode="default") -> RunContext:
     snapshot = prepare_embedded_context_snapshot(
         thread_id="thread-1",
         system_prompt="parent",
@@ -42,7 +42,9 @@ def _context(*, port=None) -> RunContext:
     return RunContext(
         thread_id="thread-1",
         run_id="run-1",
-        approval_mode="default",
+        approval_mode=approval_mode,
+        approval_state=approval_state,
+        approval_mode_provider=approval_mode_provider,
         context_snapshot=snapshot,
         interaction_port=port,
     )
@@ -133,6 +135,55 @@ async def test_execute_asks_and_reject_returns_tool_message() -> None:
     assert called[0].agent_id == "general-purpose"
     assert called[0].execution_id == child_execution_ref(command).execution_id
     assert called[0].parent_execution_id == command.parent_ref.execution_id
+
+
+@pytest.mark.asyncio
+async def test_child_hitl_reads_dynamic_parent_mode_from_child_runtime() -> None:
+    """Inline child 的命令审批随父 Run 从 default 求交到 yolo。"""
+    from harness_agent.runtime.builtin_agents import resolve_child_approval_mode
+    from harness_agent.runtime.run_context import ApprovalModeState
+
+    called: list[object] = []
+
+    async def port(spec):
+        called.append(spec)
+        return InteractionResult({"decision": "reject"})
+
+    state = ApprovalModeState("default")
+    ctx = _context(
+        port=port,
+        approval_mode="auto-edit",
+        approval_state=state,
+        approval_mode_provider=lambda: resolve_child_approval_mode(state.mode, "general-purpose"),
+    )
+    token = _CURRENT_DELEGATION_CALL.set(DelegationCallContext(run_context=ctx, tool_call_id="t-dynamic"))
+    command = DelegateAgent(
+        parent_ref=ExecutionRef.root("thread-1", "run-1"),
+        target_agent_id="general-purpose",
+        task="run cmd",
+        idempotency_key="k-dynamic",
+        delegation_policy=DelegationPolicy(enabled=True, max_depth=1, max_parallelism=4),
+        cancellation_token=ctx.cancellation_token,
+    )
+    child_token = bind_child_command(command)
+    middleware = ChildHitlMiddleware(agent_id="general-purpose", approval_mode="auto-edit")
+    request = _request("execute", {"command": "python deploy.py"})
+    request.runtime = SimpleNamespace(context=ctx)
+
+    async def handler(_request):
+        return ToolMessage(content="ran", name="execute", tool_call_id="call-1")
+
+    try:
+        rejected = await middleware.awrap_tool_call(request, handler)
+        assert rejected.status == "error"
+        state.set("yolo")
+        accepted = await middleware.awrap_tool_call(request, handler)
+    finally:
+        reset_child_command(child_token)
+        _CURRENT_DELEGATION_CALL.reset(token)
+
+    assert accepted.content == "ran"
+    assert len(called) == 1
 
 
 def test_task_dispatch_description_mentions_auto_edit_for_gp() -> None:

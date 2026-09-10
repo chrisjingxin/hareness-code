@@ -418,6 +418,57 @@ async def test_v5_commands_bind_is_rejected_before_handler_dispatch(tmp_path: Pa
     }
 
 
+async def test_v7_run_approval_mode_is_rejected_by_the_v8_minor_gate(tmp_path: Path):
+    """v3.7 客户端不能调用本次直接扩展到 v3.8 的活动 Run 切档 RPC。"""
+    from harness_agent.host.agent_host import AgentHost
+    from harness_agent.protocol.generated import METHOD
+
+    server = AgentHost(allow_echo=True, config_home=tmp_path / "home")
+    frames: list[dict[str, Any]] = []
+
+    async def capture(message: dict[str, Any]) -> None:
+        frames.append(message)
+
+    handler_called = False
+
+    async def unexpected_handler(_params: dict[str, Any], _request_id: str) -> dict[str, object]:
+        nonlocal handler_called
+        handler_called = True
+        return {}
+
+    server.send = capture
+    await server.dispatch(
+        _request(
+            "initialize",
+            _initialize_params(protocol={"major": 3, "min_minor": 0, "max_minor": 7}),
+            "init-v7",
+        )
+    )
+    initialized = next(frame["result"] for frame in frames if frame.get("id") == "init-v7")
+    assert initialized["protocol"] == {"major": 3, "minor": 7}
+    server._handlers[METHOD["RUN_SET_APPROVAL_MODE"]] = unexpected_handler
+
+    await server.dispatch(
+        _request(
+            "run.set_approval_mode",
+            {
+                "thread_id": "thread-1",
+                "run_id": "run-1",
+                "approval_mode": "yolo",
+            },
+            "set-v8-on-v7",
+        )
+    )
+    error = next(frame for frame in frames if frame.get("id") == "set-v8-on-v7")
+    assert handler_called is False
+    assert error["error"]["message"] == "PROTOCOL_MINOR_REQUIRED"
+    assert error["error"]["data"]["details"] == {
+        "method": "run.set_approval_mode",
+        "required_minor": 8,
+        "negotiated_minor": 7,
+    }
+
+
 async def test_v5_negotiation_keeps_ordinary_run_available_without_plugin_commands(
     tmp_path: Path,
 ):

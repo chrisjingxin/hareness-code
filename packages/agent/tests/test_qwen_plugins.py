@@ -2795,7 +2795,12 @@ async def test_qwen_managed_plugin_delegation_projects_child_stream_to_parent_ev
         ExecutionMode,
         ExecutionRef,
     )
-    from harness_agent.runtime.run_context import RunCancellationToken, RunContext
+    from harness_agent.runtime.run_context import (
+        ApprovalModeState,
+        RunCancellationToken,
+        RunContext,
+        current_approval_mode,
+    )
     from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
 
     home = tmp_path / "home"
@@ -2963,17 +2968,19 @@ async def test_qwen_managed_plugin_delegation_projects_child_stream_to_parent_ev
         )
     )
     await registry.start(parent_ref)
+    parent_approval_state = ApprovalModeState("default")
     parent_context = RunContext(
         thread_id=parent_ref.thread_id,
         run_id=parent_ref.run_id,
-        approval_mode="yolo",
+        approval_mode="default",
+        approval_state=parent_approval_state,
         context_snapshot=prepare_embedded_context_snapshot(
             thread_id=parent_ref.thread_id,
             system_prompt="parent",
             workspace=str(workspace),
             sandboxed=False,
             provider=None,
-            approval_mode="yolo",
+            approval_mode="default",
             skill_registry=None,
             enable_memory=False,
             enable_skills=False,
@@ -3041,6 +3048,9 @@ async def test_qwen_managed_plugin_delegation_projects_child_stream_to_parent_ev
         assert getattr(graph.contexts[0], "execution_id") == child_execution_id
         assert getattr(graph.contexts[0], "parent_execution_id") == parent_ref.execution_id
         assert getattr(graph.contexts[0], "agent_id") == target.agent_id
+        assert current_approval_mode(graph.contexts[0]) == "default"
+        parent_approval_state.set("yolo")
+        assert current_approval_mode(graph.contexts[0]) == "auto-edit"
     finally:
         await server.close()
 
