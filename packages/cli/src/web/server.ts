@@ -144,7 +144,7 @@ export function createWebServer(options: WebServerOptions): WebServer {
         },
         message(ws: BunServerWebSocket, raw: string | Uint8Array) {
           // 帧形状/大小校验统一由网关执行：超限帧按协议违规走 notifyInvalidMessage
-          // fail-closed 收敛，与畸形帧路径一致；此处只解码后原样入队。
+          // 直接结束会话，与畸形帧路径一致；此处只解码后原样入队。
           const text = typeof raw === "string" ? raw : new TextDecoder().decode(raw)
           queues.get(ws)?.push(text)
         },

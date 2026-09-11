@@ -92,7 +92,12 @@ class CompressionCheckpointDraft:
 
 @dataclass(frozen=True, slots=True)
 class ModelProjection:
-    """Projector 输出及其可诊断来源。"""
+    """一次投影的完整来源说明。
+
+    messages 是模型实际看到的历史；checkpoint 说明它建立在哪次压缩之上，
+    source_record_sequence 记录覆盖到的 Transcript 位置，供后续压缩做
+    幂等 checkpoint ID 和来源校验。
+    """
 
     messages: tuple[BaseMessage, ...]
     checkpoint: CompressionCheckpoint | None
@@ -162,6 +167,8 @@ class ContextProjector:
         )
         boundary = checkpoint.source_record_sequence if checkpoint is not None else 0
         messages = list(checkpoint.projected_messages if checkpoint is not None else ())
+        # checkpoint 之前的记录已经折叠进投影消息，不能再重复追加；kind 为
+        # "context" 的记录是压缩重写留下的痕迹，不属于对话内容。
         for record in records:
             if record.sequence <= boundary or record.kind == "context":
                 continue

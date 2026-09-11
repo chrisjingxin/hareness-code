@@ -1620,6 +1620,8 @@ class HookRunner:
         claude_name = _HARNESS_TO_CLAUDE_TOOL.get(tool_name, tool_name)
         log = ensure_log(diagnostic_log)
         results: list[HookResult] = []
+        # 目录加载期被 gate 拦下的 Hook 以失败定义留在目录里；运行时把它们
+        # 合成 exit 2 结果而不是跳过，让"装了但没跑成"对调用方可观测。
         for failure in self._failures:
             if failure.event != event or not failure.matches(claude_name):
                 continue
@@ -2245,6 +2247,8 @@ class _LspClient:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                # POSIX 上让 LSP 独立成进程组，超时清理时 killpg 才只杀
+                # server 及其孙进程，不会波及 Harness 自己。
                 start_new_session=os.name != "nt",
             )
         except OSError as exc:
@@ -2776,6 +2780,8 @@ def _plugin_environment(
     settings_environment: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """按组件定义构造环境；Qwen 不把宿主 PATH 注入子进程。"""
+    # 白名单只保留 locale/临时目录/Windows 系统根这类子进程必需项：
+    # 宿主其余环境变量可能携带凭据，也可能改写 Plugin 子进程的行为。
     allowed = {
         key: value
         for key, value in os.environ.items()

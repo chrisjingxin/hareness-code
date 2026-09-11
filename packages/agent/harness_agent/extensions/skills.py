@@ -169,6 +169,8 @@ class SkillRegistry:
 
     def restricted(self, allowed_ids: tuple[str, ...]) -> "SkillRegistry":
         """从当前 immutable snapshot 建立角色级 Skill 子集，不重新读取磁盘。"""
+        # 绕过 __init__ 复制实例：角色切换若重扫磁盘，Run 中途可能混入新
+        # Skill，破坏"一次 Run 只见启动期快照"的边界冻结。
         allowed = frozenset(allowed_ids)
         view = object.__new__(SkillRegistry)
         view.workspace = self.workspace
@@ -365,6 +367,8 @@ class SkillRegistry:
                 root,
             )
         market_root = self.home / ".harness" / "skills" / "market"
+        # roots 顺序即优先级：同名 skill_id 只保留先扫到的（first-wins），
+        # 内置 > user > project > market，低优先级来源记一条 duplicate 诊断。
         self._scan_market_root(
             records,
             diagnostics,
@@ -694,6 +698,8 @@ class SkillCatalogManager:
     def refresh(self) -> SkillRegistry:
         """扫描并发布最新 snapshot；内容未变化时返回原对象。"""
         _recover_pending_install(self.skills_root)
+        # 签名在扫描前后各取一次，夹住扫描窗口；配合 digest 复验，窗口内
+        # 目录有变动宁可报错，也不发布半新半旧的 catalog。
         before = _catalog_metadata_signature(self.workspace, self.home)
         current = self._current
         if (

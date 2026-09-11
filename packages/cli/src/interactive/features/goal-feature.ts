@@ -13,6 +13,7 @@ type GoalRunCallbacks = {
 }
 
 export class GoalFeature {
+  /** 已执行过的 continuation_id 去重：对账可能在多个 Run 终态产生同一续跑，只能启动一次。 */
   private readonly consumedContinuations = new Set<string>()
 
   /** `/goal`：提供只读、提案与生命周期 mutation 的单一命令入口。 */

@@ -1,4 +1,4 @@
-/** Harness v3 协议入口：canonical Schema、生成类型与双向运行时校验。 */
+/** Harness v3 协议入口：规范 Schema（v3.json）、生成类型与双向运行时校验。 */
 
 export * from "./generated"
 

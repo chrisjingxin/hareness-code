@@ -78,10 +78,9 @@ def is_shell_command_allowed(command: object, allow_list: list[str]) -> bool:
 class ShellAllowListMiddleware(AgentMiddleware):
     """在不触发 HITL 中断的情况下按白名单校验 shell 命令。
 
-    When the agent invokes the `execute` shell tool, this middleware checks
-    the command against the configured allow-list before execution.
-    Rejected commands are returned as error ToolMessage objects — the graph
-    never pauses, so traces stay as a single continuous run.
+    Agent 调用 `execute` 工具时，先按 allow list 校验命令再放行。被拒绝的
+    命令直接返回 error ToolMessage，而不是暂停整张图等待审批——这样 trace
+    保持为一次连续运行，不会在审批中断点被切断。
     """
 
     def __init__(self, allow_list: list[str]) -> None:

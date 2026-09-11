@@ -623,6 +623,8 @@ def _merge_documents(
             agent_engine_pool_values = _merge_flat_values(agent_engine_pool_values, document["runtime_pool"])
             sources["runtime_pool"] = source.value
         if "mcp" in document:
+            # mcp 不做逐项合并，后一份可信文档整表替换：server 集合是单一
+            # 来源语义，两份文档拼接可能出现半新半旧的连接配置。
             mcp_values = document["mcp"]  # type: ignore[assignment]
             sources["mcp"] = source.value
         if "tools" in document:

@@ -23,6 +23,8 @@ from harness_agent.goals.models import (
 GOAL_MAX_CLARIFICATION_ROUNDS = 2
 GOAL_MAX_QUESTIONS_PER_ROUND = 3
 GOAL_MAX_RECENT_MESSAGES = 8
+# 两个上限叠加生效：合计预算 6,000 字符从最新消息往前花；
+# 单条再截到 1,600，防止一条长消息独占全部预算。
 GOAL_MAX_RECENT_MESSAGE_CHARS = 1_600
 GOAL_MAX_RECENT_MESSAGES_CHARS = 6_000
 

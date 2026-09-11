@@ -107,7 +107,8 @@ export type ComposeSummaryCard = {
 }
 
 /**
- * JSON-RPC 的 sequence 是唯一可靠的时间顺序。
+ * id 用 JSON-RPC sequence 拼接：同一轮验收可能先后来 checking 和 result 两帧，
+ * sequence 是事件流中唯一可靠的时间顺序，靠它把两帧对到同一张卡片上。
  */
 export type GoalEvaluationCard = {
   id: string
@@ -602,7 +603,7 @@ export function restoreThread(
   }
 }
 
-/** 根据后端 RPC 注册反向 Interaction。 */
+/** 根据后端 RPC 注册反向 Interaction；同一 request_id 重复到达时原地替换卡片（幂等）。 */
 export function applyInteractionRequest(state: InteractiveState, envelope: InteractionRequestEnvelope): InteractiveState {
   const active = state.activeRun
   if (!active || active.threadId !== envelope.thread_id || active.runId !== envelope.run_id) return state
@@ -1072,6 +1073,7 @@ function settlePendingInteractions(timeline: TimelineItem[], runId: string): Tim
   })
 }
 
+// sequence 只前进：重复/回退帧直接丢弃；出现空洞时插入系统提示，但后续帧照常受理。
 function acceptSequence(state: InteractiveState, threadId: string, runId: string, sequence: number): InteractiveState | null {
   const key = `${threadId}:${runId}`
   const lastSequence = state.sequences[key] ?? 0
@@ -1084,6 +1086,8 @@ function acceptSequence(state: InteractiveState, threadId: string, runId: string
   return nextState
 }
 
+// 流式追加只续写时间线末尾的那条 assistant 消息；工具卡等条目插进来之后，
+// 新的 delta 一律新开消息，避免文字被拼进错误的上下文位置。
 function appendAssistantDelta(
   timeline: TimelineItem[],
   identity: EventIdentity,
@@ -1361,6 +1365,8 @@ function freezeReasoning(timeline: TimelineItem[], identityOrRunId: EventIdentit
   ))
 }
 
+// 注意这是 wire 层 compose_scope 的 stage 词汇，与 UI 投影用的 ComposeStageId
+// 是两套取值；这里只做合法性校验，不要拿去对照 UI 阶段。
 const COMPOSE_STAGES = new Set(["understand", "plan", "build", "verify", "review"])
 
 /**

@@ -523,6 +523,8 @@ class ComposeWorkItemStore:
                     ensure_ascii=False,
                     separators=(",", ":"),
                 )
+                # 内容一变（current_digest 不同）就清空 confirmed_digest：
+                # 人工确认只对确认时的那版文档有效，不能给新内容背书。
                 await self._connection.execute(
                     """
                     INSERT INTO harness_compose_work_item_documents (
@@ -993,6 +995,8 @@ class ComposeWorkItemStore:
                     if effect.receipt == command.receipt:
                         return effect
                     raise ComposeWorkItemStoreError("COMPOSE_EFFECT_RECEIPT_CONFLICT")
+                # unknown 表示副作用结果无法证明、等待用户裁决；receipt 不能
+                # 把它翻回 confirmed，只有用户决策后的显式操作才能收敛。
                 if effect.status is ComposeEffectStatus.UNKNOWN:
                     raise ComposeWorkItemStoreError("COMPOSE_EFFECT_OUTCOME_UNKNOWN")
                 receipt_json = _dump_payload(command.receipt, "COMPOSE_EFFECT_RECEIPT_INVALID")

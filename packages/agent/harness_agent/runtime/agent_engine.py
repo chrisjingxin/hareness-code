@@ -427,6 +427,8 @@ class AgentEngine:
                     name=f"harness-engine-close-{self.profile_key[:12]}",
                 )
                 self._close_task = close_task
+        # shield：一旦进入关闭流程就不能因调用方被取消而中断，
+        # 否则资源停留在半关闭状态且状态机永远到不了 CLOSED。
         return await asyncio.shield(close_task)
 
     async def _queue_run(self) -> None:
@@ -483,6 +485,8 @@ class AgentEngine:
         """按固定顺序取消后台任务、刷新状态、关闭资源并清除图引用。"""
         started_at = time.monotonic()
         failures: list[AgentEngineCloseFailure] = []
+        # 顺序固定：先取消后台任务，再 flush（缓冲数据先落盘），然后按
+        # tool/mcp/sandbox/model 逐类释放独占资源，最后才归还共享租约。
         try:
             async with self._lock:
                 tasks = tuple(task for task in self._background_tasks if not task.done())
@@ -730,7 +734,8 @@ class AgentEnginePool:
         self._diagnostic_log = ensure_log(diagnostic_log)
 
     async def acquire(self, profile: AgentEngineProfile) -> AgentEngineLease:
-        """按 Profile 获取共享 AgentEngine 租约，并对同 Key 首建执行 single-flight。"""
+        """按 Profile 获取共享 AgentEngine 租约；同 Key 的并发首次构建只跑一次，
+        其他调用方等待同一个构建任务（single-flight）。"""
         if profile.is_legacy:
             raise AgentEngineError("RUNTIME_LEGACY_PROFILE_UNSUPPORTED")
         key = profile.profile_key
@@ -762,10 +767,9 @@ class AgentEnginePool:
                         accounted = True
                     build_task = entry.build_task
                 elif entry.state == AgentEngineState.DRAINING and entry.engine is None:
-                    # An invalidation may have reserved this key while its
-                    # single-flight builder is still producing resources. Do
-                    # not replace that entry with a second build from the old
-                    # snapshot; wait for the stale build to discard itself.
+                    # 该 Key 可能已被 invalidate 预定，而旧的 single-flight 构建
+                    # 还在跑。不能拿旧快照再起第二个构建，只能等旧构建自己
+                    # 发现被失效并丢弃。
                     if entry.build_task is None:
                         raise AgentEngineUnavailableError("RUNTIME_BUILD_INVALIDATED")
                     if not accounted:
@@ -782,6 +786,8 @@ class AgentEnginePool:
                         self._entries.pop(key, None)
                         continue
             if requires_eviction:
+                # 池满时先淘汰一个空闲引擎再重试；淘汰可能失败（都被 pin
+                # 或在用），也可能被并发 acquire 抢走，所以回到循环开头重来。
                 if not await self._evict_lru_idle():
                     self._capacity_rejections += 1
                     self._record_event(
@@ -792,6 +798,8 @@ class AgentEnginePool:
                     raise AgentEnginePoolCapacityError("RUNTIME_POOL_CAPACITY_EXHAUSTED")
                 continue
             if build_task is not None:
+                # shield：当前调用被取消时不能取消共享的构建任务，
+                # 其他同 Key 调用方还在等它出结果。
                 await asyncio.shield(build_task)
                 continue
             if engine is None:
@@ -930,9 +938,8 @@ class AgentEnginePool:
                 if not predicate(entry.profile):
                     continue
                 if entry.state is AgentEngineState.BUILDING and entry.engine is None:
-                    # Reserve the in-flight generation.  Its builder will
-                    # close any resources it creates and fail rather than
-                    # publishing an engine from the invalidated snapshot.
+                    # 预定正在构建的这一代：构建器结束时发现自己已被失效，
+                    # 会关闭它创建的资源并报错，而不是发布一个过期快照的引擎。
                     entry.state = AgentEngineState.DRAINING
                     entry.drain_reason = reason
                     building_targets.append(key)

@@ -142,7 +142,7 @@ export type WebAdapterSnapshot = {
   }
   /** 各面板局部状态（搜索词/提交/错误）。 */
   readonly panelSearch: Readonly<Record<ContextDockPanel, WebPanelSearchState>>
-  /** 已展开的 Tool 卡片集合，按 Tool ID 维护。 */
+  /** 已展开的 Tool 卡片集合；按 runId+toolId 复合键维护，跨 Run 不冲突。 */
   readonly expandedTools: ReadonlySet<string>
   /** 当前 requestId 上的 Interaction 草稿；requestId 变化时原子重置。 */
   readonly interactionDraft: WebInteractionDraft | null
@@ -374,10 +374,6 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
   }
 
   /**
-   * 同步刷新内部 snapshot 缓存；保持 getSnapshot() 永远返回最新数据，
-   * 但 listener 通知仍走 publishNow / schedulePublish 的批处理。
-   */
-  /**
    * Dock 拖拽动态上限：视口 − 当前侧栏 − 双侧间距 − 内容列下限；
    * Dock 关闭时内容列也按 Dock 宽度预留居中，所以打开/关闭状态共用同一上限。
    */
@@ -392,6 +388,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     return Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, available))
   }
 
+  /** 只刷新内部 snapshot 缓存，保证 getSnapshot() 拿到最新数据；listener 通知仍走 publishNow / schedulePublish 的批处理。 */
   private refreshSnapshot(): void {
     if (this.closed) return
     this.snapshot = this.buildSnapshot()

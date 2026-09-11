@@ -86,6 +86,8 @@ def _normalize_ai_message(message: AIMessage, *, message_index: int) -> AIMessag
     """校验一条 AIMessage，并在 assistant 侧补齐缺失调用 ID。"""
     invalid_tool_calls = getattr(message, "invalid_tool_calls", None) or ()
     if invalid_tool_calls:
+        # provider 已经判定这些调用无法解析；放行会让 ToolNode 拿到残缺
+        # 调用并产生无法关联的 ToolMessage，所以直接失败。
         raise MalformedToolCallError()
 
     raw_calls = getattr(message, "tool_calls", None) or ()

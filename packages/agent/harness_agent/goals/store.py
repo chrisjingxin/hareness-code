@@ -93,6 +93,9 @@ class GoalStore:
             async with self._lock:
                 await self._connection.execute("BEGIN IMMEDIATE")
                 try:
+                    # harness_goal_operations 是幂等账本：同一 request_id 重放
+                    # 必须返回首次的完整结果（不能二次入队）；params digest
+                    # 不一致说明客户端复用了 ID，直接拒绝。
                     replay = await self._load_operation(request_id)
                     if replay is not None:
                         if replay[0] != digest:
@@ -703,6 +706,9 @@ class GoalStore:
                     pending = await self._load_pending(thread_id)
                     queued = await self._load_queued_mutation(thread_id)
                     evaluation = await self._load_evaluation(evaluation_id)
+                    # 已有 pending 或排队中的 pause/clear 时拒绝完成：这些
+                    # 变更一旦应用就会让本次完成基于过期目标，宁可让上层
+                    # 在变更落地后重新评估。
                     invalidating = pending is not None or (
                         queued is not None and queued[2].get("params", {}).get("action") in {
                             "pause",
@@ -1138,6 +1144,8 @@ class GoalStore:
         )
 
     async def _insert_goal(self, thread_id: str, goal: Goal) -> None:
+        # harness_goals 只追加不更新：每个 revision 一行新历史；当前指针由
+        # harness_goal_current 单独维护，审计与撤销都能回放完整轨迹。
         await self._connection.execute(
             """
             INSERT INTO harness_goals

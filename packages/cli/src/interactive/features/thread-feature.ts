@@ -18,9 +18,10 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+// wire 层 compose_scope 的 stage 词汇，与 UI 投影的 ComposeStageId 不同，只用于校验。
 const COMPOSE_STAGES = new Set(["understand", "plan", "build", "verify", "review"])
 
-/** 校验 canonical threads.open 返回结构；无效结果视为 not-found，防止非法数据进入 Timeline。 */
+/** 校验 threads.open 的标准返回结构；无效结果视为 not-found，防止非法数据进入 Timeline。 */
 function threadOpenResult(value: unknown): {
   threadId: string
   messages: RestoredThreadMessage[]
@@ -100,6 +101,7 @@ function threadOpenResult(value: unknown): {
 }
 
 export class ThreadFeature {
+  /** 每次切换/重开 Thread 递增；返回后 epoch 不一致即说明结果已过期，直接丢弃。 */
   threadEpoch = 0
   openingThread = false
 

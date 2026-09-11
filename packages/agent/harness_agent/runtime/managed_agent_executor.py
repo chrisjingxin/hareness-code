@@ -710,7 +710,12 @@ def _restore_failed_attempt(
     snapshot: Mapping[str, object],
     error: BaseException,
 ) -> None:
-    """回滚失败 attempt；保留 DeepAgents 重试时必须补齐的已发布 Tool 关联。"""
+    """回滚失败 attempt；保留 DeepAgents 重试时必须补齐的已发布 Tool 关联。
+
+    MALFORMED_TOOL_CALL 例外：本 attempt 已为部分调用分配了 Tool ID，
+    重试的模型回合必须沿用这些 ID 才能与 assistant 历史一一对齐，
+    回滚反而会造成关联错乱。
+    """
     started_before = snapshot.get("started_tool_ids")
     started_in_attempt = (
         session.started_tool_ids - started_before

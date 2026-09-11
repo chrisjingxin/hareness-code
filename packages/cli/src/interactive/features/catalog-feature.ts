@@ -1,3 +1,8 @@
+/**
+ * Catalog Feature：集中维护五类目录（threads/models/skills/mcp/agents）的拉取与
+ * 缓存。每个目录有独立 epoch，只接受本次刷新轮次写回的结果，防止并发刷新时
+ * 迟到的旧响应覆盖新数据；Skills/MCP/Agents 是全局配置，重开 Thread 也不清空。
+ */
 import type { AgentSummary, McpServerStatus, ModelProfile, ThreadSummary } from "@za38/protocol"
 import type { LoadableCatalog, SkillSummary } from "../ports"
 import type { SkillMenuItem } from "../commands"

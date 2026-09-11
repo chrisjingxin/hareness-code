@@ -1,4 +1,4 @@
-/** 跨端共享语言目录：收敛 canonical ID、别名、TUI parser、Web 语言及降级规范。 */
+/** 跨端共享语言目录：收敛规范化语言 ID、别名、TUI parser、Web 语言及降级规范。 */
 
 export type LanguageCatalogEntry = {
   readonly canonical: string

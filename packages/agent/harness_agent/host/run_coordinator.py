@@ -375,9 +375,8 @@ class RunPreparation:
     # LangChain client 不再自行重试；这里冻结配置解析得到的总 attempt 预算，
     # 由 ManagedAgentExecutor 在 root/Compose/Plugin 边界统一消费。
     provider_retry_attempts: int | None = None
-    # Default AgentHost may hold this reservation from spec resolution until the
-    # corresponding AgentEngine lease is acquired.  It is intentionally opaque
-    # here so the coordinator does not own the runtime snapshot protocol.
+    # 受理阶段到真正取得 AgentEngine lease 之间，由 Host 持有的快照锁令牌。
+    # Coordinator 只透传不使用，快照协议归 Host 所有。
     snapshot_reservation: Any | None = None
 
     def __post_init__(self) -> None:
@@ -1574,7 +1573,7 @@ class RunCoordinator:
 
     @staticmethod
     async def _release_snapshot_reservation(preparation: RunPreparation) -> None:
-        """Release a Host-owned snapshot reservation on every startup path."""
+        """在每条受理路径（成功/失败/取消）上都释放 Host 的快照锁令牌。"""
         reservation = preparation.snapshot_reservation
         if reservation is None:
             return
@@ -1583,6 +1582,7 @@ class RunCoordinator:
             await release()
 
     def _finish(self, run: RunState, status: str, payload: dict[str, object]) -> None:
+        """收敛 Run 的唯一终态；已完成/已取消/已失败后再次调用是空操作。"""
         if run.completion is not None:
             return
         self._discard_staged_approval_rules(run)

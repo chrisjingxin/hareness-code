@@ -1,4 +1,4 @@
-/** Plugin Command 的协议版本门禁：只在双方协商支持时登记 exact Registry binding。 */
+/** Plugin Command 的协议版本门禁：双方协商支持时才把命令登记进 Registry。 */
 
 import {
   OPERATION_MIN_MINOR,

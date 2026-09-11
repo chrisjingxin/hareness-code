@@ -277,7 +277,7 @@ class _Runtime:
         if self.closing or self.disabled or _LEVEL_ORDER[level] < _LEVEL_ORDER[self.settings.level]:
             return
         sequence = self.next_sequence
-        self.next_sequence += 1
+        self.next_sequence += 1  # 先占号再校验：入队记录的 sequence 保持单调，落盘排序稳定。
         record: dict[str, object] = {
             "schema_version": 1,
             "timestamp_ms": int(time.time() * 1000),
@@ -501,6 +501,8 @@ class _BoundedQueue:
         return len(self.records)
 
     def enqueue(self, record: _QueuedRecord) -> None:
+        # 分级保留：warn/error 可用全部容量，debug/info 只能占用扣除
+        # reserved 后的额度；队列紧张时优先挤掉低级别记录而不是 error。
         priority = record.level in {"warn", "error"}
         max_records = self.max_records if priority else self.max_records - self.reserved_records
         max_bytes = self.max_bytes if priority else self.max_bytes - self.reserved_bytes

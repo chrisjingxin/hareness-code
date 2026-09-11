@@ -101,9 +101,8 @@ _MIGRATION_COMMIT_DEADLINE_SECONDS = 15.0
 _LEGACY_MIGRATION_CHILD_DEADLINE_SECONDS = 30.0
 _LEGACY_MIGRATION_CHILD_TERMINATE_GRACE_SECONDS = 0.25
 
-# ZC-108: durable migration attempt supervision markers。
-# active attempt 自身就是 durable fail-closed guard；durable poison 是诊断增强。
-# marker schema、原子写入、身份校验和清理分类见本文件下半部的 helper 区段。
+# 迁移 attempt 的持久化监督标记：attempt 标记本身就是防丢的失败关闭关卡，
+# poison 标记是给诊断用的补充。标记的格式、原子写入、身份校验和清理见文件后半部的 helper。
 _MIGRATION_ATTEMPT_SUFFIX = ".migration-attempt.json"
 _MIGRATION_POISON_SUFFIX = ".migration-poison.json"
 _MIGRATION_ATTEMPT_STAGING_SUFFIX = ".migration-attempt.staging.json"
@@ -136,7 +135,7 @@ _MIGRATION_CHILD_TEST_PHASES = frozenset(
         "commit_failure_before",
         "state_committed_failure",
         "state_clear_failure",
-        # ZC-108 新增 failpoint：覆盖四个 temp crash 窗口与 child-ready。
+        # 新增 failpoint：覆盖四个 temp 崩溃窗口与 child-ready。
         "backup_temp_created_before_copy",
         "backup_temp_copied_before_replace",
         "restore_temp_created_before_copy",
@@ -147,17 +146,14 @@ _MIGRATION_CHILD_TEST_PHASES = frozenset(
     }
 )
 
-# This registry contains no SQLite connection or asyncio task.  It is only a
-# process-local handoff barrier published before the file lock is released
-# after a child migration timeout.  A fresh process intentionally starts with
-# an empty registry and must make the normal fact-based recovery decision from
-# the durable state/backup instead.
+# 这个登记表不持有 SQLite 连接，也没有 asyncio 任务，只是进程内的交接栏：
+# 子进程迁移超时后，父进程在释放文件锁之前先把路径标成 poison。
+# 新进程故意从空表开始，必须依据落盘的迁移状态和备份重新做事实判断，而不是继承上一次的结论。
 _MIGRATION_POISONED_PATHS: set[Path] = set()
 _MIGRATION_POISON_LOCK = threading.Lock()
 
-# The child owns this marker only.  A permanently blocked aiosqlite worker is
-# never awaited or cleaned up by the parent; the parent kills and reaps the
-# whole child instead.
+# 子进程只拥有这一个标记。卡死的 aiosqlite worker 既不会被父进程 await 也不会被清理，
+# 父进程直接杀掉并回收整个子进程。
 _MIGRATION_CHILD_POISONED_PATHS: set[Path] = set()
 _MIGRATION_CHILD_TEST_PHASE: str | None = None
 _MIGRATION_CHILD_PROCESS_MODE = False
@@ -230,7 +226,7 @@ def _assert_migration_path_available(path: Path) -> None:
 
 
 def _publish_migration_poison(path: Path) -> None:
-    """在释放同一路径文件锁前发布 fail-closed handoff。"""
+    """在释放同一路径文件锁前发布失败关闭的交接标记。"""
     with _MIGRATION_POISON_LOCK:
         _MIGRATION_POISONED_PATHS.add(path)
 
@@ -250,7 +246,7 @@ async def _migration_child_pause_if_requested(phase: str) -> None:
 def _migration_child_pause_sync(phase: str) -> None:
     """测试专用同步 child failpoint；供 restore 等同步函数使用。
 
-    ZC-108：restore 两个 phase 使用同步 pause，不在同步函数内伪装 await。
+    restore 两个 phase 使用同步 pause，不在同步函数内伪装 await。
     生产启动不会传入 phase，此函数立即返回。
     """
     active_phase = _MIGRATION_CHILD_TEST_PHASE
@@ -780,7 +776,7 @@ def _migration_expected_index_contracts(
 
 
 def _migration_schema_contract_error(table_name: str, detail: str) -> ThreadPersistenceError:
-    """生成统一的 source schema typed error；不把 SQLite 原文泄露到状态文件。"""
+    """生成统一的 source schema 结构化错误码；不把 SQLite 原文泄露到状态文件。"""
     return ThreadPersistenceError(
         f"CHECKPOINT_MIGRATION_SOURCE_SCHEMA_INVALID:{table_name}:{detail}"
     )
@@ -923,7 +919,7 @@ def _migration_validate_table_contract_sync(
         table_name: str,
         source_version: int,
 ) -> None:
-    """读取 sqlite_master/PRAGMA 并比较单表 canonical contract。"""
+    """读取 sqlite_master/PRAGMA 并比较单表的标准结构契约。"""
     quoted_table = _migration_identifier(table_name)
     table_row = connection.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
@@ -1022,7 +1018,7 @@ def _migration_value_bytes(value: object) -> bytes:
 
 
 def _migration_row_digest(row: Iterable[object]) -> str:
-    """计算一行的 typed digest，保持 BLOB、文本和数字不可混淆。"""
+    """计算一行的带类型边界摘要，保持 BLOB、文本和数字不可混淆。"""
     digest = hashlib.sha256()
     for value in row:
         encoded = _migration_value_bytes(value)
@@ -1135,9 +1131,9 @@ def _migration_fingerprint_matches(
 
 
 # ---------------------------------------------------------------------------
-# ZC-108: durable migration attempt supervision types。
-# 这些 dataclass 只表示已通过 strict parser 校验的 marker 内容；损坏 JSON
-# 不构造这些对象，直接失败关闭。attempt manifest 只由父进程写，child 通过
+# 迁移 attempt 监督用的持久化标记类型。
+# 这些 dataclass 只表示已通过严格解析校验的 marker 内容；损坏的 JSON
+# 不会构造出这些对象，直接失败关闭。attempt manifest 只由父进程写，child 通过
 # 独立、一次性的 child-ready marker 报到，避免父子同时重写同一 JSON。
 # ---------------------------------------------------------------------------
 
@@ -1161,10 +1157,11 @@ class _MigrationFileIdentity:
 
 @dataclass(frozen=True, slots=True)
 class _MigrationReapAuthority:
-    """当前 owner 的内存退出证明；不可从磁盘 JSON 构造业务意义。
+    """当前 owner 亲眼确认子进程已退出并回收后的凭据；不能从磁盘 JSON 伪造。
 
-    只有 supervisor 在 Popen 的 poll/wait 已确定 returncode、child 已由
-    当前进程 settle 后创建。fresh owner 没有此对象，无法绕过 active guard。
+    只有 supervisor 在 Popen 的 poll/wait 确定了 returncode、child 已由
+    当前进程 settle 后才创建。新接手的 owner 没有此对象，因此无法绕过
+    active attempt 的保护直接改库。
     """
 
     attempt_id: str
@@ -1175,10 +1172,10 @@ class _MigrationReapAuthority:
 
 @dataclass(frozen=True, slots=True)
 class _MigrationChildOutcome:
-    """迁移 child 的 typed 退出事实，替换含义模糊的 (bool, bool, str)。
+    """迁移 child 的结构化退出结果，替代含义模糊的 (bool, bool, str) 返回值。
 
-    timeout 不是独立事实：timeout 后成功 kill+reap 仍是 exited_reaped；
-    只有无法证明退出才是 exit_unknown。
+    timeout 不是独立分类：timeout 后成功 kill 并回收仍算 exited_reaped；
+    只有无法证明子进程已退出才是 exit_unknown。
     """
 
     classification: Literal["not_started", "exited_reaped", "exit_unknown"]
@@ -1191,11 +1188,11 @@ class _MigrationChildOutcome:
 
 @dataclass(frozen=True, slots=True)
 class _MigrationCleanupResult:
-    """登记临时文件清理的结构化结果，只按归属判断，不按内容或年龄。
+    """登记临时文件清理的结构化结果，只按文件归属判断，不看内容或年龄。
 
-    只有 owned_remaining、unregistered_remaining、errors 均为空才可封口。
-    内容损坏不阻止删除：当 child 已 reaped 且身份严格匹配时，该 temp 已
-    确定是本 attempt 的残留。
+    只有 owned_remaining、unregistered_remaining、errors 全为空才允许封口
+    （结束本次 attempt）。内容损坏不阻止删除：当 child 已回收且文件身份
+    严格匹配时，该 temp 已确定是本 attempt 的残留。
     """
 
     deleted: tuple[str, ...]
@@ -1253,18 +1250,18 @@ class _MigrationAttemptManifest:
 
     @property
     def is_active(self) -> bool:
-        """preparing、prepared、exit_unknown 均是 active guard。"""
+        """preparing、prepared、exit_unknown 都会阻止新的 open。"""
         return self.status in _MIGRATION_ATTEMPT_ACTIVE_STATUSES
 
     @property
     def is_settled(self) -> bool:
-        """settled 是唯一已封口状态，只允许幂等 housekeeping。"""
+        """settled 是唯一已封口状态，只允许幂等收尾清理。"""
         return self.status == "settled"
 
 
 @dataclass(frozen=True, slots=True)
 class _MigrationPoisonMarker:
-    """解析后的 durable poison marker；只保存稳定诊断字段。"""
+    """解析后的落盘 poison 标记；只保存稳定诊断字段。"""
 
     version: int
     database: str
@@ -1288,7 +1285,7 @@ class _MigrationChildReadyMarker:
 
 @dataclass(frozen=True, slots=True)
 class _MigrationState:
-    """严格解析后的 migration state；v2 必须绑定 durable attempt。"""
+    """严格解析后的 migration state；v2 必须绑定落盘 attempt。"""
 
     version: int
     status: str
@@ -1353,7 +1350,7 @@ def _migration_table_digest_sync(
         table_name: str,
         columns: tuple[str, ...] | None = None,
 ) -> _MigrationTableDigest:
-    """同步计算一张表的行数和 typed digest。"""
+    """同步计算一张表的行数和逐行摘要。"""
     if columns is None:
         raw_columns = connection.execute(
             f"PRAGMA table_info({_migration_identifier(table_name)})"
@@ -1447,7 +1444,7 @@ def _fsync_file_path(path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# ZC-108: marker path、原子写入、身份校验、strict parser 和状态转换 helper。
+# marker 路径、原子写入、文件身份校验、严格解析和状态转换 helper。
 # 这些纯函数不依赖 ThreadPersistence 实例状态；损坏 marker 不自动覆盖，
 # 直接失败关闭。测试通过 _MIGRATION_ATOMIC_WRITE_FAULTS 注入各写盘失败点。
 # ---------------------------------------------------------------------------
@@ -1481,7 +1478,7 @@ def _migration_attempt_staging_path(path: Path) -> Path:
 
 
 def _migration_poison_path(path: Path) -> Path:
-    """返回固定 durable poison marker 路径。"""
+    """返回固定 poison 落盘标记路径。"""
     return path.with_name(path.name + _MIGRATION_POISON_SUFFIX)
 
 
@@ -1907,7 +1904,7 @@ def _parse_migration_poison_marker(
         *,
         expected_database: str | None = None,
 ) -> _MigrationPoisonMarker | None:
-    """严格解析 durable poison marker；不存在返回 None，损坏失败关闭。"""
+    """严格解析落盘 poison 标记；不存在返回 None，损坏失败关闭。"""
     if not _migration_path_entry_exists(path):
         return None
     raw = _migration_read_marker_json(path, max_size=_MIGRATION_MARKER_MAX_BYTES)
@@ -1991,7 +1988,7 @@ def _parse_migration_child_ready_marker(
             or parent_pid <= 0
     ):
         raise ValueError("child-ready marker parent_pid is invalid")
-    # ZC-108（Windows）：Python 3.11+ 的 venv launcher 会在 Popen 之下再 spawn
+    # Windows 特例：Python 3.11+ 的 venv launcher 会在 Popen 之下再 spawn
     # 真实解释器，此时 Popen.pid 是 launcher 的 pid，解释器 os.getpid() 与之不同，
     # 但解释器 os.getppid() 恰等于 Popen.pid。因此 marker 写者只要是我们 spawn
     # 的进程本身（POSIX：pid 相等）或其直接子进程（Windows launcher：parent_pid
@@ -2133,7 +2130,7 @@ def _migration_process_birth_identity() -> str | None:
     - Windows：取 process creation time。
     - macOS：取不到稳定值时返回 null。
 
-    它不用于 fresh owner 自动解除 guard。
+    它不用于新 owner 自动解除保护。
     """
     pid = os.getpid()
     if os.name == "posix" and sys.platform.startswith("linux"):
@@ -2248,7 +2245,7 @@ def _migration_build_poison_payload(
         failure_stage: str | None,
         created_at_ms: int,
 ) -> dict[str, object]:
-    """构造 durable poison 的严格 JSON payload；不保存绝对路径或异常原文。"""
+    """构造落盘 poison 的严格 JSON payload；不保存绝对路径或异常原文。"""
     return {
         "version": _MIGRATION_POISON_MARKER_VERSION,
         "database": database,
@@ -2264,7 +2261,7 @@ def _migration_write_poison(
         poison_path: Path,
         payload: Mapping[str, object],
 ) -> None:
-    """原子写入 durable poison marker。"""
+    """原子写入落盘 poison 标记。"""
     staging = _migration_poison_staging_path(path)
     _migration_atomic_write_json(
         poison_path,
@@ -2412,7 +2409,7 @@ def _migration_cleanup_attempt_temps(
     """清理 attempt 的登记 temp 和 child-ready，返回结构化结果。
 
     每个登记项返回互斥结果，只有 owned_remaining、unregistered_remaining、
-    errors 均为空才可封口。内容损坏不阻止删除：当 child 已 reaped 且身份
+    errors 均为空才可封口。内容损坏不阻止删除：当 child 已回收且身份
     严格匹配时，该 temp 已确定是本 attempt 的残留。
     """
     deleted: list[str] = []
@@ -2758,10 +2755,11 @@ class ThreadPersistence:
         self._lock = operation_lock or checkpointer.lock
         if checkpointer.lock is not self._lock:
             checkpointer.lock = self._lock
-        # ZC-108：普通 parent open 为 None；child 必须携带匹配 context 才能
-        # 在 active guard 下执行迁移写入。
+        # 普通 parent open 不带迁移上下文；child 必须携带匹配 context 才能
+        # 在 active attempt 保护下执行迁移写入。
         self._migration_attempt_context = migration_attempt_context
-        # ZC-108：child 在 BEGIN IMMEDIATE 后用此字段与 manifest source 比对。
+        # child 在 BEGIN IMMEDIATE 之后用此字段与 manifest 里的 source 指纹比对，
+        # 确认拿到的库和 manifest 记录的是同一份。
         self._migration_manifest_source: _MigrationDatabaseFingerprint | None = None
         self._diagnostic_log = ensure_log(None)
 
@@ -2838,15 +2836,13 @@ class ThreadPersistence:
                 path.with_name(path.name + _MIGRATION_LOCK_SUFFIX)
             )
             await migration_lock.acquire()
-            # The first check is only a fast rejection.  A waiter may have
-            # passed it while another opener still owned the file lock; the
-            # second check is the actual handoff boundary and must happen
-            # before any recovery, SQLite connection, backup, or write.
+            # 第一次检查只是快速拒绝。等待锁的进程可能在别的 opener 还持有
+            # 文件锁时就已经通过了它；拿到锁之后的第二次检查才是真正的交接
+            # 边界，必须发生在任何恢复、连接 SQLite、备份或写入之前。
             _assert_migration_path_available(path)
-            # ZC-108：锁后检查 active attempt manifest 和 durable poison。
-            # 锁前不根据 durable marker 做最终决策，避免看到 settled 与尚未
-            # 清除 poison 的中间状态后永远失去 housekeeping 机会。锁后检查
-            # 才是权威边界。
+            # 拿到锁后再检查 active attempt manifest 和 poison 标记。
+            # 锁前不根据落盘标记做最终决策，否则可能看到 settled 但 poison
+            # 尚未清除的中间状态，从此永远失去做收尾清理的机会。锁后检查才是权威边界。
             _check_migration_attempt_and_poison_sync(path)
             # Recovery 必须在 migration lock 仍由当前 opener 持有时完成；这里
             # 不把同步的 SQLite backup 丢到可被取消的后台线程，避免提前释放锁。
@@ -2860,10 +2856,9 @@ class ThreadPersistence:
                 raise ThreadPersistenceError(
                     "CHECKPOINT_MIGRATION_LEGACY_TABLE_UNEXPECTED"
                 )
-            # A brand-new empty user database is not a legacy migration and
-            # stays on the normal parent bootstrap path.  Only an existing
-            # historical schema (including the public v6 source) enters the
-            # killable child boundary.
+            # 全新空库不属于 legacy 迁移，走普通的 parent 引导路径；只有
+            # 已存在的历史 schema（包括公开的 v6 来源）才进入可被杀掉的
+            # child 进程边界。
             if path.is_file() and (
                     (0 < source_version < _SCHEMA_VERSION) or has_legacy_prompt_epoch
             ):
@@ -2871,9 +2866,8 @@ class ThreadPersistence:
                     path,
                     project_fingerprint,
                 )
-                # A child can finish or be killed immediately before its
-                # response.  Recheck both the process-local handoff and the
-                # durable database fact before opening the service connection.
+                # child 可能在回复前一刻才完成或被杀掉。打开正式连接前，
+                # 重新检查进程内 poison 登记和落盘的数据库事实。
                 _assert_migration_path_available(path)
                 source_version, has_legacy_prompt_epoch = _inspect_migration_source_sync(path)
                 if source_version != _SCHEMA_VERSION or has_legacy_prompt_epoch:
@@ -3380,8 +3374,8 @@ class ThreadPersistence:
             except (TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise ThreadPersistenceError("RUN_CONTEXT_SNAPSHOT_CONFLICT") from exc
             incoming_record = snapshot.record()
-            # ``created_at_ms`` describes the first durable materialization, not
-            # the identity of equivalent content prepared by a later Run.
+            # created_at_ms 表示首次落盘时间，不是内容身份：后到的 Run 准备了
+            # 等价内容时，保留原时间戳仍视为同一 snapshot。
             existing_record["created_at_ms"] = incoming_record["created_at_ms"]
             if (
                     str(existing["thread_id"]) != snapshot.thread_id
@@ -3877,7 +3871,7 @@ class ThreadPersistence:
         )
 
     async def load_run_state(self, thread_id: str) -> PersistedBindingState:
-        """读取 Run 恢复所需的 typed 状态，不向调用方暴露表结构。"""
+        """读取 Run 恢复所需的结构化状态，不向调用方暴露表结构。"""
         return PersistedBindingState(
             latest_run=await self._get_latest_run_execution_binding(thread_id),
             legacy_models=await self._get_legacy_model_bindings(thread_id),
@@ -4317,6 +4311,9 @@ class ThreadPersistence:
                     existing_checkpoint = await cursor.fetchone()
                     await cursor.close()
                 if existing_checkpoint is not None:
+                    # 同一 checkpoint_id 重放提交：内容逐字段比对一致时返回首次
+                    # 的落盘结果并回滚本次事务，避免重复写入或部分覆盖；任何
+                    # 字段不一致都按冲突拒绝，绝不静默合并两次提交。
                     records = await self._load_transcript_in_transaction(command.thread_id)
                     latest_sequence = records[-1].sequence if records else 0
                     requested_sequence = (
@@ -5058,8 +5055,9 @@ class ThreadPersistence:
             # user_version=7，保证 backup/recovery 能逐字节证明源库没有被改写。
             pre_transcript_legacy = await self._is_pre_transcript_prompt_epoch_source()
             source_fingerprint = await self._database_fingerprint_async()
-            # ZC-108：child 在 BEGIN IMMEDIATE 后重新计算 source fingerprint 并与
-            # manifest 逐字段匹配；不匹配则不 backup、不 DDL。
+            # child 在 BEGIN IMMEDIATE 之后重新计算 source fingerprint 并与
+            # manifest 逐字段匹配；不匹配说明拿到的不是 manifest 记录的那份库，
+            # 不做备份也不做任何 DDL。
             if self._migration_manifest_source is not None:
                 if not _migration_fingerprint_matches(
                         self._migration_manifest_source, source_fingerprint
@@ -5114,7 +5112,10 @@ class ThreadPersistence:
 
             await self._create_checkpointer_tables_in_transaction()
             version = source_version
+            # 以下按 user_version 逐级补齐 schema。每步只前进到下一版本，
+            # 保证从任意旧版本出发都走到同一条确定性路径上。
             if version < 1:
+                # v1：线程索引 + LangGraph checkpoint 两张基表。
                 await self._connection.execute(
                     """
                     CREATE TABLE IF NOT EXISTS harness_threads
@@ -5166,6 +5167,7 @@ class ThreadPersistence:
                 )
                 version = 1
             if version < 2:
+                # v2：PromptEpoch 与上下文 Artifact/摘要/状态表。
                 await self._connection.execute(
                     """
                     CREATE TABLE IF NOT EXISTS harness_prompt_epochs
@@ -5370,6 +5372,7 @@ class ThreadPersistence:
                 )
                 version = 2
             if version < 3:
+                # v3：PromptEpoch 增加 prefix 变化原因，默认按新线程处理。
                 await self._connection.execute(
                     """
                     ALTER TABLE harness_prompt_epochs
@@ -5378,6 +5381,7 @@ class ThreadPersistence:
                 )
                 version = 3
             if version < 4:
+                # v4：AgentEngine Profile 及 Thread 绑定表。
                 await self._connection.execute(
                     """
                     CREATE TABLE IF NOT EXISTS harness_runtime_profiles
@@ -5460,6 +5464,7 @@ class ThreadPersistence:
                 )
                 version = 4
             if version < 5:
+                # v5：legacy Thread 级模型绑定快照。
                 await self._connection.execute(
                     """
                     CREATE TABLE IF NOT EXISTS harness_thread_model_bindings
@@ -5491,6 +5496,7 @@ class ThreadPersistence:
                 )
                 version = 5
             if version < 6:
+                # v6：每次 Run 的请求模型与实际模型绑定记录，用于恢复与审计。
                 await self._connection.execute(
                     """
                     CREATE TABLE IF NOT EXISTS harness_run_execution_bindings
@@ -5545,6 +5551,9 @@ class ThreadPersistence:
                 )
                 version = 6
             if version < 7:
+                # v7：引入 Transcript 作为唯一 UI 历史来源；sequence 唯一约束
+                # 保证按顺序回放时不出现并列记录。旧 PromptEpoch 历史在
+                # _bootstrap_legacy_transcripts 中转换。
                 await self._add_artifact_metadata_columns()
                 await self._connection.execute(
                     """
@@ -5645,6 +5654,7 @@ class ThreadPersistence:
                 await self._bootstrap_legacy_transcripts(source_version)
                 version = 7
             if version < 8:
+                # v8：Run 受理时的上下文快照表；旧 PromptEpoch 数据在此迁移。
                 await self._add_context_snapshot_column()
                 await self._connection.execute(
                     """
@@ -5705,6 +5715,7 @@ class ThreadPersistence:
                 # 迁移自产生的空表，绝不把它当作 PromptEpoch adapter 输入。
                 await self._connection.execute("DROP TABLE harness_prompt_epochs")
             if version < 9:
+                # v9：压缩 checkpoint 表；此前旧库中的压缩点在此回填引导。
                 await self._backfill_artifact_metadata()
                 await self._connection.execute(
                     """
@@ -5770,12 +5781,16 @@ class ThreadPersistence:
                 await self._bootstrap_legacy_compression_checkpoints()
                 version = 9
             if version < 10:
+                # v10：checkpoint 增加 commit_payload 列，用于幂等重放比对。
                 await self._add_compression_commit_payload_column()
                 version = 10
             if version < 11:
+                # v11：上下文状态表增加结构化 runtime_state 列。
                 await self._add_context_runtime_state_column()
                 version = 11
             if version < 12:
+                # v12-v17：Compose 系列表（runs、activity、work item、文档引用、
+                # 确认组、会话）。
                 await self._add_compose_tables()
                 version = 12
             if version < 13:
@@ -5794,12 +5809,15 @@ class ThreadPersistence:
                 await self._add_compose_session_table()
                 version = 17
             if version < 18:
+                # v18：git checkpoint 与 Thread 回退状态表。
                 await self._add_git_checkpoint_tables()
                 version = 18
             if version < 19:
+                # v19：Goal 系列表。
                 await self._add_goal_tables()
                 version = 19
             if version < 20:
+                # v20：线程标题列（title / title_origin）。
                 await self._add_thread_title_columns()
                 version = 20
             await self._connection.execute(f"PRAGMA user_version={version}")
@@ -5861,9 +5879,8 @@ class ThreadPersistence:
                 backup_path=migration_backup,
                 final_fingerprint=final_fingerprint,
             )
-            # ZC-108：child（_MIGRATION_CHILD_PROCESS_MODE）不再清除 migration
-            # state，由 parent 在 reaped 后统一封口。但 bootstrap（非 child 进程）
-            # 仍需清除 state，因为 bootstrap 不经过 child supervision 流程。
+            # child 进程不再清除 migration state，由 parent 在回收子进程后统一
+            # 封口；bootstrap（非 child 进程）不经过 child 监督流程，仍需自己清除。
             if not _MIGRATION_CHILD_PROCESS_MODE:
                 await self._clear_migration_state()
             if commit_error is not None:
@@ -5901,8 +5918,8 @@ class ThreadPersistence:
                         migration_backup,
                         source_fingerprint,
                     )
-                    # ZC-108：child 恢复 source 后写 restored_source，不清 state。
-                    # parent 在 reaped 后按 source/final/backup 事实统一收敛。
+                    # child 恢复 source 后写 restored_source 状态，但不清除 state；
+                    # 由 parent 在回收子进程后按 source/final/backup 的事实统一收敛。
                     await self._write_migration_state(
                         status="restored_source",
                         source_fingerprint=source_fingerprint,
@@ -5929,7 +5946,7 @@ class ThreadPersistence:
             source: _MigrationDatabaseFingerprint,
             final: _MigrationDatabaseFingerprint,
     ) -> tuple[Literal["final", "source", "mismatch", "unknown"], BaseException | None]:
-        """在有界 deadline 内 settle commit，之后才用独立连接确认落盘事实。"""
+        """在有限时间内等待 commit 落定，之后才用独立连接确认落盘事实。"""
         _migration_child_test_failure(
             "commit_failure_before",
             RuntimeError("injected commit failure before sqlite commit"),
@@ -7058,8 +7075,8 @@ class ThreadPersistence:
     ) -> Path:
         """在已持有 BEGIN IMMEDIATE 时生成并严格验证独立 SQLite backup。
 
-        ZC-108：当存在 attempt context 时使用登记的 backup temp，并在使用
-        前后复核 identity。四个 crash temp 窗口通过 failpoint 覆盖。
+        有 attempt context 时使用登记的 backup temp，并在使用前后复核文件
+        身份。四个崩溃 temp 窗口通过 failpoint 覆盖。
         """
         _migration_child_test_failure(
             "backup_failure",
@@ -7069,7 +7086,7 @@ class ThreadPersistence:
             raise ThreadPersistenceError("CHECKPOINT_MIGRATION_BOUNDARY_REQUIRED")
         source = source_fingerprint or await self._database_fingerprint_async()
         backup_path = self._migration_backup_path(source_version)
-        # ZC-108：有 attempt context 时使用登记 temp，否则回退到随机 temp。
+        # 有 attempt context 时使用登记 temp，否则回退到随机 temp。
         context = self._migration_attempt_context
         if context is not None:
             temporary = context.backup_temp
@@ -7082,7 +7099,7 @@ class ThreadPersistence:
         source_connection: sqlite3.Connection | None = None
         target: sqlite3.Connection | None = None
         try:
-            # ZC-108：使用登记 temp 前以 fd 复核 identity，ftruncate(0)、fsync。
+            # 使用登记 temp 前以 fd 复核身份，清空并 fsync。
             if context is not None and registered_identity is not None:
                 fd = os.open(temporary, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
                 try:
@@ -7096,11 +7113,10 @@ class ThreadPersistence:
                 finally:
                     os.close(fd)
             _migration_child_pause_sync("backup_temp_created_before_copy")
-            # Python sqlite3 cannot run backup from the same connection that
-            # currently owns BEGIN IMMEDIATE: SQLite waits on its own write
-            # transaction.  A second read connection observes the same
-            # committed snapshot while that transaction prevents all writers;
-            # both raw connections stay on this event-loop thread.
+            # Python sqlite3 无法从当前持有 BEGIN IMMEDIATE 的连接做 backup：
+            # SQLite 会等自己的写事务。这里开第二个只读连接，它看到的是同一
+            # 份已提交的 WAL 快照，而写事务保证期间没有其他写入者；两个原生
+            # 连接都留在当前事件循环线程上。
             source_connection = sqlite3.connect(self._path, timeout=5.0)
             target = sqlite3.connect(temporary)
             source_connection.backup(target)
@@ -7126,7 +7142,7 @@ class ThreadPersistence:
                 raise ThreadPersistenceError(
                     "CHECKPOINT_MIGRATION_BACKUP_VALIDATION_FAILED"
                 )
-            # ZC-108：SQLite close 后、os.replace 前再次 lstat 复核 identity。
+            # SQLite close 之后、os.replace 之前再次 lstat 复核身份。
             if context is not None and registered_identity is not None:
                 pre_replace_identity = _migration_file_identity_from_path_lstat(temporary)
                 if not _migration_file_identity_matches(registered_identity, pre_replace_identity):
@@ -7148,8 +7164,8 @@ class ThreadPersistence:
                 source_connection.close()
             if target is not None:
                 target.close()
-            # ZC-108：登记 temp 不在 child 的 finally 中删除；parent 在 settle
-            # 时按 identity 统一清理。只有非登记的随机 temp 才在这里删除。
+            # 登记 temp 不在 child 的 finally 中删除；parent 在收尾时按身份
+            # 统一清理。只有非登记的随机 temp 才在这里删除。
             if context is None:
                 temporary.unlink(missing_ok=True)
 
@@ -7174,7 +7190,7 @@ class ThreadPersistence:
         try:
             await self._validate_legacy_source_schema_async(6)
         except ThreadPersistenceError:
-            # 保持当前 v7+ 异常残留的原有 fail-closed 行为；上层会返回
+            # 保持当前 v7+ 异常残留原有的失败关闭行为；上层会返回
             # CHECKPOINT_MIGRATION_LEGACY_TABLE_UNEXPECTED。
             return False
         return True
@@ -7189,8 +7205,8 @@ class ThreadPersistence:
     ) -> None:
         """原子写入迁移状态；状态写失败时禁止继续启动或迁移。
 
-        ZC-108：state v2 包含 attempt_id，且 child 不再清除 state；parent
-        在 reaped、DB 收敛和 cleanup closable 后统一封口。
+        state v2 携带 attempt_id，且 child 不清除 state；由 parent 在回收
+        子进程、数据库收敛且清理完成后统一封口。
         """
         if status == "committed" and _MIGRATION_CHILD_TEST_PHASE == "state_committed_failure":
             raise ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_WRITE_FAILED")
@@ -7220,8 +7236,8 @@ class ThreadPersistence:
     def _write_migration_state_sync(self, payload: Mapping[str, object]) -> None:
         """以 fsync + 同目录 replace 持久化状态，避免半个 JSON。
 
-        ZC-108：使用固定 staging basename 替代随机 mkstemp，避免 parent/child
-        SIGKILL 制造无界残留。state/poison staging 同样固定为每类最多一个。
+        使用固定 staging basename 替代随机 mkstemp：进程被 SIGKILL 时
+        随机名会不断累积残留，固定名保证每类 staging 至多一个。
         """
         state_path = self._migration_state_path()
         staging = _migration_state_staging_path(self._path)
@@ -7265,7 +7281,7 @@ class ThreadPersistence:
     ) -> None:
         """关闭旧连接后原子替换完整快照，不让旧 WAL/SHM 继续挂到目标上。
 
-        ZC-108：有 attempt context 时使用登记的 restore temp。
+        有 attempt context 时使用登记的 restore temp。
         """
         self._validate_backup_file_sync(backup_path, expected)
         await self._connection.rollback()
@@ -7361,7 +7377,7 @@ class ThreadPersistence:
             *,
             preserve_recovery_state: bool = False,
     ) -> None:
-        """只恢复无 attempt guard 的 legacy v1 migration state。"""
+        """只恢复无 attempt 保护的 legacy v1 migration state。"""
         _assert_migration_path_available(path)
         state_path = path.with_name(path.name + _MIGRATION_STATE_SUFFIX)
         try:
@@ -7406,14 +7422,13 @@ class ThreadPersistence:
                 return
 
             # 主库仍是严格 source，说明 DB commit 尚未落地或事务已安全回滚；
-            # 清除过期 state 后让 canonical open 重新生成一次 verified backup。
+            # 清除过期 state 后让正规 open 流程重新生成一次已验证 backup。
             if current is not None and _migration_fingerprint_matches(source, current):
                 ThreadPersistence._validate_backup_path_sync(backup_path, source)
                 ThreadPersistence._validate_source_database_path_sync(path, source)
-                # restore_failed is itself diagnostic durable state.  Keep it
-                # until the next canonical child attempt overwrites it; a
-                # verified exact source is safe to retry but must not erase
-                # evidence that restore failed in the prior owner.
+                # restore_failed 本身是诊断用的落盘状态。保留它直到下一次
+                # 正规 child attempt 覆盖；确认为精确 source 时可以安全重试，
+                # 但不能抹掉上一个 owner 恢复失败的证据。
                 if not preserve_recovery_state and status != "restore_failed":
                     ThreadPersistence._unlink_migration_state_path_sync(state_path)
                 return
@@ -7470,9 +7485,9 @@ class ThreadPersistence:
     ) -> None:
         """把 backup 恢复到新文件并原子替换，清除旧目标的所有 journal sidecar。
 
-        ZC-108：当提供 ``registered_temp`` 和 ``registered_identity`` 时使用
-        登记的 restore temp 并在使用前后复核 identity。restore 两个 phase
-        使用同步 pause，不在同步函数内伪装 await。
+        当提供 ``registered_temp`` 和 ``registered_identity`` 时使用登记的
+        restore temp，并在使用前后复核身份。restore 两个 phase 使用同步
+        pause，不在同步函数内伪装 await。
         """
         _migration_child_test_failure(
             "restore_failure",
@@ -7488,7 +7503,7 @@ class ThreadPersistence:
         source = sqlite3.connect(backup_path)
         target: sqlite3.Connection | None = None
         try:
-            # ZC-108：使用登记 temp 前以 fd 复核 identity，ftruncate(0)、fsync。
+            # 使用登记 temp 前以 fd 复核身份，清空并 fsync。
             if use_registered and registered_identity is not None:
                 fd = os.open(temporary, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
                 try:
@@ -7522,7 +7537,7 @@ class ThreadPersistence:
                 raise ThreadPersistenceError(
                     "CHECKPOINT_MIGRATION_RESTORE_VALIDATION_FAILED"
                 )
-            # ZC-108：SQLite close 后、os.replace 前再次 lstat 复核 identity。
+            # SQLite close 之后、os.replace 之前再次 lstat 复核身份。
             if use_registered and registered_identity is not None:
                 pre_replace_identity = _migration_file_identity_from_path_lstat(temporary)
                 if not _migration_file_identity_matches(registered_identity, pre_replace_identity):
@@ -7531,9 +7546,8 @@ class ThreadPersistence:
                     )
             os.chmod(temporary, 0o600)
             _fsync_file_path(temporary)
-            # The old target connection has been closed, so these exact sidecars
-            # cannot receive any more frames.  Never leave them beside the new
-            # inode, where a subsequent opener could mistake them for its WAL.
+            # 旧目标连接已关闭，这些 sidecar 不会再收到任何帧。绝不能把它们
+            # 留在新 inode 旁边，否则下一个打开者会误当成自己的 WAL。
             for suffix in ("-wal", "-shm", "-journal"):
                 path.with_name(path.name + suffix).unlink(missing_ok=True)
             os.replace(temporary, path)
@@ -7546,7 +7560,7 @@ class ThreadPersistence:
             source.close()
             if target is not None:
                 target.close()
-            # ZC-108：登记 temp 不在 finally 中删除；parent 在 settle 时统一清理。
+            # 登记 temp 不在 finally 中删除；parent 在收尾时统一清理。
             if not use_registered:
                 temporary.unlink(missing_ok=True)
 
@@ -8193,7 +8207,7 @@ class ThreadPersistence:
             )
 
     async def _add_compose_confirmation_groups(self) -> None:
-        """v16 为每次 typed confirmation 固定 digest group，拒绝历史并集伪造门禁。"""
+        """v16 为每次带 ID 的确认固定 digest group，拒绝用历史并集伪造门禁。"""
         cursor = await self._connection.execute(
             "PRAGMA table_info(harness_compose_work_item_confirmations)"
         )
@@ -8752,17 +8766,15 @@ class ThreadPersistence:
                             not legacy_invalid_fields
                             and len(pending_tool_call_ids) == 1
                     ):
-                        # A single unresolved assistant declaration is the
-                        # only safe legacy no-ID result binding.  This also
-                        # preserves the synthetic ID generated for an
-                        # assistant call that had no provider ID.
+                        # 只有唯一一个未匹配的 assistant 声明时，才能安全地把
+                        # 旧的无 ID 工具结果绑定过去；这也保留了为没有
+                        # provider ID 的 assistant 调用生成的合成 ID。
                         legacy_tool_call_id = pending_tool_call_ids.pop()
                     else:
                         if raw_tool_call_id is not None and raw_tool_call_id != "":
                             legacy_invalid_fields.append("tool_call_id")
-                        # Keep the result, but make the missing association
-                        # explicit instead of assigning a record ID and
-                        # pretending it matched an assistant call.
+                        # 保留结果本身，但把缺失的关联显式标记出来，
+                        # 而不是编一个 ID 假装它匹配了某条 assistant 调用。
                         legacy_tool_call_id_status = "unmatched"
                 command = TranscriptAppend(
                     thread_id=thread_id,
@@ -8863,7 +8875,7 @@ class ThreadPersistence:
 
 
 def _inspect_migration_source_sync(path: Path) -> tuple[int, bool]:
-    """只读探测迁移入口；schema/data mutation 仍全部留在 child。"""
+    """只读探测迁移入口；所有 schema/数据写入仍留在 child 进程内。"""
     if not path.is_file():
         return 0, False
     connection: sqlite3.Connection | None = None
@@ -9172,8 +9184,8 @@ async def _terminate_kill_reap_migration_child(
 ) -> _MigrationChildOutcome:
     """先 terminate，再在固定上限内 kill，并确认 child 已退出。
 
-    ZC-108：所有 poll/wait/terminate/kill/reap 异常都归入 typed outcome。
-    ProcessLookupError 只说明信号发送目标不存在，不是 reap 证明。terminate
+    所有 poll/wait/terminate/kill/reap 异常都归入结构化结果。
+    ProcessLookupError 只说明信号发送目标不存在，不是回收证明。terminate
     失败后仍可尝试 wait/poll；只要最终没有可靠 returncode 就是 exit_unknown。
     """
     pid = process.pid
@@ -9253,11 +9265,11 @@ async def _supervise_migration_child(
         attempt_id: str,
         temp_dir: Path,
 ) -> _MigrationChildOutcome:
-    """spawn 并监督 migration child；返回 typed outcome。
+    """spawn 并监督 migration child；返回结构化结果。
 
-    ZC-108：timeout 不是独立事实。timeout 后成功 kill+reap 仍是 exited_reaped；
-    只有无法证明退出才是 exit_unknown。stdout 读取失败但 child 已 reaped
-    不得丢失 exit authority，只把 error code 降级为通用码。
+    timeout 不是独立分类：timeout 后成功 kill 并回收仍算 exited_reaped；
+    只有无法证明退出才是 exit_unknown。stdout 读取失败但 child 已回收时
+    不丢失退出事实，只把 error code 降级为通用码。
     """
     command = [
         sys.executable,
@@ -9312,7 +9324,7 @@ async def _supervise_migration_child(
                 else None
             )
         except (OSError, ValueError):
-            # stdout 读取失败但 child 已 reaped，不丢失 exit authority。
+            # stdout 读取失败但 child 已回收，不丢失退出事实。
             error_code = "CHECKPOINT_MIGRATION_WORKER_FAILED"
         return _MigrationChildOutcome(
             classification="exited_reaped",
@@ -9336,7 +9348,7 @@ async def _supervise_migration_child(
                 continue
             except BaseException:
                 break
-        # 返回 outcome（即使被取消），让调用方在 settle 后再重新抛取消。
+        # 返回结果（即使被取消），让调用方在收尾后再重新抛取消。
         try:
             outcome = cleanup.result()
         except BaseException:
@@ -9358,7 +9370,7 @@ async def _supervise_migration_child(
                 child_ready_seen=outcome.child_ready_seen,
             )
         if cancelled:
-            # 标记被取消，但不在这里 re-raise；调用方在 settle 后重新抛。
+            # 标记被取消，但不在这里重新抛出；调用方在收尾后再抛。
             outcome = _MigrationChildOutcome(
                 classification=outcome.classification,
                 returncode=outcome.returncode,
@@ -9383,11 +9395,11 @@ def _settle_owned_migration_attempt_sync(
         *,
         cleanup_fault_prefix: str = "settle",
 ) -> None:
-    """当前 owner 在 active guard 下按 DB 事实收敛。
+    """当前 owner 在 active attempt 保护下按数据库事实收敛收尾。
 
-    ZC-108：只有 supervisor 在 Popen 的 poll/wait 已确定 returncode、child
-    已由当前进程 settle 后创建 authority。fresh owner 没有 authority，调用
-    在线恢复必须被拒绝。
+    只有 supervisor 在 Popen 的 poll/wait 确定了 returncode、child 已由当前
+    进程回收后才创建 authority。新接手的 owner 没有 authority，调用在线
+    恢复必须被拒绝。
 
     1. state 不存在：当前主库必须严格等于 manifest source；否则失败关闭。
     2. state v2 且 current == final：验证 final schema，保留 final。
@@ -9502,7 +9514,7 @@ def _settle_owned_migration_attempt_sync(
         raise ThreadPersistenceError(
             f"CHECKPOINT_MIGRATION_DIR_CLEANUP_FAILED:{dir_detail}"
         )
-    # 固定 staging basename 也必须在当前 reaped owner 内收敛，否则下一次
+    # 固定 staging basename 也必须由已回收子进程的 owner 收敛，否则下一次
     # marker/state 写会被 O_EXCL 永久阻断。
     for staging_path in (
         _migration_attempt_staging_path(path),
@@ -9538,7 +9550,7 @@ def _settle_owned_migration_attempt_sync(
     )
     # 清 migration state 并 fsync data_dir。
     _migration_unlink_strict_marker(state_path)
-    # 清 durable poison（如果存在）。
+    # 清落盘 poison 标记（如果存在）。
     poison_path = _migration_poison_path(path)
     _migration_unlink_strict_marker(poison_path)
     # 清 process-local poison。
@@ -9553,10 +9565,10 @@ async def _run_legacy_migration_child(
 ) -> None:
     """在父持有 migration lock 时运行并严格收敛一次 legacy migration。
 
-    ZC-108：父进程持有 migration lock → 在 spawn 前发布 active attempt guard
-    → 准备并登记精确 temp 身份 → spawn child → child 在首次访问 SQLite 前发布
-    一次性 child-ready 事实 → 父进程得到 typed child outcome → 按 exited_reaped /
-    not_started / exit_unknown 收敛。
+    流程：父进程持有 migration lock → 在 spawn 前发布 active attempt 保护
+    → 准备并登记精确的 temp 身份 → spawn child → child 在首次访问 SQLite 前
+    发布一次性 child-ready 事实 → 父进程得到结构化 child 结果 → 按
+    exited_reaped / not_started / exit_unknown 分别收敛。
     """
     # 1. 计算完整 source fingerprint。
     source_connection = sqlite3.connect(path)
@@ -9610,7 +9622,7 @@ async def _run_legacy_migration_child(
         _fsync_directory_best_effort(temp_dir)
     except BaseException:
         # prepare 失败：尝试清理已创建的 temp 和目录，保持 preparing manifest
-        # 作为 active guard（fresh owner 会 fail closed）。
+        # 作为 active 状态的保护（新 owner 会失败关闭）。
         _settle_prepare_failure_sync(path, manifest_path, temp_dir)
         raise
     # 4. 原子更新 status=prepared。
@@ -9686,9 +9698,9 @@ async def _run_legacy_migration_child(
                 raise ThreadPersistenceError("CHECKPOINT_MIGRATION_ATTEMPT_MISSING")
             _settle_owned_migration_attempt_sync(path, authority, owned_manifest)
         except (OSError, ValueError, ThreadPersistenceError):
-            # child 已 reaped；active/settled manifest 是充分的 durable guard。
-            # process-local poison 只属于 exit_unknown，否则会阻止同进程进入
-            # settled housekeeping。
+            # child 已回收；active/settled manifest 本身就是落盘的保护，
+            # 进程内 poison 只属于 exit_unknown，否则会阻止同进程进入
+            # settled 收尾清理。
             raise
         # 验证最终 DB。
         source_version, has_prompt = _inspect_migration_source_sync(path)
@@ -9736,7 +9748,7 @@ async def _run_legacy_migration_child(
                 old_status="prepared",
             )
     except (OSError, ValueError):
-        # prepared manifest 本身仍是 durable active guard。
+        # prepared manifest 本身仍是落盘的失败关闭保护。
         pass
     poison_payload = _migration_build_poison_payload(
         database=path.name,
@@ -9759,7 +9771,7 @@ def _settle_prepare_failure_sync(
         manifest_path: Path,
         temp_dir: Path,
 ) -> None:
-    """prepare 阶段失败时清理已创建的 temp 和目录，保留 active guard。
+    """prepare 阶段失败时清理已创建的 temp 和目录，保留 active 状态保护。
 
     preparing 状态下 Popen 从未发生；离线恢复可以利用这个协议不变量在用户
     确认所有进程停止后，仅对 manifest 预先登记的精确 basename 做特殊收敛。
@@ -9781,7 +9793,7 @@ def _settle_prepare_failure_sync(
         _fsync_directory_best_effort(temp_dir.parent)
     except OSError:
         pass
-    # 保留 preparing manifest 作为 active guard。
+    # 保留 preparing manifest 作为 active 状态保护。
 
 
 def _settle_not_started_sync(
@@ -9840,10 +9852,10 @@ def _settle_not_started_sync(
 
 
 def _check_migration_attempt_and_poison_sync(path: Path) -> None:
-    """锁后检查 active attempt manifest 和 durable poison。
+    """锁后检查 active attempt manifest 和落盘 poison 标记。
 
-    ZC-108：fresh owner 取得 migration lock 后必须在任何 state recovery、
-    SQLite connect、backup、restore 之前失败关闭。
+    新接手的 owner 取得 migration lock 后，必须在任何 state recovery、
+    SQLite 连接、backup、restore 之前失败关闭。
 
     - settled：严格验证 settled_database，完成幂等 housekeeping。
     - active：CHECKPOINT_MIGRATION_ATTEMPT_ACTIVE。
@@ -9854,7 +9866,7 @@ def _check_migration_attempt_and_poison_sync(path: Path) -> None:
     poison_path = _migration_poison_path(path)
     attempt_staging_path = _migration_attempt_staging_path(path)
     # 首次 preparing 写在 replace 前崩溃时没有 child 能被合法 spawn。只有在
-    # canonical manifest 确认不存在时，fresh owner 才能严格删除这个固定 staging。
+    # 正式 manifest 确认不存在时，新 owner 才能严格删除这个固定 staging。
     if (
             not _migration_path_entry_exists(manifest_path)
             and _migration_path_entry_exists(attempt_staging_path)
@@ -9874,10 +9886,10 @@ def _check_migration_attempt_and_poison_sync(path: Path) -> None:
     if manifest_corrupt:
         raise ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_INVALID")
     if manifest is not None and manifest.is_active:
-        # active attempt 自身就是 durable fail-closed guard。
+        # active attempt 自身就是落盘的失败关闭保护。
         raise ThreadPersistenceError("CHECKPOINT_MIGRATION_ATTEMPT_ACTIVE")
     if manifest is not None and manifest.is_settled:
-        # settled：验证主库仍匹配 settled_database 后做幂等 housekeeping。
+        # settled：验证主库仍匹配 settled_database 后做幂等收尾清理。
         try:
             database_stat = path.lstat()
             if not stat.S_ISREG(database_stat.st_mode):
@@ -9894,7 +9906,7 @@ def _check_migration_attempt_and_poison_sync(path: Path) -> None:
                     "CHECKPOINT_MIGRATION_SETTLED_DATABASE_MISMATCH"
                 )
             # 幂等清 staging、state、poison、manifest；任何一步失败都保留
-            # settled guard，不允许当前 open 越过未完成 housekeeping。
+            # settled 保护，不允许当前 open 越过未完成的收尾清理。
             for marker_path in (
                 _migration_state_staging_path(path),
                 _migration_poison_staging_path(path),
@@ -9933,7 +9945,7 @@ def _check_migration_attempt_and_poison_sync(path: Path) -> None:
             _fsync_directory_best_effort(path.parent)
         except (OSError, ValueError) as exc:
             raise ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_INVALID") from exc
-    # 无 attempt manifest 或已清理。检查 durable poison。
+    # 无 attempt manifest 或已清理。检查落盘 poison 标记。
     poison: _MigrationPoisonMarker | None = None
     try:
         poison = _parse_migration_poison_marker(
@@ -9963,7 +9975,7 @@ async def run_legacy_migration_child(
 ) -> None:
     """migration_worker 入口；整个 legacy 事务只存在于 child 进程。
 
-    ZC-108：child 在首次访问 SQLite 前必须发布一次性 child-ready 事实。
+    child 在首次访问 SQLite 前必须发布一次性 child-ready 事实。
     ``attempt_id`` 和 ``temp_dir`` 由父进程在 prepared manifest 中登记，
     child 解析 manifest 验证归属后才写 child-ready。
     """
@@ -9971,7 +9983,7 @@ async def run_legacy_migration_child(
     _MIGRATION_CHILD_PROCESS_MODE = True
     _MIGRATION_CHILD_TEST_PHASE = test_phase
 
-    # ZC-108：child-ready 成功 fsync 之前，child 禁止打开主库、backup 或任何
+    # child-ready 成功 fsync 之前，child 禁止打开主库、backup 或任何
     # SQLite 文件。child-ready 写入失败时 child 直接退出。
     if attempt_id is None or temp_dir is None:
         raise ThreadPersistenceError("CHECKPOINT_MIGRATION_ATTEMPT_REQUIRED")
@@ -10058,8 +10070,8 @@ async def run_legacy_migration_child(
         migration_attempt_context=attempt_context,
     )
     try:
-        # ZC-108：child 在 BEGIN IMMEDIATE 后重新计算 source fingerprint 并与
-        # manifest 逐字段匹配；不匹配则不 backup、不 DDL。
+        # child 在 BEGIN IMMEDIATE 后重新计算 source fingerprint 并与 manifest
+        # 逐字段匹配；不匹配则不 backup、不 DDL。
         if attempt_context is not None:
             manifest = _parse_migration_attempt_manifest(
                 _migration_attempt_manifest_path(path),

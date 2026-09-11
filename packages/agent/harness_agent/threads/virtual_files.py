@@ -106,6 +106,8 @@ class HarnessVirtualBackend:
                     artifact = await self._thread_persistence.load_context_artifact(self._thread_id, artifact_id)
                     content = artifact.content if artifact is not None else None
                     if content is not None:
+                        # ContextArtifact 不可变，命中一次即可缓存，本 Run
+                        # 内不再为同一 artifact 回 SQLite。
                         self._history_cache[artifact_id] = content
                 if content is None:
                     return ReadResult(error="history artifact was not found for the current thread")

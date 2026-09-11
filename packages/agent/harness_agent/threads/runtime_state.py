@@ -246,6 +246,9 @@ class RuntimeStateRehydrator:
         from harness_agent.runtime.run_context import current_approval_mode
 
         live_approval_mode = current_approval_mode(run_context)
+        # 权限语义只允许"越真越优先"：本次调用显式传入的策略最可信，
+        # RunContext 次之，历史 state 只做恢复兜底；压缩后的 Run 绝不能
+        # 从旧摘要里继承已经不存在的权限。
         execution_mode = (
             current_execution_policy.execution_mode
             if current_execution_policy is not None

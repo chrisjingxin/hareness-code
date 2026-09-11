@@ -6,7 +6,7 @@ export function formatFileSize(sizeBytes: number): string {
 }
 
 /**
- * 语言展示标签：canonical 语言 id 原样展示，未知（null/plaintext）显示"文本"。
+ * 语言展示标签：规范化语言 id 原样展示，未知（null/plaintext）显示"文本"。
  * 与 workspace/file-language 的 fileLanguageLabel 行为一致；表现层不直接 import workspace。
  */
 export function fileLanguageDisplayLabel(language: string | null): string {

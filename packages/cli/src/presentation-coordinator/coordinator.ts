@@ -90,7 +90,7 @@ export interface PresentationCoordinator {
   attachRenderer(handoffId: string, presentedToken: string, channel: GatewayChannel): Promise<void>
   /** 渲染 channel 结束（浏览器断开/关闭）；opening 直接收敛，web-active 先进入重连宽限。 */
   notifyRendererDisconnected(reason?: ReturnReason): void
-  /** 渲染帧畸形/未知：协议违规，fail-closed 收敛。 */
+  /** 渲染帧畸形/未知属于协议违规：直接结束会话，宁可断开也不带病继续。 */
   notifyInvalidMessage(): void
   /** Browser ready：opening-web → web-active 的唯一入口。 */
   requestReady(): void
@@ -273,7 +273,7 @@ class PresentationCoordinatorImpl implements PresentationCoordinator {
     }, this.reconnectGraceMs)
   }
 
-  /** 畸形/未知渲染帧：协议违规，fail-closed 收敛整个会话。 */
+  /** 畸形/未知渲染帧属于协议违规：直接结束整个会话，宁可断开也不带病继续。 */
   notifyInvalidMessage(): void {
     if (this.closed || this.state.phase !== "opening-web" && this.state.phase !== "web-active") return
     void this.cleanup("invalid-message")

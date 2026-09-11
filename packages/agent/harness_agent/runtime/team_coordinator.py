@@ -550,6 +550,8 @@ class TeamCoordinator:
             attempts=current.attempts + 1,
             error_code=None,
         )
+        # 拿到的是调度循环共享的 dict 时，先在原地登记 RUNNING 并落盘，
+        # 这样恢复/并发调度不会把同一任务再派一次。
         mutable_states = states if isinstance(states, dict) else None
         if mutable_states is not None:
             mutable_states[task.task_id] = running

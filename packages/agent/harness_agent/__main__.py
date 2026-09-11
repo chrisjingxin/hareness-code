@@ -27,6 +27,8 @@ async def _run() -> None:
     try:
         effective = load_config(workspace=workspace, config_path=config_path).diagnostics
     except ConfigError:
+        # 诊断配置损坏不能挡住 Agent 启动：降级用环境变量级别，业务配置
+        # 的严格校验仍在 Host 内部做，这里只求日志先跑起来。
         level = os.environ.get("HARNESS_LOG_LEVEL", "info")
         effective = DiagnosticsSettings(
             level=level if level in {"debug", "info", "warn", "error"} else "info"

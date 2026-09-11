@@ -250,6 +250,11 @@ export class RunFeature {
     )
   }
 
+  /**
+   * 启动 Run 并挂三条异步链：accepted 确认受理（失败立即收敛为 failed）、
+   * events 消费事件流（终态事件经 reducer 清掉 activeRun）、completion 收敛终态。
+   * 三条链都以 runId 做守卫，旧 Run 的迟到信号一律丢弃。
+   */
   async startTypedRun(
     input: RunInput,
     ctx: FeatureContext,
@@ -348,6 +353,7 @@ export class RunFeature {
     }
   }
 
+  /** 向 Host 请求取消并等待确认；确认失败时把当前 Run 标记为 failed，避免永远卡在 cancelling。 */
   async cancelActiveRun(
     ctx: FeatureContext,
     onAbandonInteraction: () => void,

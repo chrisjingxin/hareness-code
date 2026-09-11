@@ -397,7 +397,11 @@ class AgentExecutionBinding:
         now_ms: int,
         usage: Mapping[str, int] | None = None,
     ) -> "AgentExecutionBinding":
-        """只更新生命周期字段，身份字段始终保持不变。"""
+        """只更新生命周期字段，身份字段始终保持不变。
+
+        合法路径只有 PENDING→RUNNING→终态，以及未启动直接 CANCELLED；
+        终态封口后一律拒绝，保证 Run 历史不会被事后改写。
+        """
         if self.status.terminal:
             raise ExecutionBindingError("EXECUTION_ALREADY_TERMINAL")
         if status is ExecutionStatus.RUNNING and self.status is not ExecutionStatus.PENDING:

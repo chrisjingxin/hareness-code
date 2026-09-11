@@ -22,6 +22,8 @@ from harness_agent.compose.models import (
     TaskStatus,
 )
 
+# fix 轮次先自增再与预算比较，budget=2 实际放行两轮修复；超出即 blocked，
+# 防止 Build↔Verify/Review 无限循环把 Run 卡死。
 VERIFY_FIX_BUDGET = 2
 REVIEW_FIX_BUDGET = 2
 SCHEMA_INVALID_RETRY_ALLOWED = 1

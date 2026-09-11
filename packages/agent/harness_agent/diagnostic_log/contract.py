@@ -23,6 +23,8 @@ _SCHEMA: dict[str, Any] = json.loads(_SCHEMA_BYTES.decode("utf-8"))
 _METADATA: dict[str, Any] = _SCHEMA["x-harness-diagnostic"]
 _RECORD_VALIDATOR = Draft202012Validator({"$ref": "#/$defs/record", "$defs": _SCHEMA["$defs"]})
 _SENSITIVE_KEY = re.compile(r"api[_-]?key|authorization|cookie|credential|password|secret|token", re.I)
+# 脱敏在落盘前做：字段名撞上敏感词就直接拒绝（写后清理不可靠）。
+# token 计数是唯一豁免——"token"字样在这里是统计含义，不是凭据。
 _ALLOWED_TOKEN_COUNT_KEYS = {
     "input_tokens",
     "output_tokens",

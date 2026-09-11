@@ -265,6 +265,8 @@ class ContextLifecycle:
                 content=_environment_text(spec, self.workspace, self.home),
             ),
         ]
+        # 沙箱内读不到宿主的 AGENTS/Skill 目录；强行启用只会得到空块，还会
+        # 诱导读取宿主路径，所以这两类低可信来源在沙箱下整体省略。
         if spec.enable_memory and not bool(getattr(spec.execution, "sandbox_enabled", False)):
             blocks.extend(self._agent_blocks())
         if spec.enable_skills and not bool(getattr(spec.execution, "sandbox_enabled", False)):

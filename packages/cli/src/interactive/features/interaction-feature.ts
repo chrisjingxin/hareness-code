@@ -73,6 +73,8 @@ export class InteractionFeature {
         item.timerId = timerId
       }
 
+      // 同一 Run 可能连续发来多个请求，但界面一次只能展示一个；后来的先进队列，
+      // 当前这个被响应/超时/废弃后由 promoteQueuedInteraction 顶上。
       if (this.pendingInteraction) {
         this.queuedInteractions.push(item)
       } else {
@@ -254,7 +256,7 @@ export class InteractionFeature {
     ctx.commit(current => markInteractionResponded(current, pending.request.request_id, status))
   }
 
-  /** 取消/超时/关闭时使用的 fail-closed 响应。 */
+  /** 取消/超时/关闭时使用的兜底响应：拿不到用户决定就按最保守的决定回复。 */
   private buildFallbackInteractionResponse(request: InteractionRequestEnvelope): InteractionResponse {
     if (request.type === "approval") {
       return { request_id: request.request_id, type: "approval", decision: "reject" }

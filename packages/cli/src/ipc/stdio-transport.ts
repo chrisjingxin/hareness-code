@@ -58,7 +58,7 @@ export class StdioRpcTransport implements RpcTransport {
       try {
         this.queue.push(JSON.parse(line))
       } catch {
-        // 由 AgentClient 的统一协议校验 seam 报错，transport 不解释消息语义。
+        // transport 不解释消息语义：非法 JSON 原样入队，由 AgentClient 的统一协议校验报错。
         this.queue.push(line)
       }
     }

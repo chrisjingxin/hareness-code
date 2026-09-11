@@ -114,7 +114,7 @@ function parseSkillsCommand(args: string[], cwd: string): Command {
   throw new Error("Usage: harness skills <list|inspect|enable|disable|trust|install|update|remove|market>")
 }
 
-/** 解析需要一个 canonical Skill id 的管理命令。 */
+/** 解析需要一个规范化 Skill id 的管理命令。 */
 function skillIdCommand(args: string[], cwd: string, configPath: string | undefined, kind: "skills.inspect" | "skills.remove" | "skills.set_enabled"): Command {
   return { kind, cwd, configPath, params: { id: positionalValue(args, `${kind} requires a Skill id`) } }
 }

@@ -73,8 +73,8 @@ class WorkspaceExecutionResourcePool:
 
     def __init__(self) -> None:
         """创建惰性 workspace 资源表；不同 Host 不共享此 Pool。"""
-        # Keep every generation until its borrowers are gone.  Re-acquiring a
-        # key while the previous handle drains must never orphan that handle.
+        # 旧一代 handle 只要还有借用者就保留：上一个 handle 排空期间
+        # 重新 acquire 同一 key，绝不能让它被孤儿化。
         self._resources: dict[str, list[SharedResourceHandle[ExecutionContext]]] = {}
         self._lock = asyncio.Lock()
 
@@ -102,8 +102,8 @@ class WorkspaceExecutionResourcePool:
                     close=context.aclose,
                 )
                 generations.append(resource)
-            # Keep selection and borrowing in one pool boundary.  A producer
-            # cannot drain this generation between these two operations.
+            # 选资源和借用在同一个锁内完成，生产者无法在两步之间
+            # 把这一代资源排空。
             return await resource.acquire()
 
     async def invalidate(self, key: str, *, reason: str) -> None:

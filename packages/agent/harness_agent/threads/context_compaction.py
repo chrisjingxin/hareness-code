@@ -1,4 +1,9 @@
-"""统一的自动、手动和 overflow 完整压缩领域服务。"""
+"""自动、手动和 overflow 共用的完整压缩服务。
+
+三种触发走同一条闭环：先规划（micro 只把旧工具结果换成预览，full 把旧历史
+换成结构化摘要），收益达标才生成 Artifact/Summary/Checkpoint，并在单个事务
+里提交；任何一步不达标或失败都保持旧投影不动。
+"""
 
 from __future__ import annotations
 
@@ -144,7 +149,12 @@ class _MicroPlan:
 
 
 class ContextCompactor:
-    """执行确定性 micro、结构化 full、校验和单事务提交。"""
+    """执行压缩闭环：micro/full 规划、收益率校验和单事务提交。
+
+    micro 只把旧的大工具结果换成预览 Artifact；full 还会调用摘要模型并把
+    旧历史折成一条摘要。两档都只有在真的省出空间后才提交，提交不了就
+    返回 skipped/failed，让调用方继续用旧投影。
+    """
 
     def __init__(
         self,
@@ -428,6 +438,8 @@ class ContextCompactor:
 
         known_artifacts = set(artifact_references(messages))
         summary_refs = set(_ARTIFACT_REFERENCE_PATTERN.findall(summary))
+        # 摘要只能引用输入历史里已存在的 Artifact；模型编造的引用会在提交前
+        # 拦截，否则投影会指向永远读不到的归档文件。
         if not summary_refs.issubset(known_artifacts):
             return await self._failed(
                 request,
@@ -649,7 +661,11 @@ class ContextCompactor:
         previous_state: ContextState,
         reason: str,
     ) -> CompressionResult:
-        """失败只记录自动熔断计数，不创建 Artifact/Summary/Checkpoint。"""
+        """失败只记录自动熔断计数，不创建 Artifact/Summary/Checkpoint。
+
+        manual 失败不计入熔断：它是用户显式请求，连续失败不代表自动压缩
+        不可用；auto/overflow 连续失败三次才打开熔断，避免反复烧摘要调用。
+        """
         state = previous_state
         if request.trigger in {"auto", "overflow"}:
             failures = previous_state.failures + 1
@@ -802,6 +818,7 @@ class ContextCompactor:
     def _keep_turns(
         self, trigger: CompressionTrigger, pressure: ContextPressureSnapshot
     ) -> int:
+        """micro 规划保留的最近轮数；高水位只留 1 轮，多挤出压缩空间。"""
         if trigger == "manual":
             return 2
         return 1 if pressure.occupancy_ratio >= self._pressure_policy.config.hard_ratio else 2
@@ -1000,6 +1017,10 @@ def _reclaimable_tool_pressure(
 
 
 def _cutoff_for_recent_turns(messages: Sequence[BaseMessage], keep_turns: int) -> int:
+    """按 HumanMessage 分轮，返回最近 keep_turns 轮的起点。
+
+    历史不足 keep_turns 轮时返回 0：没有可压缩的前缀，调用方应直接放弃。
+    """
     starts = [
         index for index, message in enumerate(messages) if isinstance(message, HumanMessage)
     ]
@@ -1128,6 +1149,7 @@ def _stable_checkpoint_id(
 
 
 def _saves_enough(before_tokens: int, after_tokens: int) -> bool:
+    # 低于 20% 收益时，一次摘要模型调用加一次检查点提交不划算，宁可保持现状。
     return (
         _reduces_context(before_tokens, after_tokens)
         and (before_tokens - after_tokens) / before_tokens >= MIN_SAVINGS_RATIO

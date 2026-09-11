@@ -147,6 +147,8 @@ class ControlLease:
                     self._holder_connection_id == connection_id
                     and self._holder_attachment_id == attachment_id
                 ):
+                    # 同一 holder 重复 acquire 视为幂等成功，客户端网络重试
+                    # 不应被误判成控制权冲突。
                     return self._snapshot()
                 raise ControlLeaseError("CONTROL_BUSY", retryable=True)
             if connection_id == self._owner_connection_id:

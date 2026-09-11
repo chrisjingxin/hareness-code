@@ -1,4 +1,4 @@
-/** Interactive Core 的 remote-owned seam 兼容别名转发与导向文件。 */
+/** 兼容别名文件：把 AgentGateway 相关类型与实现以旧名转发，老 import 不用改。 */
 
 export type {
   AgentGateway as InteractiveAgentPort,

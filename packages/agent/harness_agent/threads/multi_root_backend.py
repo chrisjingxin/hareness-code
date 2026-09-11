@@ -64,6 +64,8 @@ class ExtRootBackendRouter:
         with self._lock:
             backend = self._cache.get(root_id)
             if backend is None:
+                # inherit_env=False：扩展根不继承宿主环境变量，统一走显式
+                # 注入的 env，避免额外根拿到主进程的完整运行环境。
                 backend = LocalShellBackend(
                     root_dir=root.path,
                     virtual_mode=True,

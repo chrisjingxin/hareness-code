@@ -41,7 +41,7 @@ export type WorkspaceFilePreview = {
   readonly path: string
   readonly name: string
   readonly content: string
-  /** canonical 语言 id；未知为 null（plaintext）。 */
+  /** 规范化语言 id；未知为 null（plaintext）。 */
   readonly language: string | null
   readonly sizeBytes: number
   /** 展示行数（可能因 2000 行截断而小于真实行数）。 */

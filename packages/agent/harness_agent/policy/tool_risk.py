@@ -126,9 +126,10 @@ def get_mode_permission(kind: ToolKind, mode: str) -> str:
 
     Args:
         kind: 工具风险类别。
-        mode: 审批模式名称（plan/default/auto-edit/yolo）。
+        mode: 审批模式名称（plan/default/auto-edit/auto/yolo）。
 
     Returns:
-        "allow"、"ask" 或 "deny"。
+        "allow"、"ask"、"deny"；auto 模式下部分类别返回 "filter"，
+        表示交由 AUTO 四层过滤器裁决。
     """
     return KIND_MODE_PERMISSION[kind][mode]

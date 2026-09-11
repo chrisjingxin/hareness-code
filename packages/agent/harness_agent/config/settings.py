@@ -54,6 +54,9 @@ _SAFE_ACCOUNT_RE = re.compile(r"^harness-settings-v1-[0-9a-f]{64}$")
 _SAFE_SETTING_ID_RE = re.compile(r"^setting-[0-9a-f]{32}$")
 _SAFE_SCOPE_DIGEST_RE = _DIGEST_RE
 _SETTINGS_POLICY_VERSION = "settings-policy-v1"
+# Plugin 声明的 envVar 最终会注入 MCP/Hook/LSP 子进程；下面这些名字能控制
+# 子进程的加载器或解释器（LD_*/NODE_OPTIONS 等），放行等于允许 Settings 写入
+# 变相代码执行，所以在声明阶段直接拒绝。
 _PROCESS_CONTROL_ENV_NAMES = frozenset(
     {
         "PATH",
@@ -1430,6 +1433,8 @@ class SettingsSnapshot:
         diagnostics: Sequence[str] = (),
     ) -> Self:
         """构造只属于当前 Host/generation 的内存快照。"""
+        # generation 用每次加载都不同的随机值：wire 摘要只暴露它，调用方
+        # 能区分两次快照，却拿不到任何 setting 内容或 ID。
         return cls(
             "loaded",
             revision,
@@ -3320,6 +3325,8 @@ def scope_binding_digest(
     else:
         if workspace is None:
             raise SettingsError("SETTINGS_WORKSPACE_SCOPE_REQUIRED", field="scope")
+        # 词法路径和 realpath 都进绑定：同一目录换个 symlink 路径访问就是
+        # 另一个 workspace 凭据，防止借路径别名复用或串用已有绑定。
         payload = {
             "domain": "harness-settings-workspace-v1",
             "workspace_identity": _path_identity(workspace),

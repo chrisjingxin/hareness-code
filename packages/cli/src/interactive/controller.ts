@@ -29,7 +29,7 @@ export class InteractiveControllerImpl implements InteractiveController {
   private closed = false
   private compactInFlight = false
 
-  // 九大 Feature 子模块实作
+  // 九个 Feature 子模块各管一块业务；Controller 只做路由、状态组装与生命周期。
   private readonly catalogFeature = new CatalogFeature()
   private readonly skillFeature = new SkillFeature()
   private readonly mcpFeature = new McpFeature()
@@ -300,6 +300,7 @@ export class InteractiveControllerImpl implements InteractiveController {
       onAccepted: () => { void this.catalogFeature.refreshThreadCatalog(this.featureContext) },
     })
   }
+  /** Run 终态后的统一收尾；有 Goal 工作且功能开启时交给 GoalFeature，否则走计划模式的恢复流程。 */
   private finishRun(
     actualModel?: ModelProfile,
     context?: Record<string, unknown>,
@@ -651,6 +652,7 @@ export class InteractiveControllerImpl implements InteractiveController {
   }
   /** 重置 conversation scope（Thread/Timeline/模型与 Skill 选择/Interaction/Confirmation/sequence），不清全局 Catalog。 */
   private resetConversationScope(nextState: InteractiveState = clearThread(this.state)): void {
+    // 递增 epoch 让旧 Thread 上还在飞的异步结果作废，防止迟到响应写进新会话。
     this.threadFeature.threadEpoch += 1
     this.state = nextState
     this.modelFeature.requestedModelProfileId = null

@@ -212,6 +212,8 @@ class SkillRegistry:
         self._builtin_definitions: dict[str, BuiltinSkillDefinition] = {}
         self._builtin_bundle_root: Path | None = None
         self._builtin_shared_resources: dict[str, bytes] = {}
+        # manifest 与资源在扫描期整份读进内存并按 digest 固化：之后 load
+        # 只查内存快照，磁盘上的后续修改影响不了已受理的 Run。
         self._snapshot_manifests: dict[str, bytes] = {}
         self._snapshot_resources: dict[str, dict[str, bytes]] = {}
         self._records, self.diagnostics = self._scan()

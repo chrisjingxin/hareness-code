@@ -46,8 +46,11 @@ def is_provider_rate_limited(error: BaseException) -> bool:
 
 def is_provider_transient(error: BaseException) -> bool:
     """只识别可恢复的 provider 响应/传输故障。"""
+    # 取消必须原样传播，不能被重试逻辑当成"临时故障"吞掉。
     if isinstance(error, asyncio.CancelledError):
         return False
+    # 模型偶尔会吐出结构错误的 tool call；重问一次常能得到合法调用，
+    # 所以归为可重试而不是终态失败。
     if getattr(error, "code", None) == "MALFORMED_TOOL_CALL":
         return True
     status = provider_status_code(error)

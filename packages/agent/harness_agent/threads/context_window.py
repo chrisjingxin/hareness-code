@@ -104,7 +104,11 @@ class ContextUpdate:
 
 
 class ContextWindowMiddleware(AgentMiddleware):
-    """在模型边界接入唯一的 ContextCompactor。"""
+    """在模型边界接入唯一的 ContextCompactor。
+
+    压缩策略只有 compactor 里的这一份；middleware 只负责投影校验、事件发布
+    和 overflow 单次重试，不自己判断预算，也不生成摘要。
+    """
 
     def __init__(
         self,
@@ -194,6 +198,8 @@ class ContextWindowMiddleware(AgentMiddleware):
         thread_id = _thread_id(request)
         ordered_tools = _ordered_request_tools(list(request.tools or ()))
         estimated = _estimate_request_tokens(request, ordered_tools)
+        # 调用类型由 Run 生命周期给出：只有新一轮对话的第一步才带真实空闲
+        # 时长，工具执行之间的调用不允许用间隔冒充空闲触发压缩。
         call_type, idle_duration_ms = _next_model_call(request.runtime)
 
         prepared = list(request.messages)
@@ -591,6 +597,8 @@ class ContextWindowMiddleware(AgentMiddleware):
         idle_duration_ms: int | None = None,
     ) -> ContextPressureSnapshot:
         """按当前投影测量可回收工具压力。"""
+        # 最近两轮固定不算可回收：刚产生的工具结果是模型本轮推理的依据，
+        # 压掉它们换来的 token 换不回执行能力。
         count, tokens = _reclaimable_tool_pressure(
             messages,
             keep_turns=2,

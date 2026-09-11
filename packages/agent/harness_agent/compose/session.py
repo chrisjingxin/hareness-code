@@ -110,6 +110,8 @@ def parse_compose_slash(message: str) -> tuple[str, str] | None:
 
 def is_proceed_message(message: str) -> bool:
     """用户是否明确要求结束当前阶段、进入下一阶段。"""
+    # 薄流程不靠模型判断阶段推进；这里用固定短语启发式兜底，
+    # 模型生成或用户手打的等义说法都收敛成同一个推进信号。
     normalized = " ".join(message.strip().lower().split())
     if not normalized:
         return False
@@ -318,6 +320,8 @@ class ComposeSession:
     ) -> ComposeSessionRecord:
         """跑当前阶段；产出物就绪则请用户确认，确认后同一轮进入下一阶段。"""
         if depth > 4:
+            # 正常一轮 Turn 只会连续确认两三个文档阶段；超过说明确认回调
+            # 在反复宣称"可进入下一阶段"，停下来等用户下一轮输入更安全。
             return record
         if stage in {"implement", "review"}:
             return await self._run_implement_and_review(request, record)

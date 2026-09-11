@@ -166,6 +166,8 @@ def normalize_rubric_event(
                 expected_criteria=expected_criteria,
             )
         except GoalStoreError:
+            # satisfied 必须严格：覆盖校验失败就上抛，绝不能让不可靠的
+            # grader 输出伪装成全部通过；非 satisfied 才降级 best-effort。
             if result == "satisfied":
                 raise
             criteria = _best_effort_criteria(

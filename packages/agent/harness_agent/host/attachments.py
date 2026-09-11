@@ -148,6 +148,8 @@ class AttachmentManager:
         """认证 attachment 后，将文本帧交给 Host 的 protocol dispatcher。"""
         connection: ProtocolConnection | None = None
         writer: asyncio.Task[None] | None = None
+        # 有界发送队列给慢消费者设了上限：队列满直接报错而不是无限堆积，
+        # 防止一个卡住的 attached 连接拖垮整个 Host 的内存。
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=64)
         record: _AttachmentRecord | None = None
 

@@ -77,7 +77,7 @@ export type CommandAvailability =
   | { state: "disabled"; reason: string }
   | { state: "hidden"; reason: string }
 
-/** 解析成功后携带 canonical 名称、规范化参数和受保护的 Plugin 原文。 */
+/** 解析成功后携带标准名称、规范化参数和受保护的 Plugin 原文。 */
 export type SlashCommand = {
   id: string
   name: string
@@ -145,7 +145,7 @@ export class CommandRegistry {
     this.definitions = [...definitions]
   }
 
-  /** 通过 canonical ID 获取定义，供执行层避免按名称另建特殊分支。 */
+  /** 通过标准 ID 获取定义，供执行层避免按名称另建特殊分支。 */
   get(id: string): CommandDefinition | undefined {
     return this.definitionsById.get(id)
   }
@@ -192,7 +192,7 @@ export class CommandRegistry {
       .filter((entry): entry is { definition: CommandDefinition; availability: Exclude<CommandAvailability, { state: "hidden" }> } => entry.availability.state !== "hidden")
   }
 
-  /** 用候选名称的最小编辑距离给未知命令提供少量可执行的 canonical 建议。 */
+  /** 用候选名称的最小编辑距离给未知命令提供少量可执行的标准建议。 */
   suggest(name: string, limit = 3): readonly CommandDefinition[] {
     const query = normalizeCommandName(name)
     if (!query) return []

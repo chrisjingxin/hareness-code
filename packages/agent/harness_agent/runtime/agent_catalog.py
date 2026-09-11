@@ -1024,10 +1024,9 @@ def _parse_qwen_agent(
         if "disallowedTools" in raw
         else set()
     )
-    # Qwen omits tools to inherit its host tool registry.  A Plugin Agent is
-    # an untrusted capability request in Harness, so the adapter narrows that
-    # omission to the canonical read-only set instead of inheriting writes,
-    # Shell, MCP or delegation by accident.
+    # Qwen 语义里省略 tools 表示继承宿主工具表；但 Plugin Agent 在 Harness
+    # 中只是不可信的能力请求，不能因此意外继承写文件、Shell、MCP 或委派，
+    # 所以这里把省略收敛为 canonical 只读集合。
     if not allowed:
         allowed = set(FILE_READ_TOOL_NAMES)
     policy_id = f"{agent_id}-qwen"

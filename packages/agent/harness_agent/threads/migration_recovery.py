@@ -105,6 +105,8 @@ def _offline_settle_attempt_sync(path: Path) -> str:
             return "CHECKPOINT_MIGRATION_ATTEMPT_MISSING"
         return "OK_NO_ATTEMPT"
     if manifest.is_settled:
+        # 已收敛的 attempt 不再改库，只复核当前库仍是当初登记的版本，
+        # 防止数据库在收敛后被替换而无人察觉。
         if manifest.settled_database is None or not path.is_file():
             return "CHECKPOINT_MIGRATION_STATE_INVALID"
         connection = sqlite3.connect(path)
@@ -247,7 +249,8 @@ def _offline_settle_attempt_sync(path: Path) -> str:
         _migration_attempt_staging_path(path),
     ):
         _migration_unlink_strict_marker(staging_path)
-    # 封口 manifest。
+    # 先用 old_status 做 CAS 封口 manifest，再清理：并发或重试的恢复方
+    # 只有看到 settled 记录才不会把已收敛状态重新当 active 处理。
     settled_payload = _migration_build_attempt_manifest_payload(
         status="settled",
         database=path.name,
@@ -268,7 +271,8 @@ def _offline_settle_attempt_sync(path: Path) -> str:
     _migration_write_attempt_manifest(
         path, manifest_path, settled_payload, old_status=manifest.status,
     )
-    # 清 state、poison、manifest。
+    # 收敛事实已通过 manifest 的 CAS 落定，残留 marker 统一清空，
+    # 数据库旁边不留下任何让后续启动误判的迁移痕迹。
     _migration_unlink_strict_marker(state_path)
     _migration_unlink_strict_marker(_migration_poison_path(path))
     _migration_unlink_strict_marker(manifest_path)

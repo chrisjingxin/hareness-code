@@ -616,8 +616,8 @@ class WorkspaceRootRegistry:
         if scope == "once":
             assert run_id is not None
             self._once[(run_id, str(directory))] = root
-            # once 同时也要能被 resolve 匹配；临时放入 _extra 会在 consume 时清理
-            # 设计：once 只在 _once 中，resolve 通过 _match_extra_or_once 查找
+            # once 根只存放在 _once 中，resolve 经 _match_extra_or_once 查找；
+            # 消费后即失效，同目录再次访问会重新走目录信任审批。
         else:
             self._extra[root.root_id] = root
         return root

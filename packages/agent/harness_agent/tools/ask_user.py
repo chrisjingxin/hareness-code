@@ -70,10 +70,10 @@ def _validate_questions(questions: list[Question]) -> None:
     """在触发中断前校验 ask_user 问题结构。
 
     Args:
-        questions: Question definitions provided to the `ask_user` tool.
+        questions: 提供给 `ask_user` 工具的问题定义。
 
     Raises:
-        ValueError: If the questions list or an individual question is invalid.
+        ValueError: 问题列表为空、超过上限或单个问题结构非法时抛出。
     """
     if not questions:
         msg = "ask_user requires at least one question"
@@ -116,22 +116,22 @@ def _parse_answers(
 ) -> Command[Any]:
     """将 interrupt 恢复数据转换为携带 ToolMessage 的 ``Command``。
 
-    Supports explicit status signaling from the adapter:
+    adapter 会显式传入状态：
 
-    - `answered` (default): consume provided `answers`
-    - `cancelled`: synthesize `(cancelled)` answers
-    - `error`: synthesize `(error: ...)` answers
+    - ``answered``（默认）：使用给出的 ``answers``
+    - ``cancelled``：合成 ``(cancelled)`` 答案
+    - ``error``：合成 ``(error: ...)`` 答案
 
-    Malformed payloads are converted into explicit error answers instead of
-    silently defaulting to `(no answer)`.
+    畸形 payload 一律转成显式 error 答案，而不是静默当成 ``(no answer)``
+    ——否则模型会把"没收到回答"误读成用户确认过。
 
     Args:
-        response: Raw value returned by `interrupt()`.
-        questions: The questions that were asked.
-        tool_call_id: Originating tool call ID for the `ToolMessage`.
+        response: ``interrupt()`` 返回的原始恢复值。
+        questions: 提出的问题列表。
+        tool_call_id: 发起本次调用的工具调用 ID，用于生成 ``ToolMessage``。
 
     Returns:
-        `Command` containing a formatted `ToolMessage` with Q&A pairs.
+        携带 Q&A 文本 ``ToolMessage`` 的 ``Command``。
     """
     status: str = "answered"
     error_text: str | None = None
@@ -220,9 +220,8 @@ def _parse_answers(
 class AskUserMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
     """为 Agent 提供 ask_user 工具的交互式中间件。
 
-    This middleware adds an `ask_user` tool that allows agents to ask the user
-    questions during execution. Questions can be free-form text or multiple choice.
-    The tool uses LangGraph interrupts to pause execution and wait for user input.
+    注册一个 `ask_user` 工具，让 Agent 在执行中向用户提问；问题可以是自由
+    文本或选择题。工具借助 LangGraph interrupt 暂停图的执行，等用户作答后恢复。
     """
 
     def __init__(
@@ -234,10 +233,10 @@ class AskUserMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
         """初始化追问中间件，并注册供模型调用的 ask_user 工具。
 
         Args:
-            system_prompt: System-level instructions injected into every LLM
-                request to guide `ask_user` usage.
-            tool_description: Description string passed to the `ask_user` tool
-                decorator, visible to the LLM in the tool schema.
+            system_prompt: 注入到每次 LLM 请求的系统级说明，约束 `ask_user`
+                的使用方式。
+            tool_description: 传给 `ask_user` 工具装饰器的描述文本，
+                出现在模型可见的工具 schema 中。
         """
         super().__init__()
         self.system_prompt = system_prompt
@@ -251,11 +250,11 @@ class AskUserMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
             """向用户提出一个或多个问题，并以中断等待答案。
 
             Args:
-                questions: Questions to present to the user.
-                tool_call_id: Tool call identifier injected by LangChain.
+                questions: 要呈现给用户的问题列表。
+                tool_call_id: 由 LangChain 注入的工具调用标识。
 
             Returns:
-                `Command` containing the parsed user answers as a `ToolMessage`.
+                携带解析后用户答案 ``ToolMessage`` 的 ``Command``。
             """
             _validate_questions(questions)
             ask_request = AskUserRequest(
@@ -283,7 +282,7 @@ class AskUserMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
         """向同步模型调用注入 ask_user 使用约束。
 
         Returns:
-            Model response from the wrapped handler.
+            内层 handler 返回的模型响应。
         """
         if request.system_message is not None:
             new_system_content = [
@@ -307,7 +306,7 @@ class AskUserMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
         """向异步模型调用注入 ask_user 使用约束。
 
         Returns:
-            Model response from the wrapped handler.
+            内层 handler 返回的模型响应。
         """
         if request.system_message is not None:
             new_system_content = [

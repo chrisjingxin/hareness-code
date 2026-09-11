@@ -257,6 +257,7 @@ class AgentDelegator:
             command.task,
             command.timeout_seconds,
         )
+        # 幂等键命中时要求四个字段完全一致，防止复用旧结果去回答新任务。
         async with self._lock:
             completed = self._completed.get(command.idempotency_key)
             if completed is not None:
@@ -372,6 +373,8 @@ class AgentDelegator:
                 if future in waiters:
                     waiters.remove(future)
                 elif future.done():
+                    # future 在两段锁之间刚被交接给我们；既然已决定放弃
+                    # 等待，就把这个槽位原样还回去，避免并发额度泄漏。
                     self._release_slot_locked(parent_execution_id)
             if cancel_task in done:
                 raise asyncio.CancelledError

@@ -1,3 +1,9 @@
+/**
+ * TUI 表现层 Adapter：把共享 InteractiveController 的领域快照与终端自己的表现
+ * 状态（草稿、Slash/@ 菜单、浮层、侧栏、通知）合并成一份只读 snapshot 交给
+ * React 渲染。用户的键盘/鼠标事件先落到这里的语义 intent：能进领域的转给
+ * Controller，纯表现的留在本地，表现状态绝不写回 Controller。
+ */
 import type { AgentSummary, ModelProfile, ThreadSummary, TurnSummary } from "@za38/protocol"
 
 import type { InteractiveController, InteractiveIntent, InteractiveResult, InteractiveSnapshot, IntentOutcome, PresentationEffect } from "../../interactive/types"
@@ -184,7 +190,7 @@ function isDirectWorkspaceMutationTool(name: string): boolean {
   return DIRECT_WORKSPACE_MUTATION_TOOLS.has(normalizedWorkspaceToolName(name))
 }
 
-/** 工具身份包含 run 与 child provenance，避免不同 execution 的同名 call 被合并。 */
+/** 工具身份由 run/子执行/agent 层级拼成：不同执行里的同名工具是不同变更，不能合并去重。 */
 function workspaceToolKey(tool: ToolCard): string {
   return [tool.runId, tool.executionId ?? "root", tool.activityId ?? "root", tool.agentId ?? "", tool.id].join("\u0000")
 }
@@ -820,7 +826,7 @@ class TuiAdapterImpl implements TuiAdapter {
   }
 
   private scrollFilePreview(delta: number): void {
-    // 阶段四浮层内滚动
+    // 占位：预览浮层的滚动暂未接通，保留 intent 以免上游报未知动作。
   }
 
   private insertFileRefToDraft(path: string): void {

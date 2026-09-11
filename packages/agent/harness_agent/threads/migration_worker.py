@@ -38,8 +38,8 @@ def main() -> int:
             )
         )
     except BaseException:
-        # Parent classifies the database/state facts after this process has
-        # exited.  Do not print exception text, paths, or configuration data.
+        # 父进程要在本进程退出后才根据数据库/状态事实归类结果。这里不打印
+        # 异常文本、路径或配置，只回显 CHECKPOINT_ 稳定码。
         error = sys.exc_info()[1]
         code = str(error).splitlines()[0][:160] if error is not None else ""
         if not code.startswith("CHECKPOINT_"):

@@ -224,6 +224,8 @@ class LocalTextMutationBackend:
             self._require_identity(current, expected_content_identity)
             raw = _encode_content(proposed_content, expected=current.identity)
             original_mode = stat.S_IMODE(target.stat(follow_symlinks=False).st_mode)
+            # 临时文件必须建在目标同目录：rename 的原子性只保证同一文件
+            # 系统内，跨目录/跨挂载点的替换会出现中间状态。
             fd, temporary_name = tempfile.mkstemp(prefix=".harness-text-", dir=target.parent)
             try:
                 os.chmod(temporary_name, original_mode)

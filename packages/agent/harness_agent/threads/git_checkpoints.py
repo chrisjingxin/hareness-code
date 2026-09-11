@@ -132,6 +132,8 @@ class GitCheckpointService:
                 capture_output=True,
             )
 
+        # checkout-index 只覆盖目标树里存在的文件，不会删除目标树已移除的
+        # 文件；单独对比当前树与目标树，把多出来的文件删掉，恢复才完整。
         deleted_diff = self.compute_diff_stats(workspace_path, target_tree_oid, current_tree)
         for rel_path in deleted_diff["files"]:
             ls_check = subprocess.run(

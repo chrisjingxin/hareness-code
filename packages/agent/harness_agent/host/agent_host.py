@@ -336,15 +336,15 @@ class _AgentEngineArtifacts:
 
 
 class _AgentEngineSnapshotReservation:
-    """Keep the Host snapshot boundary from resolution through pool acquire."""
+    """占用 AgentEngine 快照锁的令牌：从解析 spec 到真正从池里取 Engine 期间不许别人重建快照。"""
 
     def __init__(self, lock: asyncio.Lock) -> None:
-        """The caller must have acquired ``lock`` before constructing this token."""
+        """调用方必须已持有 ``lock`` 才能构造这个令牌。"""
         self._lock = lock
         self._released = False
 
     async def release(self) -> None:
-        """Release the reservation exactly once on success, failure, or cancellation."""
+        """成功、失败或被取消都只释放一次，防止锁被重复归还。"""
         if self._released:
             return
         self._released = True
@@ -633,6 +633,8 @@ class AgentHost:
                 try:
                     line = await reader.readline()
                 except ValueError:
+                    # readline 超限后内部缓冲已无法对齐下一帧边界，只能断开；
+                    # 显式长度检查的超限帧读完后仍可继续收帧，所以走 continue。
                     await self.send_error(None, -32600, "JSON-RPC frame exceeds size limit")
                     break
                 if not line:
@@ -884,6 +886,8 @@ class AgentHost:
                     {"code": error_code, "retryable": False, "capability": required_capability},
                 )
             if method in CONTROLLED_OPERATIONS:
+                # 受控操作登记 permit 计数后，revoke/release 必须等它归零，
+                # 保证 holder 切换期间不会有旧 holder 的操作还在改状态。
                 async with self._control_lease.permit(connection.connection_id):
                     result = await handler(params, request_id)
             else:
@@ -1369,6 +1373,8 @@ class AgentHost:
             self._require_goal_run_capabilities(parsed.mode)
             persistence = await self._ensure_thread_persistence()
             goal = (await persistence.goal_store().inspect(parsed.thread_id)).goal
+            # continuation 绑定发起时的 goal revision：期间若发生过 mutation，
+            # 说明客户端看到的上下文已过期，拒绝执行而不是基于旧目标续跑。
             if (
                 goal is None
                 or goal.status != "active"
@@ -1407,6 +1413,8 @@ class AgentHost:
         if self._thread_persistence_enabled():
             persistence = await self._ensure_thread_persistence()
             revert_state = await persistence.get_thread_revert_state(parsed.thread_id)
+            # 受理新 Run 前必须先落定上一次 undo/redo 的挂起状态：新 Run 会追加
+            # 对话历史，基线不定就无法判定后续回放应该基于哪条历史线。
             if revert_state is not None:
                 reverted_turn_id, undo_mode, _redo_tree_oid = revert_state
                 if undo_mode == "code":
@@ -1577,11 +1585,9 @@ class AgentHost:
                 max_iterations=self._config.goal.max_iterations if goal_backed else 3,
                 grader_model_fingerprint=grader_fingerprint,
             )
-            # Policy resolution may narrow the source catalog to a role-level
-            # immutable view.  The Run must carry that exact view into the
-            # Context/virtual backend; otherwise a delegate could retain the
-            # unrestricted catalog even though its capability envelope was
-            # narrowed during spec resolution.
+            # Policy 解析会把 Skill catalog 收窄成角色级的只读视图，Run 必须
+            # 原样带上这份视图传给 Context/virtual backend；否则被代理执行的
+            # 子 Run 可能继续拿到收窄前的完整 catalog，越权调用未授权的 Skill。
             effective_registry = spec.skill_registry
             if command.requested_skill is not None:
                 requested_skill = self._prepare_requested_skill(
@@ -2610,7 +2616,11 @@ class AgentHost:
             raise self._run_rpc_error(exc) from exc
 
     async def _handle_goal_inspect(self, params: dict[str, Any], _id: str) -> dict[str, object]:
-        """返回 current/pending/latest evaluation；读取不取得 Thread maintenance 锁。"""
+        """读取 Goal 的 current/pending/latest evaluation。
+
+        纯只读操作，不需要排他访问，因此不去拿 Coordinator 的空闲 Thread 锁；
+        Run 运行中也可以随时查询。
+        """
         from harness_agent.goals.models import evaluation_to_wire, goal_to_wire, pending_to_wire
 
         parsed = GoalInspectParams.model_validate(params)
@@ -2653,7 +2663,11 @@ class AgentHost:
         }
 
     async def _handle_goal_mutate(self, params: dict[str, Any], _id: str) -> dict[str, object]:
-        """应用或排队 Goal lifecycle mutation，返回持久权威投影。"""
+        """应用或排队一条 Goal 生命周期变更。
+
+        Thread 空闲时立即生效，运行中则先落库排队。响应里的 goal/pending
+        直接来自持久层刚写入的最新状态，供客户端作为下一步 revision 的依据。
+        """
         from harness_agent.goals.models import GoalStoreError, goal_to_wire, pending_to_wire
 
         parsed = GoalMutateParams.model_validate(params)
@@ -2699,7 +2713,7 @@ class AgentHost:
         )
 
     async def _handle_compose_inspect(self, params: dict[str, Any], _id: str) -> dict[str, object]:
-        """只读投影 Compose Thread 的当前 Work Item；不触发分类或 typed 交互。"""
+        """只读查看 Compose Thread 当前进度；不触发分类，也不会向用户发提问。"""
         self._require_threads_capability()
         parsed = ComposeInspectParams.model_validate(params)
         persistence = await self._ensure_thread_persistence()
@@ -2713,7 +2727,7 @@ class AgentHost:
         return {"progress": projection}
 
     async def _handle_compose_abandon(self, params: dict[str, Any], _id: str) -> dict[str, object]:
-        """废弃当前薄进度；文档保留。"""
+        """废弃当前 Compose 进度，但对话历史保留不动。"""
         self._require_threads_capability()
         parsed = ComposeAbandonParams.model_validate(params)
         persistence = await self._ensure_thread_persistence()
@@ -2728,7 +2742,7 @@ class AgentHost:
         return {"progress": projection}
 
     def _compose_session(self, persistence: ThreadPersistence) -> ComposeSession:
-        """只读 Session；inspect/abandon 不跑 Grill。"""
+        """构造只读 Session；inspect/abandon 只看进度，不触发 Grill 质询。"""
         async def _noop_grill(request: object, slug: str) -> None:
             del request, slug
 
@@ -3060,7 +3074,10 @@ class AgentHost:
             self._apply_settings_snapshot_to_children()
 
     def _block_settings_consumers(self) -> None:
-        """当 Settings declaration/backend 不可验证时撤销相关 executable consumers。"""
+        """Plugin 的 Settings 无法验证时，把它贡献的 MCP/Hook/LSP 子进程全部停用。
+
+        宁可让功能不可用，也不能让子进程带着未审计的环境变量启动（fail closed）。
+        """
         blocked = self._settings_blocked_plugin_ids
         retained_mcp: list[McpServerConfig] = []
         blocked_mcp: set[str] = set()
@@ -4162,6 +4179,8 @@ class AgentHost:
         }
         if error.details is not None:
             data["details"] = error.details
+        # 表里只登记客户端需要区别对待的码；新增 Run 错误码未登记时统一落到
+        # 默认值，data 里的稳定 code 仍可供客户端分支判断。
         return RpcError(rpc_codes.get(error.code, -32004), error.code, data)
 
     async def _ensure_agent(self) -> Any | None:
@@ -4251,7 +4270,7 @@ class AgentHost:
         )
 
     async def _reserve_agent_engine_snapshot(self) -> _AgentEngineSnapshotReservation:
-        """Reserve the Host boundary shared by snapshot producers and engine acquires."""
+        """占用快照锁：快照的生产方（刷新 Skill/MCP/配置）和取 Engine 的调用方共用这道闸门。"""
         await self._agent_engine_snapshot_lock.acquire()
         return _AgentEngineSnapshotReservation(self._agent_engine_snapshot_lock)
 
@@ -4262,7 +4281,7 @@ class AgentHost:
         *,
         profile: AgentEngineProfile | None = None,
     ) -> tuple[AgentEngineLease | None, AgentEngine | None]:
-        """Resolve and acquire while the caller owns the Host snapshot reservation."""
+        """在调用方持有快照锁的前提下解析 Profile 并从池里取 Engine。"""
         self._load_config()
         config = self._config
         if config is None or config.model is None:
@@ -4386,7 +4405,7 @@ class AgentHost:
         *,
         reason: str,
     ) -> None:
-        """Invalidate old MCP profiles and reap idle resources within the update boundary."""
+        """把 MCP 快照已过时的 Profile 标记失效，并顺手回收空闲连接。"""
         pool = self._agent_engine_pool
         if pool is not None:
             await pool.invalidate(

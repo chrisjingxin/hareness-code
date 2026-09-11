@@ -368,6 +368,7 @@ def _context_commit_payload(
 
 
 def _context_artifact_from_row(row: Mapping[str, Any]) -> ContextArtifact:
+    """把 SQLite 行转回 ContextArtifact；旧库行的哈希和字节数允许为空。"""
     return ContextArtifact(
         artifact_id=str(row["artifact_id"]),
         kind=str(row["kind"]),
@@ -540,6 +541,8 @@ def _transcript_matches(
         allow_legacy_invalid: bool = False,
 ) -> bool:
     """判断重复追加是否是同一语义，而不是吞掉 Run ID 冲突。"""
+    # 大工具结果在库里只存 preview 加 artifact 引用；幂等重试必须按落库
+    # 时的形状比较，否则同一次追加会因为原文与 preview 不等被判为冲突。
     content_bytes = command.content.encode("utf-8")
     expected_artifact_id = (
         _transcript_artifact_id(
@@ -682,9 +685,9 @@ def _legacy_tool_calls(
         for call in (getattr(value, "tool_calls", None) or ())
         if isinstance(call, Mapping)
     ]
-    # LangChain places calls whose JSON arguments could not be decoded in
-    # ``invalid_tool_calls``.  They are still checkpoint facts and must remain
-    # visible as raw/invalid typed payload rather than disappearing.
+    # LangChain 把 JSON 参数解析失败的调用放进 invalid_tool_calls。这些
+    # 仍是 checkpoint 里的既成事实，必须以 raw/invalid 形态保留可见，
+    # 不能因为解析不出来就从记录里消失。
     raw_calls.extend(
         call
         for call in (getattr(value, "invalid_tool_calls", None) or ())

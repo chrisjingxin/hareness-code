@@ -126,6 +126,9 @@ class ComposeActivityStore:
             over_count = stats["count"] >= COMPOSE_ACTIVITY_MAX_RECORDS
             over_bytes = stats["total_bytes"] + row_bytes > COMPOSE_ACTIVITY_MAX_TOTAL_BYTES
             if over_count or over_bytes or bounded.kind == "truncation":
+                # 超限后不丢一半历史：写入唯一一条 truncation 标记并在
+                # 事务里检查 truncated_flag，保证同一 run 只有一条，
+                # Timeline 才能明确显示"之后的活动未保留"而不是静默缺段。
                 if not stats["truncated"]:
                     await self._insert(
                         ComposeActivityRecord(
@@ -245,6 +248,8 @@ class ComposeActivityStore:
         )
 
     class _Tx:
+        """借用调用方锁和连接的单写事务；异常回滚，锁始终释放。"""
+
         def __init__(self, store: ComposeActivityStore) -> None:
             self._store = store
 

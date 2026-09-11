@@ -181,7 +181,7 @@ function ApprovalForm(props: {
       requestId: interaction.requestId,
       patch: { kind: "approval-decision", value: next },
     })
-    // 拒绝是 fail-closed 安全动作，点击即生效；批准仍保留二次提交，避免误触写入。
+    // 拒绝是保守安全动作，点击即生效；批准仍保留二次提交，避免误触写入。
     if (next === "reject") await submitApproval(next)
   }
 

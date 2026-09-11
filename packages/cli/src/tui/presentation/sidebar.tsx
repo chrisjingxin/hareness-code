@@ -1,3 +1,8 @@
+/**
+ * TUI 侧边栏（检查器）：左侧常驻面板，聚合当前 Thread 标题、上下文占用、
+ * MCP 状态、工作区文件树与 Git 变更列表。状态全部来自 TuiAdapterSnapshot；
+ * 这里只做布局计算（按终端宽高分档：覆盖抽屉 / 停靠压缩 / 宽屏双列）与渲染。
+ */
 import type { ScrollBoxRenderable } from "@opentui/core"
 import type { ReactNode, RefObject } from "react"
 import type { InteractiveSnapshot } from "../../interactive/types"

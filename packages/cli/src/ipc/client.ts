@@ -1,4 +1,8 @@
-/** transport-neutral AgentClient：隐藏请求关联、校验、事件与 Interaction 生命周期。 */
+/**
+ * CLI/TUI/Web 与 Python sidecar 通信的统一 JSON-RPC 客户端。
+ * 请求配对、参数与结果校验、事件分发、Agent 反向发起的交互（审批/提问）
+ * 都收在这里；界面层只管调方法和收事件，不用关心底层走 stdio 还是 WebSocket。
+ */
 
 import {
   EventType,
@@ -92,6 +96,7 @@ import { AsyncQueue, type RpcTransport } from "./transport"
 
 export type { RpcTransport } from "./transport"
 
+/** 已发出、还在等响应的请求；响应到达或超时，二选一清理。 */
 type PendingRequest = {
   method: OperationName
   resolve: (value: unknown) => void
@@ -102,6 +107,7 @@ type PendingRequest = {
 export type PeerRequestHandler = (params: InteractionRequestEnvelope) => Promise<InteractionResponse> | InteractionResponse
 export type InteractionHandler = PeerRequestHandler
 
+/** 启动一次 Run 的入参；不传 threadId 表示开新线程。 */
 export type StartRunInput = {
   input: RunInput
   mode: InteractionMode
@@ -110,11 +116,13 @@ export type StartRunInput = {
   approvalMode?: ApprovalMode
 }
 
+/** Run 的三种终态：完成、取消、失败；completion 只兑现其中一种。 */
 export type RunCompletion =
   | { outcome: "completed"; event: Extract<EventEnvelope, { type: typeof EventType.RUN_COMPLETED }> }
   | { outcome: "cancelled"; event: Extract<EventEnvelope, { type: typeof EventType.RUN_CANCELLED }> }
   | { outcome: "failed"; event: Extract<EventEnvelope, { type: typeof EventType.RUN_FAILED }> }
 
+/** 一次进行中的 Run：accepted 在服务端受理后兑现，events 是增量事件流。 */
 export interface AgentRun {
   readonly ref: { threadId: string; runId: string }
   readonly accepted: Promise<void>
@@ -123,6 +131,7 @@ export interface AgentRun {
   cancel(): Promise<boolean>
 }
 
+/** 打开空闲线程拿到的快照，加上后续事件的订阅。 */
 export interface ThreadWatch {
   readonly snapshot: ThreadsOpenResult
   readonly events: AsyncIterable<EventEnvelope>
@@ -247,6 +256,8 @@ export class AgentClient {
     const closeListener = (error: Error) => fail(error)
     this.on("event", listener)
     this.on("close", closeListener)
+    // RUN_START 的 timeout 传 0（不限时）：受理可能包含 sidecar 冷启动，
+    // 耗时不可控；真正的失败走事件流或 accepted 的 rejection。
     const accepted = this.request(Method.RUN_START, {
       input: input.input,
       mode: input.mode,
@@ -271,7 +282,7 @@ export class AgentClient {
     }
   }
 
-  /** 原子读取空闲 Thread 并订阅之后的事件。 */
+  /** 先挂事件监听再发请求，快照与后续事件之间不会漏；仅限空闲线程。 */
   async watchThread(threadId: string): Promise<ThreadWatch> {
     const events = new AsyncQueue<EventEnvelope>()
     const listener = (event: EventEnvelope) => {
@@ -309,7 +320,7 @@ export class AgentClient {
     this.inboundRequests.delete(requestId)
   }
 
-  /** 发送带超时保护的请求，并返回对应 JSON-RPC result。 */
+  /** 发送请求并等待对应响应；timeoutMs 传 0 表示不限时（长任务用）。 */
   request<M extends OperationName>(
     method: M,
     params: OperationMap[M]["params"],
@@ -532,14 +543,14 @@ export class AgentClient {
     return this.request(Method.SETTINGS_REMOVE, params)
   }
 
-  /** 旧 Agent 不识别 v3.8 Settings/Plugin RPC 时，在发送未知 method 前 fail closed。 */
+  /** Settings RPC 是 v3.8 才加的；握手发现旧版本 sidecar 时直接报错，不发它不认识的方法。 */
   private ensureSettingsProtocolMinor(): void {
     if (this.initializedInfo && this.initializedInfo.protocol.minor < 8) {
       throw new Error("SETTINGS_PROTOCOL_MINOR_REQUIRED")
     }
   }
 
-  /** 旧 Agent 不识别 v3.8 Plugin RPC 时，在发送未知 method 前 fail closed。 */
+  /** Plugin RPC 是 v3.8 才加的；握手发现旧版本 sidecar 时直接报错，不发它不认识的方法。 */
   private ensurePluginProtocolMinor(): void {
     if (this.initializedInfo && this.initializedInfo.protocol.minor < 8) {
       throw new Error("PLUGIN_PROTOCOL_MINOR_REQUIRED")
@@ -620,7 +631,7 @@ export class AgentClient {
     await this.transport.close()
   }
 
-  /** 消费 transport 消息，并把 framing 之外的错误统一截断在协议 seam。 */
+  /** 持续读取 transport 消息；单帧解析失败只报 protocolError 不断连，读流本身出错才关闭。 */
   private async consumeMessages(): Promise<void> {
     try {
       for await (const message of this.transport.messages) {
@@ -682,7 +693,7 @@ export class AgentClient {
     }
   }
 
-  /** 有界记住本地已超时 ID，只屏蔽对应迟到响应而不吞未知帧。 */
+  /** 记住最近 256 个超时的请求 ID；它们的迟到响应直接丢弃，不再当成未知响应报错。 */
   private rememberTimedOutRequest(id: string): void {
     this.timedOutRequestIds.add(id)
     while (this.timedOutRequestIds.size > AgentClient.MAX_TIMED_OUT_REQUEST_IDS) {

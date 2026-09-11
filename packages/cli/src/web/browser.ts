@@ -19,7 +19,7 @@ export type BrowserOpenerOptions = {
 /**
  * 按平台启动默认浏览器；Promise 只在进程成功 spawn 后 resolve。
  *
- * 测试专用 seam：设置 `HARNESS_E2E_WEB_URL_FILE` 时，不启动系统浏览器，而是把
+ * 测试专用钩子：设置 `HARNESS_E2E_WEB_URL_FILE` 时，不启动系统浏览器，而是把
  * 页面 URL（含 UI token）写入该文件并立即 resolve，供 Playwright E2E 读取后
  * 自行导航。生产环境不设置该变量，行为与默认一致。
  */

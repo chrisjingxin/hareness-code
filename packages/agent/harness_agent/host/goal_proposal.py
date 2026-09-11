@@ -207,6 +207,8 @@ class GoalProposalRunAdapter:
             "goal.changed",
             {"reason": "proposal_applied", "goal": goal_to_wire(applied.goal)},
         )
+        # 返回 None 表示没有 adapter 自己的终态：RunCoordinator 会依据
+        # 持久层已 apply 的 Goal 状态统一收敛 Run 终态，避免两处判定不一致。
         return None
 
 

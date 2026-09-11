@@ -1,4 +1,8 @@
-/** transport-neutral JSON-RPC seam 与异步消息队列。 */
+/**
+ * RPC 传输的统一接口与异步消息队列。RpcTransport 只约定「收消息 / 发消息 /
+ * 关闭」三件事，不关心底层走 stdio 还是 WebSocket；AsyncQueue 是两端共用的
+ * 最小缓冲队列，支持正常结束与失败传播。
+ */
 
 import type { JsonRpcMessage } from "@za38/protocol"
 

@@ -1,7 +1,7 @@
 /**
  * 语法高亮 Hook：plain-first —— 未知/plaintext 语言、空代码与高亮失败
  * 一律直接返回 plain；成功结果走 Browser 侧 8 条 LRU 缓存（key =
- * canonical 语言 + 主题 + 代码哈希），避免重复文件反复触发 Worker。
+ * 规范化语言 id + 主题 + 代码哈希），避免重复文件反复触发 Worker。
  */
 
 import { useEffect, useState } from "react"

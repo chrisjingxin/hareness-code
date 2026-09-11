@@ -1,12 +1,12 @@
-"""Build/Compose 共用的 execution stream deep module。
+"""Build/Compose 共用的执行流核心。
 
-外部 interface 保持为一次执行调用：
+对外只有一个入口：
 
     execute(ExecutionStreamRequest, ExecutionStreamPorts)
       → ExecutionStreamResult
 
-module 隐藏 LangGraph astream、Reasoning 安全翻译、Tool 复合身份关联、
-interrupt 提取与 resume、usage 合并、取消检查和 final content 捕获。
+LangGraph astream、reasoning 安全翻译、工具调用关联、interrupt 提取与
+resume、usage 合并、取消检查和最终正文捕获都收在这里，调用方不用关心。
 
 内容可见策略：
 - passthrough：安全 text 产生 content.delta（Build root）
@@ -93,7 +93,11 @@ class StreamSession:
         }
 
     def restore(self, snapshot: Mapping[str, object]) -> None:
-        """恢复失败 attempt 的状态，同时保留共享 usage 字典身份。"""
+        """从快照恢复失败 attempt 前的状态。
+
+        usage 不能整个换成新 dict：外部（调用方）还引用着同一个字典对象，
+        只能原地清空再写入，否则失败重试后统计会被拆到两个字典里。
+        """
         for item in fields(self):
             value = deepcopy(snapshot[item.name])
             if item.name == "usage" and isinstance(self.usage, dict) and isinstance(value, dict):
@@ -394,6 +398,8 @@ async def execute(
             emit_or_queue(signals)
         await commit_model_output()
     except BaseException as exc:
+        # 连 CancelledError 也接住：回滚必须先于取消传播执行，否则半条模型
+        # 输出可能已经发布出去却没有任何人清理。
         published_before_failure = model_output_published
         await rollback_model_output()
         if published_before_failure and is_provider_transient(exc):
@@ -930,6 +936,8 @@ def allocate_tool_id(session: StreamSession, preferred: str | None = None) -> st
     if preferred and preferred not in session.seen_tool_provider_ids:
         candidate = preferred
     else:
+        # provider 重试/续流会把同一个工具 ID 再发一遍；第二次出现起降级为
+        # 合成 ID，避免两个语义不同的调用共用同一个 ID。
         candidate = f"tool-{session.run_id}-{session.tool_call_ordinal}"
     while candidate in session.allocated_tool_ids:
         session.tool_call_ordinal += 1
@@ -1007,7 +1015,11 @@ def _extract_cached_tokens(usage: Mapping[str, Any], chunk: Any = None) -> int:
 
 
 def update_usage(session: StreamSession, usage: Any, chunk: Any = None) -> None:
-    """合并流式 usage，避免分片计数回退，并提取 prefix cache 统计。"""
+    """合并流式 usage，并提取 prefix cache 统计。
+
+    流式 usage 本应是累计值，但个别 provider 分片只报当前回合的部分计数，
+    所以取 max：宁可少记也不能让后面的分片把已经统计到的值拉低。
+    """
     if not isinstance(usage, Mapping) and chunk is not None:
         response_meta = getattr(chunk, "response_metadata", None)
         if isinstance(response_meta, Mapping):

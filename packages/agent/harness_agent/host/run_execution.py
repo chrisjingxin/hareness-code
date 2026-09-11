@@ -404,6 +404,8 @@ class DirectShellRunAdapter:
 
             task = asyncio.create_task(run_process())
             start_time = asyncio.get_running_loop().time()
+            # 50ms 轮询而非直接 await：取消和 120s 超时都要先杀进程组再返回，
+            # 单纯 await communicate() 没有机会插入这两步清理。
             while not task.done():
                 if port.is_cancelled(run):
                     if os.name != "nt":
@@ -747,7 +749,7 @@ def _artifact_confirm_copy(artifact: str) -> tuple[str, str]:
 
 
 class ComposeRunAdapter:
-    """Compose 工作模式：ComposeSession 管进度，主 Agent 在对话里 Grill。"""
+    """Compose 工作模式：ComposeSession 管阶段进度，主 Agent 负责每阶段的访谈与产出。"""
 
     def __init__(self, services: EngineDriverServices | None = None) -> None:
         """保存 Host 提供的 workspace 等依赖。"""

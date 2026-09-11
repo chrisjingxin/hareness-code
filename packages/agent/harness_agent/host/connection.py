@@ -38,6 +38,7 @@ def interaction_method(interaction_type: str) -> str:
         return METHOD["INTERACTION_PLUGIN_CONSENT"]
     if interaction_type == "goal":
         return METHOD["INTERACTION_GOAL"]
+    # 未识别的类型按最保守的审批流程走，保证新类型不会静默丢失交互。
     return METHOD["INTERACTION_APPROVAL"]
 
 

@@ -1,8 +1,8 @@
 """上下文压力的纯测量与分级决策。
 
-本模块只处理整数预算、可回收工具压力和明确的 Run 调用类型。它不读取
-SQLite、不修改 LangChain 消息，也不调用模型；执行层可以在微压缩后用新的
-整数预算重新调用同一个策略。
+只根据传入的 token 预算、可回收工具结果和调用阶段做判断；不读 SQLite、
+不改 LangChain 消息、不调模型。执行层微压缩后拿新预算再问一遍，得到的
+结果也是确定的。
 """
 
 from __future__ import annotations
@@ -149,7 +149,7 @@ class ContextPressurePolicy:
         manual: bool = False,
         overflow: bool = False,
     ) -> ContextPressureDecision:
-        """根据单次快照选择动作，不读取时间或其他外部状态。"""
+        """只凭快照决定，不读时间等外部状态；条件从重到轻，命中即返回。"""
         config = self.config
         if overflow:
             return ContextPressureDecision(
@@ -168,14 +168,16 @@ class ContextPressurePolicy:
                 snapshot,
             )
 
-        # Keep the historic 50% report band intact.  Once the normal micro band
-        # is reached, occupancy wins; idle remains an explicit auxiliary trigger
-        # in the lower bands.
+        # 50% 的 report 档是历史基线，保持不变；到 micro 档后按水位走，
+        # idle 只在更低水位作为辅助触发，不抢主判断。
         if snapshot.occupancy_ratio >= config.micro_ratio:
             return ContextPressureDecision(
                 "micro", "occupancy", config.keep_recent, snapshot
             )
 
+        # 空闲压缩只认"新一轮对话的第一步"：只有 top_level_initial 能带来
+        # 真实的用户离开时长，工具执行之间的间隔不算空闲；且必须真有
+        # 可回收的旧工具结果，否则压了也没收益。
         if (
             config.idle_enabled
             and call_type == "top_level_initial"
@@ -194,6 +196,8 @@ class ContextPressurePolicy:
                 "report", "occupancy", config.keep_recent, snapshot
             )
 
+        # 水位不高也可能要压：旧工具结果单个就很大，堆积到阈值就提前
+        # 回收，避免下一次调用直接跳进高档。
         has_tool_pressure = (
             snapshot.reclaimable_tool_tokens >= config.tool_pressure_tokens
             or snapshot.reclaimable_tool_count >= config.tool_pressure_count

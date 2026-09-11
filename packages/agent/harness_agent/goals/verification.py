@@ -8,6 +8,8 @@ import uuid
 
 from harness_agent.goals.models import GoalStoreError
 
+# 黑名单只是登记阶段的第一道闸：rerun 通道真正的保证是只能 exact 复用
+# 已审批执行过的命令，这里挡掉的是把副作用命令伪装成"验证"的登记请求。
 _UNSAFE = re.compile(
     r"(?:rm\s+-rf|sudo\s+|curl\s+|wget\s+|pip\s+install|npm\s+install|pnpm\s+add|"
     r"yarn\s+add|git\s+push|docker\s+push|kubectl\s+apply|chmod\s+777|"
