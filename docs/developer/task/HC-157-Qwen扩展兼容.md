@@ -8,8 +8,8 @@ priority: P0
 status: 待验收
 owner: 未认领
 branch: -
-reviewed_at: 2026-08-25
-review_due: 2026-09-08
+reviewed_at: 2026-09-11
+review_due: 2026-09-25
 scope: 在保留 Agent Plugins 1.0、Claude 和 Hybrid 行为的前提下，完成 Qwen/DevAgent Extension 的格式识别、静态适配、只读资源快照、Context、Agent 权限、SubagentStop 交互以及目录/ZIP 验收和文档收口；Commands、Skills、MCP 保持静态预览边界。
 acceptance: qwen-extension.json 与 devagent-extension.json 能被 auto 或显式 qwen-code 稳定识别；标准默认目录、Context string/string[]、冲突、身份、JSON、路径和 unsupported 字段均有稳定结果；ZA38 清洁 fixture 的 3 Commands、1 Skill、3 Agents、1 MCP、1 Context、1 Hook、真实 Agent frontmatter、Hook matcher、MCP placeholder 和 capability fingerprint 正确；安装快照保持根 references/scripts/mcp 资源闭包和虚拟只读路径；信任并启用后三个 Qwen executor 进入 canonical AgentCatalog/agents.list，DEVAGENT.md 在主 Agent 和对应 Plugin Agent 快照中各注入一次，作为不可覆盖 Core Policy 的 REFERENCE/STABLE Context；approvalMode/permissionMode 只形成能力请求，和父 Agent、Host Policy、workspace 边界取交集，收紧时只能完成离线只读任务；已接入 Agents 从 static preview 去重，Commands/Skills/MCP preview 保留，portable/Claude/Hybrid preview 为空；enabled+trusted、已安装 hooks 报告为 adapted/effective 且 matcher 命中的 Qwen SubagentStop 在同一 Managed child execution 返回父 Agent 前运行，allow/block/reason/additionalContext、submit/continue/skip 语义稳定，invalid/unsupported/async/空同步结果、取消/超时/无客户端、共用校验边界 mismatch 和 runtime 构造漂移均 fail-closed，连续阻断最多八次；清洁目录与 ZIP 经相同 trust+enable 链得到等价资源、Agent、Context、Hook 和静态预览结果；兼容矩阵、用户文档、架构说明和最终验证证据完整；不连接 Qwen MCP、不执行真实 ZA38 Hook。
 user_docs: docs/user/插件管理.md
