@@ -8,8 +8,6 @@ priority: P0
 status: 已过时
 owner: Codex (Luna Max)
 branch: codex/zc-135-snapshot-file-contract
-reviewed_at: 2026-08-10
-review_due: -
 scope: 将 HC-135 已验证的 proposed content 接入统一 MutationService：生成有界精确 diff 供既有 Policy/Approval 使用，批准后再次比较 expected identity；本机用安全临时文件/同目录替换，远端用原生 CAS 或内部完整 exact replace，提交后重读实际内容；保留 BOM、CRLF/LF、末尾换行，并对不支持 CAS、混合/未知编码、提交冲突和保存钩子 drift 返回明确错误。
 acceptance: 用户批准的 diff 与 proposed content 一致；批准后文件变化返回 COMMIT_CONFLICT 且零覆盖；Host 内写调用线性化；Local adapter 不跟随符号链接、写失败不截断原文件，支持文本 BOM/换行 round-trip；Remote adapter 无 CAS 时返回 BACKEND_CAS_UNSUPPORTED，不盲写；commit 后 Snapshot 只基于重新读取的实际内容，保存钩子改变内容时返回 POST_WRITE_DRIFT；现有 Workspace/Capability/Approval/敏感路径/规则持久化全部生效。
 user_docs: docs/user/安全与沙箱.md、docs/user/故障排查.md

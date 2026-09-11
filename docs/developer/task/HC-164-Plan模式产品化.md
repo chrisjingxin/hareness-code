@@ -8,8 +8,6 @@ priority: P1
 status: 进行中
 owner: Grok
 branch: feat_hc_164_Plan模式产品化
-reviewed_at: 2026-08-31
-review_due: 2026-09-14
 scope: 在 Build 工作模式把已有 plan 审批模式做成可走完的产品闭环：/plan 进出与带目标开跑、规划中只写会话计划文件、滚动审计划后批准/打回/放弃、批准后恢复进入前权限并开始实现；TUI 与 Web 一致。同一 Task 后段再补点头才进计划、行批注与再打开计划、计划模式下只读命令。
 acceptance: Build 下 /plan、/plan <目标>、/plan exit 可用且 Compose 不出现；Shift+Tab 仍含 plan；规划中项目文件不可改、计划文件可写；交出来可滚动预览并三选一；批准后回到进入前审批档位并开始改代码；打回留在 plan；放弃退出 plan 且不写代码；正在跑的一轮不被 /plan 取消；进 plan 不卸 Skill/MCP、不换系统提示词主体。
 user_docs: docs/user/交互使用.md、docs/user/安全与沙箱.md

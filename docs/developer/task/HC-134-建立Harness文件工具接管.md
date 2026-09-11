@@ -8,8 +8,6 @@ priority: P0
 status: 已过时
 owner: Codex (Luna Max)
 branch: codex/zc-134-file-tools-interposition
-reviewed_at: 2026-08-10
-review_due: -
 scope: 在不 fork 第二套 Agent runtime 的前提下，为 DeepAgents 0.6.8 建立 Harness-owned 文件工具 interposition seam，使模型看到的 canonical schema 与实际执行都由 Harness 接管；同时实现按 Thread/路径/backend 隔离、有界、记录已读行的 SnapshotStore，以及本地/远端 text mutation backend adapter contract。
 acceptance: 主 Agent 与所有可写受控子 Agent 的 read/write/edit/delete 都经过同一 Harness seam；模型请求中每个文件工具只有一个 schema，DeepAgents builtin handler 不会处理被接管调用；Snapshot 不能跨 Thread/路径/backend 复用，重复同内容读取合并 seen ranges，LRU/TTL/字节预算淘汰返回 expired；虚拟 /.harness/ 不生成可写 Snapshot；local/remote adapter 能力与 CAS 不支持错误有契约测试；未提前暴露 HC-133 尚未确认的生产 schema。
 user_docs: -

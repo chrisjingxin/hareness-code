@@ -8,8 +8,6 @@ priority: P1
 status: 已过时
 owner: Codex
 branch: codex/zc-138-build-compose
-reviewed_at: 2026-08-12
-review_due: -
 scope: 在保留现有 Build 行为的同时增加 Compose Mode；由共享 Run 生命周期内的 Compose execution adapter 依次完成 Understand、Plan、Build、Verify、Review，以结构化 artifact、真实 verification evidence、独立 Reviewer 和有界修复循环驱动阶段，并在 TUI/Web 提供一致的 Mode 切换、计划确认、进度和终态展示。
 acceptance: 空闲时 Tab 可切 Build/Compose、Shift+Tab 仍只切审批模式；Build 无行为回归；Compose 只在真实决策和整体 Plan 处等待用户，其余阶段自动推进；所有阶段由代码状态机和严格 artifact 驱动，Verify 无 fresh exit-code evidence 不得通过，Requirement/Code Review 来自独立 execution；失败/取消/超限唯一收敛且不提权；Protocol、Python、Interactive Core、TUI/Web、fake-model E2E、build/typecheck/test/project:check 与用户/架构文档闭环。
 user_docs: docs/user/交互使用.md、docs/user/安全与沙箱.md

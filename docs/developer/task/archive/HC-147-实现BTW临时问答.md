@@ -8,8 +8,6 @@ priority: P1
 status: 已完成
 owner: chrisjingxin
 branch: feat/hc-147-btw
-reviewed_at: 2026-08-15
-review_due: -
 scope: 实现 /btw 临时旁路问答（Side Question）完整端到端链路：跨进程 JSON-RPC 协议增加 threads.side_question 方法；Python sidecar 接入只读单轮问答执行器（0 工具、纯文本、不写 Thread Transcript / LangGraph / SQLite / Work Item ledger）；CLI InteractiveController 与 CommandDispatcher 接入 assist.btw 调度；TUI 表现层实现 BtwModal 独立浮层弹窗，支持流式输出、上下滚动、Esc/Enter 快速关闭与复制按钮/快捷键。
 acceptance: 1. 在 Build 和 Compose 模式下输入 /btw <question> 能拉起独立浮层弹窗，基于当前 Thread 历史上下文流式得到纯文本回答；2. /btw 问答过程严格禁止调用任何 Tool，回答完全不写入主 Transcript、SQLite 持久化或 Work Item ledger；3. 浮层内按 Esc/Enter 随时关闭并终止流式，按 c 键或点击按钮可将回答内容复制到系统剪贴板；4. 仅输入 /btw 时输出轻量用法通知「用法：/btw <你的问题>」且不调用模型；5. 跨端协议 schema、Python sidecar、TypeScript CLI 与 TUI 单元测试全部通过。
 user_docs: docs/user/交互使用.md

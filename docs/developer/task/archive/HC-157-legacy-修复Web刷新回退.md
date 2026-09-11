@@ -8,8 +8,6 @@ priority: P0
 status: 已完成
 owner: Codex
 branch: master
-reviewed_at: 2026-08-19
-review_due: 2026-09-02
 scope: 修复 Web 接管超过首次 UI token TTL 后刷新认证失败并返回 TUI；采用 handoff-scoped 单次重连 token 轮换，修正真实 Browser E2E 启动夹具并补充超时刷新回归。
 acceptance: 首次 URL token 仍受 60 秒 TTL 约束；renderer 接受后旧 token 失效并获得仅当前 handoff 有效的单次重连 token；任意停留时长后在 10 秒宽限内刷新可恢复完整 Web 视图；每次成功重连轮换 token；第二窗口拒绝不消耗主页面 token；focused、typecheck、project checks 与真实 CLI Browser 刷新 E2E 通过。
 user_docs: docs/user/故障排查.md

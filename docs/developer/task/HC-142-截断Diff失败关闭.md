@@ -8,8 +8,6 @@ priority: P0
 status: 已过时
 owner: Codex
 branch: master
-reviewed_at: 2026-08-11
-review_due: -
 scope: 原计划在人工审批 diff 超过 200 行、16 KiB 或无法完整展示时拒绝文件 mutation；用户已明确否决该方向，任务不再实施。
 acceptance: 不适用；现行产品决定是审批 diff 作为明确标记省略内容的有界预览，即使预览受内容上限或终端高度限制也保留允许/拒绝选项。
 user_docs: 不涉及

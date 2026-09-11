@@ -8,8 +8,6 @@ priority: P1
 status: 已完成
 owner: Codex
 branch: codex/zc-138-140
-reviewed_at: 2026-08-11
-review_due: -
 scope: 为 Host 共享的 ThreadSnapshotStore 建立可重现并发证据，验证多 Thread 并行 read_file、LRU/TTL 淘汰、路径失效和 Host/Thread 关闭时的记录、identity index 与字节预算一致性；若现实竞态可触发，以最小内部同步修复且不牺牲安全的并行读取。
 acceptance: 测试可稳定覆盖同内容同时 record、不同 Thread/路径同时 record/resolve、淘汰与 resolve 竞态、invalidate/close 与在途读取；Store 不产生重复 identity、负数或错误 total_bytes、跨 Thread seen range 合并、已移除记录残留或崩溃；如需加锁，锁边界、顺序和 close 语义明确且不与 Host AsyncRWLock 死锁；有与当前生产 adispatch/to_thread 路径一致的回归证据。
 user_docs: 不涉及

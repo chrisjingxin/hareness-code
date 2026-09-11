@@ -34,8 +34,6 @@ const taskMetadata = {
   status: "待认领",
   owner: "未认领",
   branch: "-",
-  reviewed_at: "2026-08-09",
-  review_due: "2099-12-31",
   scope: "验证协作脚本。",
   acceptance: "命令可执行。",
   user_docs: "不涉及",
@@ -114,6 +112,9 @@ test("认领和完成任务会同步状态、证据、归档与只读看板", as
     expect(archived).toContain("status: 已完成")
     expect(archived).toContain("bun test")
     expect(archived).toContain("abc123")
+    // 复核字段已随功能移除，写回时不再生成
+    expect(archived).not.toContain("review_due")
+    expect(archived).not.toContain("reviewed_at")
     await expect(checkTasks(projectRoot)).resolves.toBeUndefined()
     expect(await readFile(join(projectRoot, TASK_BOARD_PATH), "utf8")).not.toContain("HC-001")
   } finally {
@@ -141,17 +142,24 @@ test("任务看板以优先级和任务 ID 稳定排序", async () => {
   }
 })
 
-test("活动任务到期必须复核，过时任务必须记录替代依据", async () => {
+test("过时任务必须记录替代依据，历史复核字段不再阻断校验", async () => {
   const projectRoot = await createFixture()
   try {
     const taskPath = join(projectRoot, TASK_DIR, taskFileName("HC-001", "测试任务"))
-    await writeFile(taskPath, renderTask({ ...taskMetadata, reviewed_at: "2019-12-01", review_due: "2020-01-01" }), "utf8")
-    await expect(loadTasks(projectRoot)).rejects.toThrow("已到复核日期")
+    // 历史遗留的复核字段即使已经过期，也不再参与校验
+    await writeFile(taskPath, renderTask({
+      ...taskMetadata,
+      reviewed_at: "2019-12-01",
+      review_due: "2020-01-01",
+    }), "utf8")
+    await expect(loadTasks(projectRoot)).resolves.toHaveLength(1)
+
+    await writeFile(taskPath, renderTask({ ...taskMetadata, status: "已过时" }), "utf8")
+    await expect(loadTasks(projectRoot)).rejects.toThrow("替代 references")
 
     await writeFile(taskPath, renderTask({
       ...taskMetadata,
       status: "已过时",
-      review_due: "-",
       references: "HC-002",
     }), "utf8")
     await expect(loadTasks(projectRoot)).resolves.toHaveLength(1)
@@ -262,4 +270,5 @@ test("renderTaskBoard 文案指向新目录", () => {
   expect(board).toContain("docs/developer/task/")
   expect(board).toContain("docs/developer/task/archive/")
   expect(board).not.toContain("docs/developer/tasks/")
+  expect(board).not.toContain("下次复核")
 })

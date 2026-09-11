@@ -8,8 +8,6 @@ priority: P1
 status: 已完成
 owner: Antigravity
 branch: master
-reviewed_at: 2026-08-16
-review_due: -
 scope: 在公开 Skill 列表与 TUI 界面中隐藏内置供 Compose 使用的 Skill，保留内部运行时调用，支持用户显式安装同名 Skill 正常展示。
 acceptance: 1. skills.list RPC 与 TUI 侧边栏/补全中默认隐藏 source 为 builtin 的 Skill；2. Compose 内部工作流及按 ID 读取解析仍可正常加载 builtin Skill；3. 用户在 project/user 安装同名 Skill 时正常在列表中显示并生效。
 user_docs: 不涉及

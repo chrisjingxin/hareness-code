@@ -8,8 +8,6 @@ priority: P1
 status: 待认领
 owner: 未认领
 branch: -
-reviewed_at: 2026-09-09
-review_due: 2026-09-23
 scope: 为每个 thread 增加可持久化的短标题；第一条用户消息发出后并行调一次模型起名，失败则展示截断后的第一条原文；用户用 /title 改当前 thread 标题，改过后迟到的模型结果不得覆盖；标题出现在 /resume 弹窗、Web 侧栏 Thread 列表与 TUI 项目检查器当前会话名。不新增 TUI thread 列表，不做旧数据回填，不随对话自动改标题。
 acceptance: 新 thread 发出第一条用户消息后，/resume、Web 侧栏与 TUI 项目检查器出现短标题或截断原文；模型起名失败仍能辨认该 thread；/title 短标题 只改当前 thread 且立刻反映到上述入口；空 /title 只提示用法；用户改过的标题不会被自动起名覆盖；旧 thread 无标题时仍显示截断后的第一条消息；内部 thread_id 仍不展示。
 user_docs: docs/user/交互使用.md、docs/user/Web界面.md

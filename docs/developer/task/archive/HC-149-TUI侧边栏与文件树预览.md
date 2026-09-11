@@ -8,8 +8,6 @@ priority: P1
 status: 已完成
 owner: Antigravity
 branch: feat/hc-149-tui-sidebar
-reviewed_at: 2026-08-16
-review_due: -
 scope: 在 TUI 右侧增加响应式侧边栏（包含 CWD、Context、MCP 状态、Modified Files 与工作区文件树），并支持文件语法高亮快速预览浮层与键盘/鼠标交互。
 acceptance: 宽屏（>120列）自适应展示侧边栏并动态分配宽度，窄屏支持快捷键呼出半透明抽屉；支持展示 CWD、Token/TPS、MCP 与变更文件列表；支持文件树按需展开，支持 Enter 呼出代码快速预览浮层与 @ 键引用路径。
 user_docs: 不涉及

@@ -8,8 +8,6 @@ priority: P0
 status: 已过时
 owner: Codex (Luna Max)
 branch: codex/zc-132-remove-apply-patch
-reviewed_at: 2026-08-10
-review_due: -
 scope: 从生产 Agent 工具、静态 schema、延迟发现、Capability/Policy/Approval 映射和测试中彻底移除 Harness 自研 apply_patch，并删除只按 hunk 行号切片、不验证 old/context 的实现；保留 delete_file 当前能力，不在本任务实现 Snapshot 编辑替代品。
 acceptance: 主 Agent、受控子 Agent、tool_search、静态 schema 指纹和审批系统均不再暴露或识别 apply_patch；tools_file 中 patch parser/applier 已删除；错位 hunk 回归证明原风险存在但生产路径不可达；read/write/edit/delete 现有行为不回归；Python focused tests、全量 Agent tests、project:check 通过。
 user_docs: docs/user/交互使用.md、docs/user/安全与沙箱.md

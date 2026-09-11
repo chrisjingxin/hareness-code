@@ -269,8 +269,6 @@ Codex sandbox 内依赖 loopback 监听、进程枚举或其他被禁宿主能�
 - **已完成** Task：证据与引用写全后移入 `docs/developer/task/archive/`，并从活动看板消失。
 - **已过时** Task：在正文说明替代 Task/Spec，保留文件作历史，不删除。
 
-活动任务默认每 14 天复核一次，并在认领前、Spec 变更后、相邻架构合并后、准备发布或关闭前复核。过期未复核的活动任务应被 `tasks:check` 拒绝。
-
 ### Task front matter（最小字段）
 
 ```yaml
@@ -282,8 +280,6 @@ priority: P0
 status: 待认领
 owner: 未认领
 branch: -
-reviewed_at: YYYY-MM-DD
-review_due: YYYY-MM-DD
 scope: 要完成的范围
 acceptance: 可验证的验收结果
 user_docs: 不涉及或具体路径

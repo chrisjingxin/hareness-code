@@ -8,8 +8,6 @@ priority: P1
 status: 已过时
 owner: chrisjingxin
 branch: codex/zc-106
-reviewed_at: 2026-08-09
-review_due: -
 scope: 在不改变 Web Interactive Adapter 业务语义和 Handoff 安全边界的前提下，将现有 React Web 工作台整改为用户提供的蓝色三栏设计，提供默认浅色、可显式切换的深色主题，并补齐桌面与移动端的响应式、状态和可访问性表现。
 acceptance: /web 首次打开固定使用浅色；用户可在当前 Web 接管期间切换深浅主题；1440×900 与 390×844 下的品牌栏、顶栏、Thread 导航、Timeline、Tool、Interaction、Composer 和工具抽屉符合 HC-106 设计且无横向溢出；所有现有 Web 工作流、权限和安全边界保持不变。
 user_docs: docs/user/交互使用.md

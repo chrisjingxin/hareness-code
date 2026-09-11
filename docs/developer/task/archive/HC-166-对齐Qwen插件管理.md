@@ -8,8 +8,6 @@ priority: P0
 status: 已完成
 owner: 未认领
 branch: -
-reviewed_at: 2026-09-02
-review_due: -
 scope: 将 Harness 的 Shell CLI Plugin 安装、启停、更新、卸载、Settings 和 Adapter 识别改为接近 Qwen Code 的名称加作用域模型；安装后由后续启动的 TUI/Web 统一加载，移除用户侧能力指纹、授权哈希、digest/CAS 参数、静态假预览和过度兼容状态机，同时保留多格式 Adapter、事务安装、路径安全及 Harness 原有运行权限边界。
 acceptance: Plugin 通过 Shell CLI 安装一次后可在所选 user/workspace scope 自动加载且无需再次提供源目录；所有管理操作使用插件名称而非 capability fingerprint、package/declaration digest、store revision 或内部 ID；格式默认自动识别；安装确认成功后直接启用，后续启动的 TUI 与 Web 从同一 canonical catalog 使用真实 Commands、Skills、Agents、Context、MCP、Hook 和 LSP，不新增对话内安装或 Plugin 管理 UI；列表只呈现真实已加载组件、禁用状态、警告或失败，不再暴露 static preview 和兼容矩阵；旧 registry 可迁移且 ZA38、Claude、portable Plugin 运行能力不回退。
 user_docs: docs/user/插件管理.md

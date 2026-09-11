@@ -8,8 +8,6 @@ priority: P1
 status: 已过时
 owner: Codex (Luna Max)
 branch: codex/zc-135-snapshot-file-contract
-reviewed_at: 2026-08-10
-review_due: -
 scope: 在安全提交完成后，向弱模型返回实际落盘内容的新 Snapshot、变更范围和有界局部窗口，使连续编辑无需完整重读；增加可选限时 LSP diagnostics 摘要与去敏观测指标，使用 HC-133 fixture 对最终生产路径重新跑真实企业弱模型评测，并完成用户/架构文档、项目检查和版本影响闭环。
 acceptance: edit/write 成功返回可直接继续使用的新 Snapshot、实际 changed range 和有界上下文，不返回整文件；delete 使旧 Snapshot 失效；diagnostics 超时/缺 LSP 不回滚写入、不误报零错误，输出有数量/字节上限；观测只记录 code、相对路径和聚合指标，不记录源码/new_text/密钥；最终真实弱模型无 silent corruption、完成率不低于基线且报告含 token/调用/重读/延迟；用户文档、架构总览、任务证据、project:check/typecheck/test 和版本影响闭环。
 user_docs: docs/user/交互使用.md、docs/user/安全与沙箱.md、docs/user/故障排查.md

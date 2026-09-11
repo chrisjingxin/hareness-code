@@ -43,8 +43,6 @@ priority: P0
 status: 待认领
 owner: 未认领
 branch: -
-reviewed_at: YYYY-MM-DD
-review_due: YYYY-MM-DD
 scope: 要完成的范围。
 acceptance: 可验证的验收结果。
 user_docs: 不涉及或具体文档路径
@@ -68,7 +66,7 @@ bun run task:complete -- <ID> --evidence "bun run test" --references "abc123"
 
 - `进行中` 必须有负责人和分支。
 - `task:complete` 会写入证据并把文件移入 `archive/`，不再出现在活动看板。
-- `已过时` 必须填写 `reviewed_at`、替代 `references`，并将 `review_due` 设为 `-`。
+- `已过时` 必须填写替代 `references`。
 
 ## 看板与校验
 
@@ -78,4 +76,4 @@ bun run tasks:check
 bun run docs:check
 ```
 
-活动任务默认 14 天复核一次；到期未更新时 `tasks:check` 失败。活动文档若引用 `HC-XXX`，`docs:check` 会确认该 ID 在活动或归档任务中存在；`docs/developer/research/archive/` 的历史快照允许保留旧编号，但本地链接仍会被校验。
+活动文档若引用 `HC-XXX`，`docs:check` 会确认该 ID 在活动或归档任务中存在；`docs/developer/research/archive/` 的历史快照允许保留旧编号，但本地链接仍会被校验。

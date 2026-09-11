@@ -8,8 +8,6 @@ priority: P1
 status: 已完成
 owner: Codex
 branch: codex/zc-118-reasoning-progress
-reviewed_at: 2026-08-09
-review_due: -
 scope: 在 Agent、Protocol、Interactive Core、TUI 和 Web 之间增加基于 Chat Completions 的思考过程展示与运行进度；补齐 reasoning_content 流式提取、reasoning_effort 配置、跨端展示、测试、用户文档和架构说明。
 acceptance: 网关返回 reasoning_content 时，两端运行期间流式显示思考文本（流式中展开、冻结后可折叠），不进入 assistant 正文或持久化 Transcript；正文/Tool 到达后思考段冻结；reasoning-only、混合块、Tool 边界、subgraph、取消、重复/乱序和终态均有回归测试；两端从 run.start 起持续显示事实阶段、活动时长和取消提示；协议生成物、Python/TypeScript 校验、TUI/Web ARIA 与 reduced-motion 检查通过。
 user_docs: docs/user/交互使用.md、docs/user/模型配置.md

@@ -8,8 +8,6 @@ priority: P1
 status: 已完成
 owner: Codex
 branch: master
-reviewed_at: 2026-08-12
-review_due: -
 scope: 把 write_file、edit_file、delete_file 的人工审批从纯文本说明升级为同一 PreparedFileMutation 派生的结构化有界 Diff；Web 宽屏默认左右对比、窄屏默认行内并允许切换，TUI 宽终端双栏、窄终端行内，双端均提供增删底色、行号和可用时的语法高亮，同时保留通用审批降级路径与现有授权语义。
 acceptance: 文件审批明确显示操作、逻辑路径、增删统计和截断状态；Web 在双栏/行内间切换且响应式不丢行，TUI 按可用宽度稳定选择双栏/行内；支持语言具有语法高亮，未知语言、高亮失败、畸形或缺失 presentation 均降级为可读纯文本；展示数据与批准后提交绑定同一 prepared plan，截断预览仍可批准且不能改变 Snapshot、Policy、一次性计划或 CAS 约束；非文件审批保持现状；Protocol/Python/Interactive/Web/TUI 测试、build、typecheck、project:check 通过。
 user_docs: docs/user/交互使用.md、docs/user/Web界面.md、docs/user/安全与沙箱.md

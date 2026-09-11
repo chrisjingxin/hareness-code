@@ -8,8 +8,6 @@ priority: P1
 status: 已完成
 owner: Antigravity
 branch: master
-reviewed_at: 2026-08-16
-review_due: 2026-08-30
 scope: 在 TUI 输入栏实现参考 MiMo Code 的极速无感直出 Shell 模式，支持 ! 触发、专属色彩 Shell 状态指示、Esc/Backspace 极速退出、免模型直出执行与时间线结果持久化。
 acceptance: 输入框为空时键入 ! 瞬间进入 Shell 模式（! 不写入文本）；左上角呈现专属色彩的「Shell」纯文本标签（与 Build 金、Compose 紫不同色）；不改变边框颜色；Esc 或空内容 Backspace 瞬间退出；提交时免 LLM 推理直出执行并在时间线展示结果与支持中断。
 user_docs: docs/user/交互使用.md

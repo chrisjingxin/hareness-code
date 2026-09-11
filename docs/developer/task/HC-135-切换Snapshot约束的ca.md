@@ -8,8 +8,6 @@ priority: P0
 status: 已过时
 owner: Codex (Luna Max)
 branch: codex/zc-135-snapshot-file-contract
-reviewed_at: 2026-08-10
-review_due: -
 scope: 根据 HC-133 已确认的唯一 exact-string schema，在 HC-134 接管边界上实现 canonical read_file、write_file、edit_file、delete_file：局部 read 生成 Thread Snapshot/seen ranges，write 只创建，edit/delete 强制 Snapshot 和当前内容校验；edit 只允许替换已读范围内唯一的 old_string。同步迁移静态 schema、prompt、Capability、Policy、子 Agent 和测试，并删除 replace_all、range/edits[] 与旧 delete_file 入口。
 acceptance: 模型只看到 HC-133 胜出的单一文件工具 schema；read 返回短 Snapshot、普通源行号、总行数与区间，局部 read 不把整文件送入 context；write 对已有目标零写入；edit/delete 对缺失/过期/跨 Thread/路径/backend/stale Snapshot、未读范围或非唯一原文本均零写入并返回稳定 code；虚拟文件和非文本文件不可 edit；exact-string 所需 old_string/new_string 保留，replace_all 与未胜出的 range schema、alias、fallback 和第二 delete_file 入口已删除。
 user_docs: docs/user/交互使用.md、docs/user/故障排查.md

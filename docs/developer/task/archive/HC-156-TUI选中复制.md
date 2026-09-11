@@ -8,8 +8,6 @@ priority: P1
 status: 已完成
 owner: Codex
 branch: feat_hc_156_TUI选中复制
-reviewed_at: 2026-08-19
-review_due: -
 scope: 在 CLI TUI 中提供文本选区复制和即时 Toast 反馈：macOS/Linux 鼠标松开后自动复制；Windows 在有选区时通过 Ctrl+C 或右键复制；复用现有剪贴板与 Toast 链路。
 acceptance: 用户能选中 TUI 文本并得到可观察的复制结果和成功/失败反馈；无选区不产生提示；原有 Ctrl+C 语义在无选区时保持不变；相关自动化测试、类型检查和用户文档通过。
 user_docs: docs/user/交互使用.md

@@ -8,8 +8,6 @@ priority: P0
 status: 待验收
 owner: 未认领
 branch: -
-reviewed_at: 2026-09-11
-review_due: 2026-09-25
 scope: 在 HC-157 的 Qwen/DevAgent 安装、信任和不可变快照基础上，按独立停点接入 Commands、Skills、MCP、可映射 Hook、LSP 与 Settings；所有组件只进入 Harness canonical runtime，不建立 Qwen 私有执行循环。当前 ZA38 插件未声明 Channels，2026-08-28 用户决定本 Task 不实现 Channel runtime，未来出现真实需求时另立安全架构任务。
 acceptance: 首先关闭 unsupported Qwen LSP/Monitor 误入通用 runtime 的门禁缺口；trusted+enabled ZA38 插件的三个 Markdown Commands 以自然短名进入 Slash Command Registry，冲突时稳定命名空间化，命令正文从 Host 不可变快照展开且正确处理 {{args}}；za38-framework 进入 canonical SkillRegistry 并可由命令和模型按权限读取；za38.03_code_index 经 canonical MCP lifecycle 受控启动、命名空间化并可观察失败；Qwen Hook/LSP/Settings 只有在各自 component 报告 adapted/effective 且存在 canonical consumer 时才运行；Adapter report revision 变化时已安装 package 必须由当前 Adapter 重解析，能力指纹变化保留旧 trust 并仅在实际请求 stale Plugin 能力时要求显式 reauthorization，普通 Run/内置能力/其他已授权 Plugin 继续可用；Qwen SubagentStop Hook 的执行级失败只告警并返回已完成 child，正常 blocking 继续同一 child，blocking cap 返回结果和 warning，取消及 PreToolUse/Policy/MCP/非 Qwen 安全边界保持既有语义；Channels 保持明确 unsupported/effective=false，且不阻塞本 Task 收口；每阶段具备离线恶意输入、Protocol/Host/CLI 回归和独立回滚证据。
 user_docs: docs/user/插件管理.md
