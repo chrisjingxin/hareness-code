@@ -161,7 +161,7 @@ docs/developer/architecture/扩展与插件机制设计方案.md 的 HC-158 Sett
   HC-158 不提供无条件写入。journal 的 PendingOperation 是按 operation 判别的
   Set/Remove/Uninstall/Migration closed union；wire 只返回不含 operation_id、account、
   record 或路径的脱敏 pending summary，非法 phase/operation 组合 fail closed。
-- 平台：Phase 4B 只在 macOS Security.framework、Linux secretstorage/Secret Service、
+- 平台：Phase 4B 只在 macOS Security.framework、Linux 系统 `secret-tool`/Secret Service、
   Windows CredWriteW/CredReadW/CredDeleteW 的 capability probe 可证明时启用；权限、
   锁、atomic replace、fsync 或 backend 不可验证时稳定 disabled，不降级明文。
 - 契约：Phase 4B 已把 canonical Protocol v3.6 升到 v3.7，增加 settings.list/set/remove；

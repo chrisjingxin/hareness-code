@@ -358,7 +358,7 @@ CLI 或测试实现；设计已通过主任务评审，Phase 4B 的实现证据�
   已停用或 trust 失效的已安装 Plugin 仍必须清理既有 credential。`--purge-data` 只额外
   删除 Plugin data。registry revision 冲突或 cleanup partial 时保持安装记录，不返回已
   清除成功。
-- Phase 4B 只能在 macOS Security.framework、Linux secretstorage/Secret Service、
+- Phase 4B 只能在 macOS Security.framework、Linux 系统 `secret-tool`/Secret Service、
   Windows Credential Manager API 的 capability probe 可证明时启用，否则 fail closed。
   resolver 采用 workspace > user，extension-wide 地给每个有效 MCP/Hook/LSP child
   注入该插件已配置的 declared envVar；Commands/Skills/Agents 不接收 env。拒绝

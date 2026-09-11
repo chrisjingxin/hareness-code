@@ -26,6 +26,6 @@
     "test:web:e2e": "bunx playwright test -c packages/cli/tests/e2e"
   },
   "devDependencies": {
-    "@playwright/test": "^1.62.1"
+    "@playwright/test": "1.59.1"
   }
 }

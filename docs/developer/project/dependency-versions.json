@@ -39,7 +39,6 @@
     "websockets": "15.0.1",
     "tree-sitter": "0.26.0",
     "tree-sitter-bash": "0.25.1",
-    "secretstorage": "3.3.3 (Linux only)",
     "pytest": "9.0.3",
     "pytest-asyncio": "1.4.0",
     "hatchling": "1.27.0 (build isolation; not present in uv.lock)"
@@ -74,5 +73,5 @@
     "python": "92 external packages in packages/agent/uv.lock",
     "full_inventory": "docs/developer/project/内网迁移依赖清单.md"
   },
-  "excluded": ["@opentui/solid", "solid-js", "langchain-quickjs", "langchain-tests"]
+  "excluded": ["@opentui/solid", "solid-js", "langchain-quickjs", "langchain-tests", "secretstorage"]
 }

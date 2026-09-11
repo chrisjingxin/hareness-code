@@ -14,6 +14,7 @@ import os
 import re
 import secrets
 import stat
+import subprocess
 import sys
 import tempfile
 import uuid
@@ -401,7 +402,9 @@ class MacOSCredentialBackend:
 
 
 class LinuxSecretServiceCredentialBackend:
-    """Linux Secret Service backend；依赖/session D-Bus 不可证明时 fail closed。"""
+    """Linux Secret Service backend；系统 secret-tool/session D-Bus 不可用时 fail closed。"""
+
+    _SECRET_TOOL = "/usr/bin/secret-tool"
 
     def __init__(self, *, service: str = "com.za38.harness.settings.v1") -> None:
         """只保存 Secret Service attribute namespace。"""
@@ -433,40 +436,36 @@ class LinuxSecretServiceCredentialBackend:
                     self._capability = False
         return self._capability
 
-    @contextmanager
-    def _collection(self) -> Iterator[object]:
-        """取得默认 collection；锁定、无 D-Bus 或缺依赖均失败关闭。"""
-        try:
-            import secretstorage
+    def _run_secret_tool(
+        self,
+        *arguments: str,
+        input_value: bytes | None = None,
+    ) -> subprocess.CompletedProcess[bytes]:
+        """只执行发行版固定路径，避免从不可信 PATH 解析凭据工具。"""
+        return subprocess.run(
+            [self._SECRET_TOOL, *arguments],
+            input=input_value,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=30,
+        )
 
-            bus = secretstorage.dbus_init()
-            collection = secretstorage.get_default_collection(bus)
-            if collection.is_locked():
-                raise SettingsError("SETTINGS_BACKEND_UNAVAILABLE", field="backend")
-            yield collection
-        except SettingsError:
-            raise
-        except Exception as exc:
-            raise SettingsError("SETTINGS_BACKEND_UNAVAILABLE", field="backend") from exc
-        finally:
-            close = locals().get("bus")
-            if close is not None:
-                close_method = getattr(close, "close", None)
-                if callable(close_method):
-                    try:
-                        close_method()
-                    except Exception:
-                        pass
+    def _attributes(self, account: str) -> tuple[str, ...]:
+        """构造精确的 Secret Service attribute 对。"""
+        return ("application", self._service, "account", account)
 
     def get(self, account: str) -> str | None:
-        """通过精确 application/account attributes 读取，不调用 backend 枚举。"""
+        """通过精确 application/account attributes 读取。"""
         try:
-            with self._collection() as collection:
-                items = tuple(collection.search_items({"application": self._service, "account": account}))  # type: ignore[union-attr]
-                if len(items) > 1:
-                    raise SettingsError("SETTINGS_BACKEND_UNAVAILABLE", field="backend")
-                item = items[0] if items else None
-                return None if item is None else str(item.get_secret(), "utf-8")
+            result = self._run_secret_tool("lookup", *self._attributes(account))
+            if result.returncode != 0:
+                if result.returncode == 1 and not result.stdout and not result.stderr:
+                    return None
+                raise SettingsError("SETTINGS_BACKEND_UNAVAILABLE", field="backend")
+            if result.stderr:
+                raise SettingsError("SETTINGS_BACKEND_UNAVAILABLE", field="backend")
+            return result.stdout.removesuffix(b"\n").decode("utf-8")
         except Exception as exc:
             if isinstance(exc, SettingsError):
                 raise
@@ -475,28 +474,23 @@ class LinuxSecretServiceCredentialBackend:
     def set(self, account: str, value: str) -> None:
         """创建或替换精确 application/account item。"""
         try:
-            with self._collection() as collection:
-                items = tuple(collection.search_items({"application": self._service, "account": account}))  # type: ignore[union-attr]
-                if len(items) > 1:
-                    raise SettingsError("SETTINGS_BACKEND_UNAVAILABLE", field="backend")
-                collection.create_item(  # type: ignore[union-attr]
-                    "Harness Settings",
-                    {"application": self._service, "account": account},
-                    value.encode("utf-8"),
-                    replace=True,
-                )
+            result = self._run_secret_tool(
+                "store",
+                "--label=Harness Settings",
+                *self._attributes(account),
+                input_value=value.encode("utf-8"),
+            )
+            if result.returncode != 0 or result.stdout or result.stderr:
+                raise SettingsError("SETTINGS_BACKEND_UNAVAILABLE", field="backend")
         except Exception as exc:
             raise SettingsError("SETTINGS_BACKEND_UNAVAILABLE", field="backend", retryable=True) from exc
 
     def delete(self, account: str) -> None:
         """精确删除匹配 item；缺失即成功。"""
         try:
-            with self._collection() as collection:
-                items = tuple(collection.search_items({"application": self._service, "account": account}))  # type: ignore[union-attr]
-                if len(items) > 1:
-                    raise SettingsError("SETTINGS_BACKEND_UNAVAILABLE", field="backend")
-                for item in items:
-                    item.delete()
+            result = self._run_secret_tool("clear", *self._attributes(account))
+            if result.returncode not in (0, 1) or result.stdout or result.stderr:
+                raise SettingsError("SETTINGS_BACKEND_UNAVAILABLE", field="backend")
         except Exception as exc:
             if isinstance(exc, SettingsError):
                 raise

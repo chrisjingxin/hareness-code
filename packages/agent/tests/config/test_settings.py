@@ -6,7 +6,6 @@ import io
 import json
 import secrets
 import ctypes
-import sys
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -804,131 +803,95 @@ def test_macos_backend_fake_security_api_distinguishes_not_found_and_failure(mon
     assert "fake Security.framework failure" not in str(error.value)
 
 
-def test_linux_backend_fake_secretstorage_requires_exact_match_and_closes_bus(monkeypatch) -> None:
-    """Secret Service 只接受一条 exact match，locked/unavailable 与多条结果均 fail closed。"""
+def test_linux_backend_uses_secret_tool_without_exposing_value_in_arguments(monkeypatch) -> None:
+    """Linux 通过系统 secret-tool 读写，秘密只能走 stdin。"""
     backend = LinuxSecretServiceCredentialBackend()
+    calls: list[tuple[tuple[str, ...], bytes | None]] = []
+    responses = iter(
+        [
+            SimpleNamespace(returncode=0, stdout=b"fake-secret", stderr=b""),
+            SimpleNamespace(returncode=0, stdout=b"", stderr=b""),
+            SimpleNamespace(returncode=0, stdout=b"", stderr=b""),
+            SimpleNamespace(returncode=1, stdout=b"", stderr=b""),
+        ]
+    )
 
-    class Item:
-        def __init__(self, secret: bytes = b"fake-secret") -> None:
-            self.secret = secret
-            self.deleted = False
+    def run_secret_tool(*arguments: str, input_value: bytes | None = None):
+        calls.append((arguments, input_value))
+        return next(responses)
 
-        def get_secret(self) -> bytes:
-            return self.secret
-
-        def delete(self) -> None:
-            self.deleted = True
-
-    class Collection:
-        def __init__(self, items: list[Item]) -> None:
-            self.items = items
-            self.created: list[tuple[dict[str, str], bytes]] = []
-
-        def search_items(self, _attributes):
-            return iter(self.items)
-
-        def create_item(self, _label, attributes, secret, replace):
-            self.created.append((attributes, secret))
-
-    collection = Collection([Item()])
-
-    @contextmanager
-    def fake_collection():
-        yield collection
-
-    monkeypatch.setattr(backend, "_collection", fake_collection)
-    monkeypatch.setattr(settings_module.sys, "platform", "linux")
+    monkeypatch.setattr(backend, "_run_secret_tool", run_secret_tool, raising=False)
     assert backend.get("opaque") == "fake-secret"
     backend.set("opaque", "new-fake")
     backend.delete("opaque")
-    assert collection.items[0].deleted is True
-    assert collection.created[-1][1] == b"new-fake"
+    assert backend.get("opaque") is None
+    assert calls == [
+        (("lookup", "application", "com.za38.harness.settings.v1", "account", "opaque"), None),
+        (("store", "--label=Harness Settings", "application", "com.za38.harness.settings.v1", "account", "opaque"), b"new-fake"),
+        (("clear", "application", "com.za38.harness.settings.v1", "account", "opaque"), None),
+        (("lookup", "application", "com.za38.harness.settings.v1", "account", "opaque"), None),
+    ]
+    assert all(b"new-fake" not in "\0".join(arguments).encode() for arguments, _input in calls)
 
-    collection.items = [Item(), Item()]
-    with pytest.raises(SettingsError) as error:
-        backend.get("opaque")
-    assert error.value.code == "SETTINGS_BACKEND_UNAVAILABLE"
-    with pytest.raises(SettingsError) as error:
-        backend.delete("opaque")
-    assert error.value.code == "SETTINGS_BACKEND_UNAVAILABLE"
+    stored: dict[str, bytes] = {}
 
-    class ProbeItem(Item):
-        def __init__(self, owner: "ProbeCollection", account: str, secret: bytes) -> None:
-            super().__init__(secret)
-            self.owner = owner
-            self.account = account
-
-        def delete(self) -> None:
-            self.owner.items.pop(self.account, None)
-
-    class ProbeCollection:
-        def __init__(self) -> None:
-            self.items: dict[str, ProbeItem] = {}
-
-        def search_items(self, attributes):
-            return iter(
-                [self.items[attributes["account"]]]
-                if attributes["account"] in self.items
-                else []
-            )
-
-        def create_item(self, _label, attributes, secret, replace):
-            self.items[attributes["account"]] = ProbeItem(
-                self,
-                attributes["account"],
-                secret,
-            )
-
-    probe_collection = ProbeCollection()
-
-    @contextmanager
-    def probe_context():
-        yield probe_collection
+    def round_trip(*arguments: str, input_value: bytes | None = None):
+        command, account = arguments[0], arguments[-1]
+        if command == "store":
+            assert input_value is not None
+            stored[account] = input_value
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        if command == "lookup" and account in stored:
+            return SimpleNamespace(returncode=0, stdout=stored[account], stderr=b"")
+        if command == "clear":
+            stored.pop(account, None)
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        return SimpleNamespace(returncode=1, stdout=b"", stderr=b"")
 
     probe_backend = LinuxSecretServiceCredentialBackend()
-    monkeypatch.setattr(probe_backend, "_collection", probe_context)
-    assert probe_backend.capability_probe() is True
-
-
-def test_linux_backend_capability_probe_uses_locked_and_unavailable_session_errors(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Secret Service session 的 locked/D-Bus failure 都归一化且关闭 bus。"""
-    class Bus:
-        def __init__(self) -> None:
-            self.closed = False
-
-        def close(self) -> None:
-            self.closed = True
-
-    locked_bus = Bus()
-    locked_collection = SimpleNamespace(is_locked=lambda: True)
-    locked_module = SimpleNamespace(
-        dbus_init=lambda: locked_bus,
-        get_default_collection=lambda _bus: locked_collection,
-    )
-    monkeypatch.setitem(sys.modules, "secretstorage", locked_module)
+    monkeypatch.setattr(probe_backend, "_run_secret_tool", round_trip)
     monkeypatch.setattr(settings_module.sys, "platform", "linux")
+    assert probe_backend.capability_probe() is True
+    assert stored == {}
+
+
+def test_linux_backend_secret_tool_failures_are_redacted_and_fail_closed(monkeypatch) -> None:
+    """secret-tool 缺失或运行失败时不泄漏诊断与秘密。"""
     backend = LinuxSecretServiceCredentialBackend()
-    with pytest.raises(SettingsError) as locked_error:
+
+    def unavailable(*_arguments: str, input_value: bytes | None = None):
+        del input_value
+        raise FileNotFoundError("fake secret-tool path")
+
+    monkeypatch.setattr(backend, "_run_secret_tool", unavailable, raising=False)
+    with pytest.raises(SettingsError) as missing_error:
         backend.get("opaque-account")
-    assert locked_error.value.code == "SETTINGS_BACKEND_UNAVAILABLE"
-    assert locked_bus.closed is True
+    assert missing_error.value.code == "SETTINGS_BACKEND_UNAVAILABLE"
+    assert "fake secret-tool path" not in str(missing_error.value)
 
-    unavailable_bus = Bus()
-
-    def unavailable_init():
-        raise RuntimeError("fake D-Bus unavailable")
-
-    unavailable_module = SimpleNamespace(
-        dbus_init=lambda: unavailable_bus,
-        get_default_collection=lambda _bus: unavailable_init(),
+    monkeypatch.setattr(
+        backend,
+        "_run_secret_tool",
+        lambda *_arguments, **_kwargs: SimpleNamespace(
+            returncode=1,
+            stdout=b"",
+            stderr=b"fake D-Bus unavailable",
+        ),
     )
-    monkeypatch.setitem(sys.modules, "secretstorage", unavailable_module)
     with pytest.raises(SettingsError) as unavailable_error:
-        LinuxSecretServiceCredentialBackend().get("opaque-account")
+        backend.set("opaque-account", "fake-secret")
     assert unavailable_error.value.code == "SETTINGS_BACKEND_UNAVAILABLE"
     assert "fake D-Bus unavailable" not in str(unavailable_error.value)
+    assert "fake-secret" not in str(unavailable_error.value)
+
+    monkeypatch.setattr(
+        backend,
+        "_run_secret_tool",
+        lambda *_arguments, **_kwargs: SimpleNamespace(returncode=2, stdout=b"", stderr=b""),
+    )
+    with pytest.raises(SettingsError) as malformed_error:
+        backend.delete("opaque-account")
+    assert malformed_error.value.code == "SETTINGS_BACKEND_UNAVAILABLE"
 
 
 def test_windows_backend_fake_capability_probe_requires_acl_and_cred_round_trip(monkeypatch) -> None:
