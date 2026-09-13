@@ -1,17 +1,20 @@
 ---
 id: HC-102
 title: 实现单实例 Web Handoff 与 TUI 接管生命周期
+feature_area: 历史未归类
+parent_task: -
+decomposed_by: 历史未记录
 priority: P0
-status: 进行中
+status: 已完成
 owner: chrisjingxin
 branch: codex/zc-102
 scope: 在 CLI 中实现单个 WebHandoffCoordinator、受限本机静态服务、浏览器 lifecycle 握手和 TUI 独占接管/归还流程。
 acceptance: `/web` 可从空状态或当前 Thread 启动；TUI 在 Host 确认 Web holder 后停止输入，并仅在 Host 确认 owner 恢复后解锁；正常返回、第二窗口、ready timeout、bootstrap 断线、标签页关闭和 CLI 退出均可确定收敛。
 user_docs: docs/user/交互使用.md、docs/user/故障排查.md
 developer_docs: docs/developer/architecture/架构总览.md、docs/developer/architecture/adr/0002-project-host-multi-connection.md
-test_evidence: -
-references: docs/developer/task/HC-101-Thread规范记录与Plug.md
-completed_at: -
+test_evidence: 经代码对账归档：单实例 Web Handoff 与 TUI 接管已实现（packages/cli/src/index.ts、interactive/command-dispatcher.ts、interactive/controller.ts）；HC-157-legacy 后续修复了刷新回退；未单独留存 focused 证据，功能验证并入内网整体人工测试
+references: docs/developer/task/archive/HC-101-Thread规范记录与Plug.md
+completed_at: 2026-09-13
 ---
 
 ## 背景

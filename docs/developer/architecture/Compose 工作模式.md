@@ -1,6 +1,6 @@
 # Compose 工作模式架构
 
-关联任务：[HC-155](../task/HC-155-重做Compose流程.md) 及对应 [Spec](../spec/HC-155-重做Compose流程.md)。HC-140 Work Item 引擎为历史实现。
+关联任务：[HC-155](../task/archive/HC-155-重做Compose流程.md) 及对应 [Spec](../spec/HC-155-重做Compose流程.md)。HC-140 Work Item 引擎为历史实现。
 
 ## 定位
 

@@ -8,7 +8,7 @@ branch: master
 scope: 把 Agent Plugins Harness extension 与 Claude commands Markdown 转换为只读命令定义，复用 Plugin Skill 按需加载，通过 initialize 下发类型化快照并合并进 CLI CommandRegistry。
 acceptance: 重启 Harness 后可从 Slash 菜单调用已启用 Plugin Command；命令正文不由 CLI 解析；命令和别名不能覆盖 builtin；参数作为 requested Skill args 传入；坏 Command 不影响同包 Skill/MCP/其他 Command。
 user_docs: docs/user/插件管理.md、docs/user/交互使用.md
-developer_docs: docs/developer/architecture/架构总览.md、docs/developer/扩展与插件机制设计方案.md
+developer_docs: docs/developer/architecture/架构总览.md、docs/developer/architecture/扩展与插件机制设计方案.md
 test_evidence: bun run test: 119 TypeScript passed/1 skipped and 532 Python passed/1 skipped; typecheck passed; protocol:check passed; docs/project check remains blocked only by a missing historical task reference in user-owned HC-079
 references: HC-089、HC-098、HC-099
 completed_at: 2026-07-30

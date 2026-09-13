@@ -8,7 +8,7 @@ branch: codex/zc-091-resolved-agent-spec
 scope: 建立角色级 Agent 解析结果，让 AgentEngineProfile 和 AgentEngine builder 从同一个 ResolvedAgentSpec 获得模型、Prompt、Policy、工具、Skill、MCP 与执行环境。
 acceptance: 相同角色有效配置复用同一 AgentEngine；任一会改变角色执行行为的静态配置产生不同 AgentEngine；Team、Thread、Run 和任务内容不进入 AgentEngine 身份。
 user_docs: 不涉及
-developer_docs: docs/developer/architecture/架构总览.md、docs/developer/architecture/adr/0001-agent-domain-model.md、docs/developer/research/Harness与dcode的Python-Agent架构评估.md
+developer_docs: docs/developer/architecture/架构总览.md、docs/developer/architecture/adr/0001-agent-domain-model.md、docs/developer/research/archive/Harness与dcode的Python-Agent架构评估.md
 test_evidence: bun run test：TypeScript 113 passed/1 skipped；Python 503 passed/1 skipped。bun run typecheck 通过；bun run project:check 通过。
 references: docs/developer/architecture/adr/0001-agent-domain-model.md
 completed_at: 2026-07-30

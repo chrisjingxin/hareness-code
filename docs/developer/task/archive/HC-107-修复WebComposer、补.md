@@ -5,16 +5,16 @@ feature_area: Web UI 基础工作台（历史）
 parent_task: HC-106
 decomposed_by: 历史未记录
 priority: P0
-status: 待验收
+status: 已完成
 owner: Codex
 branch: codex/zc-106
 scope: 在保持 HC-104 Interactive Adapter 分层、HC-106 双主题和 Handoff 安全边界不变的前提下，修复真实浏览器中 Thread Composer 无法输入和发送的问题，复用离线 Tree-sitter 资产为 Web Markdown fenced code 提供安全高亮，并按确认的 HTML 设计稿收敛 Timeline、按钮、布局、排版和可访问性。
 acceptance: Tabbit 中可连续输入中文、英文、换行和 IME 文本并通过按钮或键盘发送；Web 对支持语言的 fenced code 显示离线语法高亮且失败时保留纯文本；1440×900 与 390×844 的 light/dark 页面符合 HC-107 组件和几何规范，无角色溢出、空消息占位、根横向滚动或不可达主要操作。
 user_docs: docs/user/交互使用.md
 developer_docs: docs/developer/spec/HC-107-修复WebComposer、补.md、docs/developer/architecture/架构总览.md
-test_evidence: "2026-08-04：bun test --isolate tests/web（181 pass）；bun run typecheck、bun run build、bun run project:check 通过；bun run test 的 CLI/TS 324 pass、1 skip，Python 为 599 pass、1 skip、2 个既有 agent 失败（auto-edit write、package-root subagents.py），与本任务无交集。Tabbit 现有 handoff 已结束；OCR 外部 LLM 审查尚未获授权。"
-references: docs/developer/task/HC-104-实现WebInteractiv.md、docs/developer/task/HC-115-最终架构验收矩阵与Browse.md、docs/developer/task/HC-106-按蓝色工作台设计整改WebUI.md、docs/developer/task/HC-124-统筹WebUI工作台体验升级与.md
-completed_at: -
+test_evidence: 2026-08-04：bun test --isolate tests/web（181 pass）；bun run typecheck、bun run build、bun run project:check 通过；bun run test 的 CLI/TS 324 pass、1 skip，Python 为 599 pass、1 skip、2 个既有 agent 失败（auto-edit write、package-root subagents.py），与本任务无交集。Tabbit 现有 handoff 已结束；OCR 外部 LLM 审查尚未获授权。
+references: docs/developer/task/archive/HC-104-实现WebInteractiv.md、docs/developer/task/HC-115-最终架构验收矩阵与Browse.md、docs/developer/task/HC-106-按蓝色工作台设计整改WebUI.md、docs/developer/task/HC-124-统筹WebUI工作台体验升级与.md
+completed_at: 2026-09-13
 ---
 
 ## 背景
@@ -68,7 +68,7 @@ Markdown fenced code
 
 视觉目标是保留 HC-106 已完成的主题和三栏骨架，只收敛真实偏差：角色、空行、阅读 measure、控件尺寸、对齐边和响应式状态。不得借本任务重写 Interactive Core、改变 Agent 业务语义或新增静态占位按钮。
 
-完整状态、interface、语法资产路由、组件尺寸和测试决策见 [HC-107 方案设计](../spec/HC-107-修复WebComposer、补.md)。
+完整状态、interface、语法资产路由、组件尺寸和测试决策见 [HC-107 方案设计](../../spec/HC-107-修复WebComposer、补.md)。
 
 ## 实施步骤
 

@@ -10,7 +10,7 @@ acceptance: /compact 开始后 Composer 立即失焦且无法提交消息或重�
 user_docs: docs/user/交互使用.md、docs/user/故障排查.md
 developer_docs: docs/developer/architecture/架构总览.md
 test_evidence: CLI 直接相关：55 passed；Agent RunCoordinator+Server：66 passed；typecheck：通过；project:check：通过；bun run test：项目脚本 8 passed，Python 798 passed/2 skipped，唯一 WebSocket 端口沙箱失败在沙箱外隔离复跑 1 passed；最终 CLI 全量 118 passed/1 skipped，2 个既有 UI 时序用例失败，其中 Markdown 隔离复跑 1 passed，Picker 在临时恢复基线焦点条件后仍稳定失败，确认非本任务引入。
-references: docs/developer/task/HC-106-按蓝色工作台设计整改WebUI.md、docs/developer/task/HC-107-修复WebComposer、补.md
+references: docs/developer/task/HC-106-按蓝色工作台设计整改WebUI.md、docs/developer/task/archive/HC-107-修复WebComposer、补.md
 completed_at: 2026-08-04
 ---
 

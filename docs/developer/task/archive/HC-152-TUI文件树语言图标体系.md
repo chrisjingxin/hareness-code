@@ -5,7 +5,7 @@ feature_area: CLI/TUI表现层
 parent_task: -
 decomposed_by: Antigravity
 priority: P1
-status: 待验收
+status: 已完成
 owner: Antigravity
 branch: feat/hc-152-file-icons
 scope: 在 TUI 表现层引入针对编程语言与配置文件的专色图标体系（Nerd Fonts + 品牌专色映射），支持文件夹展开/收起精准识别与数十种主流编程语言图标。
@@ -13,8 +13,8 @@ acceptance: 文件夹展开与收起呈现精致的专用图标与琥珀金色�
 user_docs: 不涉及
 developer_docs: docs/developer/spec/HC-152-TUI文件树语言图标体系.md
 test_evidence: bun test packages/cli/tests/tui/presentation/file-icons.test.ts (4 pass); bun run typecheck (0 error); bun run test:ts (728 pass)
-references: docs/developer/task/HC-151-TUI主从双栏抽屉与实时预览.md
-completed_at: -
+references: docs/developer/task/archive/HC-151-TUI主从双栏抽屉与实时预览.md
+completed_at: 2026-09-13
 ---
 
 # HC-152: TUI 文件树语言图标体系

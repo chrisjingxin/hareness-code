@@ -13,7 +13,7 @@ acceptance: styles.css 不存在多套互相覆盖的视觉层，组件颜色只
 user_docs: docs/user/Web界面.md
 developer_docs: docs/developer/spec/HC-124-统筹WebUI工作台体验升级与.md
 test_evidence: "focused: cd packages/cli && bun test --isolate tests/web/presentation/styles.test.ts tests/web/presentation/web-app.test.tsx tests/web/presentation/workspace-sidebar.test.tsx tests/web/presentation/context-dock.test.tsx（49 pass, 0 fail）；bun run typecheck（通过）；bun run build（通过）；bun run project:check（通过）；bun run docs:check（通过）；bun run tasks:check（通过）；git diff --check（通过）。bun test --isolate tests/web（193 pass, 6 fail）：5 个 loopback EADDRINUSE、1 个 bundle EISDIR。bun run test（CLI 533 pass, 1 skip, 7 fail）：另有 sidecar 集成失败；Python 未由聚合脚本执行，直接 bun run test:py 因 packages/agent/.venv/bin/python 不存在退出 127。"
-references: docs/developer/task/HC-124-统筹WebUI工作台体验升级与.md、docs/developer/task/HC-106-按蓝色工作台设计整改WebUI.md、docs/developer/task/HC-107-修复WebComposer、补.md
+references: docs/developer/task/HC-124-统筹WebUI工作台体验升级与.md、docs/developer/task/HC-106-按蓝色工作台设计整改WebUI.md、docs/developer/task/archive/HC-107-修复WebComposer、补.md
 completed_at: -
 ---
 

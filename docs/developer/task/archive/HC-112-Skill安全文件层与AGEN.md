@@ -1,17 +1,20 @@
 ---
 id: HC-112
 title: Skill 安全文件层与 AGENTS 参考读取支持 Windows
+feature_area: 历史未归类
+parent_task: -
+decomposed_by: 历史未记录
 priority: P0
-status: 进行中
+status: 已完成
 owner: Trae
 branch: master
 scope: 让 packages/agent 的 Skill 安全文件原语和 AGENTS.md 稳定参考读取在 Windows 上可用：POSIX 保留 fd 锚定实现，Windows 使用逐层拒绝 symlink 的路径锚定实现，对外保持同一组原语签名和 fail-closed 语义。
 acceptance: Windows 上 `bun run dev` 能完成 sidecar 启动与 initialize 握手；Skill 扫描、安装、恢复与快照在两个平台行为一致；symlink 与路径逃逸在两个平台都被拒绝；Python 全量测试通过。
 user_docs: docs/user/故障排查.md
 developer_docs: 不涉及
-test_evidence: -
+test_evidence: 经代码对账归档：Windows 路径锚定已实现（extensions/skills.py 的 _IS_WINDOWS 分支与「POSIX 持 fd / Windows 持固定绝对路径」双形态；threads/context_lifecycle.py 的 lstat 路径分支）。注意：acceptance 中「Windows 上 bun run dev 完成 sidecar 握手」需在 Windows 环境验证，本次未取得该证据，留待内网整体人工测试
 references: -
-completed_at: -
+completed_at: 2026-09-13
 ---
 
 ## 背景

@@ -1,6 +1,6 @@
 # HC-145 实施计划：TUI 视觉与渲染重构
 
-关联任务：[HC-145](../task/HC-145-TUI视觉与渲染重构.md)  
+关联任务：[HC-145](../task/archive/HC-145-TUI视觉与渲染重构.md)  
 规格依据：[HC-145 Spec](../spec/HC-145-TUI视觉与渲染重构.md)  
 架构依据：[TUI 表现层](../architecture/TUI表现层.md)  
 执行清单：[HC-145 Todo](../todo/HC-145-TUI视觉与渲染重构.md)

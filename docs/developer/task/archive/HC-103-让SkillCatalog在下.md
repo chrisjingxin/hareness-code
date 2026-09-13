@@ -10,7 +10,7 @@ acceptance: 新增、修改、删除、启停或更新 Skill 后，同一 Thread
 user_docs: docs/user/交互使用.md
 developer_docs: docs/developer/architecture/架构总览.md、docs/developer/architecture/上下文管理改造需求.md、docs/developer/architecture/上下文管理顶层设计.md
 test_evidence: 固定窄评审：全部 P1 已关闭，无新增 P0/P1；最终直接评审测试 25 passed。独立相关回归：119 passed；安全能力隔离补充回归：60 passed。项目检查：typecheck passed；project:check passed；Python full 690 passed/1 skipped，唯一 sandbox WebSocket bind failure 在沙箱外单测 1 passed；TS full 112 passed/1 skipped，2 个既有 TUI renderer/SearchPicker 失败；git diff --check passed。
-references: docs/developer/architecture/上下文管理改造需求.md、docs/developer/architecture/上下文管理顶层设计.md、docs/developer/task/HC-095-分离共享资源与AgentEng.md
+references: docs/developer/architecture/上下文管理改造需求.md、docs/developer/architecture/上下文管理顶层设计.md、docs/developer/task/archive/HC-095-分离共享资源与AgentEng.md
 completed_at: 2026-08-03
 ---
 

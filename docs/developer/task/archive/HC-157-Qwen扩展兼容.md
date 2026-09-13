@@ -5,7 +5,7 @@ feature_area: Plugin 格式兼容
 parent_task: -
 decomposed_by: Codex
 priority: P0
-status: 待验收
+status: 已完成
 owner: 未知验收人
 branch: -
 scope: 在保留 Agent Plugins 1.0、Claude 和 Hybrid 行为的前提下，完成 Qwen/DevAgent Extension 的格式识别、静态适配、只读资源快照、Context、Agent 权限、SubagentStop 交互以及目录/ZIP 验收和文档收口；Commands、Skills、MCP 保持静态预览边界。
@@ -14,7 +14,7 @@ user_docs: docs/user/插件管理.md
 developer_docs: docs/developer/spec/HC-157-Qwen扩展兼容.md、docs/developer/plan/HC-157-Qwen扩展兼容.md、docs/developer/todo/HC-157-Qwen扩展兼容.md、docs/developer/architecture/扩展与插件机制设计方案.md
 test_evidence: 第五阶段清洁目录/ZIP 独立临时 home 验收等价：resource counts 3/3/1/1/1/1，启用后 Agents=3、Context=1、Hook=1、HookRuntimeFailure=0，Commands/Skills/Agents/MCP preview=3/1/0/1；Host 全量 53 passed，Qwen+Protocol 81 passed，CLI IPC/Protocol 24 passed，项目脚本 11 passed，protocol:generate/check、typecheck、git diff HEAD --check 通过。Agent 全量 2274 passed、6 skipped，9 个失败均为沙箱禁止 127.0.0.1 监听；CLI 全量 847 passed、1 skipped，剩余失败由 loopback 禁止、只读 worktree Tree-sitter 缓存 EPERM 和两个与 HC-157 无文件交集的既有 Compose 展示断言组成。project/docs/tasks check 仅被既有 HC-130 复核日期阻塞。所有 HC-157 测试均离线，不启动真实 MCP/Hook、不联网、不读取 .env 或凭据。
 references: /Users/beichen/Desktop/大模型/github projects/harness-code docs/plans/Harness-Qwen-DevAgent-Extension兼容计划.md；/Users/beichen/Desktop/大模型/za38-cli-extension（只读清洁打包形状参考）
-completed_at: -
+completed_at: 2026-09-13
 ---
 
 ## 问题

@@ -1,8 +1,8 @@
 # HC-107：Web Composer、离线代码高亮与界面精修
 
-原始需求：[HC-107：修复 Web Composer、补齐代码高亮并精修设计一致性](../task/HC-107-修复WebComposer、补.md)
+原始需求：[HC-107：修复 Web Composer、补齐代码高亮并精修设计一致性](../task/archive/HC-107-修复WebComposer、补.md)
 
-前置方案：[HC-104：Web Interactive Adapter 与 React 工作台](../task/HC-104-实现WebInteractiv.md)、[HC-106：蓝色 Web 工作台与显式深浅主题](../task/HC-106-按蓝色工作台设计整改WebUI.md)
+前置方案：[HC-104：Web Interactive Adapter 与 React 工作台](../task/archive/HC-104-实现WebInteractiv.md)、[HC-106：蓝色 Web 工作台与显式深浅主题](../task/HC-106-按蓝色工作台设计整改WebUI.md)
 
 后续验收：[HC-115：最终架构验收矩阵与 Browser E2E 闭环](../task/HC-115-最终架构验收矩阵与Browse.md)
 

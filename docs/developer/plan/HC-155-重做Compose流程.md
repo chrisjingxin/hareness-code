@@ -1,6 +1,6 @@
 # HC-155 重做 Compose 流程实施计划
 
-关联任务：[HC-155](../task/HC-155-重做Compose流程.md)  
+关联任务：[HC-155](../task/archive/HC-155-重做Compose流程.md)  
 规格：[HC-155 Spec](../spec/HC-155-重做Compose流程.md)  
 清单：[HC-155 Todo](../todo/HC-155-重做Compose流程.md)
 

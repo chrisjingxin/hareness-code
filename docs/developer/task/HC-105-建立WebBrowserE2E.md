@@ -13,7 +13,7 @@ acceptance: `test:web:e2e` 可重复运行（fake Agent，无真实凭据）：�
 user_docs: docs/user/交互使用.md、docs/user/故障排查.md
 developer_docs: docs/developer/architecture/架构总览.md、docs/developer/architecture/adr/0002-project-host-multi-connection.md
 test_evidence: -
-references: docs/developer/task/HC-112-Skill安全文件层与AGEN.md、docs/developer/task/archive/HC-113-InteractiveCont.md、docs/developer/task/archive/HC-114-WebUiGateway与Pr.md、docs/developer/task/HC-115-最终架构验收矩阵与Browse.md、docs/developer/task/HC-124-统筹WebUI工作台体验升级与.md
+references: docs/developer/task/archive/HC-112-Skill安全文件层与AGEN.md、docs/developer/task/archive/HC-113-InteractiveCont.md、docs/developer/task/archive/HC-114-WebUiGateway与Pr.md、docs/developer/task/HC-115-最终架构验收矩阵与Browse.md、docs/developer/task/HC-124-统筹WebUI工作台体验升级与.md
 completed_at: -
 ---
 

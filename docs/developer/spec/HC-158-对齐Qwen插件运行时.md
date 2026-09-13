@@ -1,7 +1,7 @@
 # HC-158 Qwen 插件运行时对齐规格
 
-关联 [Task](../task/HC-158-对齐Qwen插件运行时.md)、[Plan](../plan/HC-158-对齐Qwen插件运行时.md) 与
-[HC-157 基线](../task/HC-157-Qwen扩展兼容.md)。
+关联 [Task](../task/archive/HC-158-对齐Qwen插件运行时.md)、[Plan](../plan/HC-158-对齐Qwen插件运行时.md) 与
+[HC-157 基线](../task/archive/HC-157-Qwen扩展兼容.md)。
 
 ## 1. 当前事实
 

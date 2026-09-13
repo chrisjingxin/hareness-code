@@ -10,7 +10,7 @@ acceptance: 同一 Host 的不同 AgentEngine 只能并行执行安全读取；�
 user_docs: docs/user/安全与沙箱.md
 developer_docs: docs/developer/architecture/架构总览.md
 test_evidence: bun run typecheck=pass; bun run test=pass (TS 113 passed, 1 skipped; Python 513 passed, 1 skipped); bun run project:check=pass
-references: docs/developer/research/Harness与dcode的Python-Agent架构评估.md、docs/developer/task/HC-096-建立受控Delegation的.md
+references: docs/developer/research/archive/Harness与dcode的Python-Agent架构评估.md、docs/developer/task/archive/HC-096-建立受控Delegation的.md
 completed_at: 2026-07-30
 ---
 

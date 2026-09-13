@@ -1,6 +1,6 @@
 # HC-158 Qwen 插件运行时对齐 Todo
 
-关联 [Task](../task/HC-158-对齐Qwen插件运行时.md)、[Spec](../spec/HC-158-对齐Qwen插件运行时.md) 与
+关联 [Task](../task/archive/HC-158-对齐Qwen插件运行时.md)、[Spec](../spec/HC-158-对齐Qwen插件运行时.md) 与
 [Plan](../plan/HC-158-对齐Qwen插件运行时.md)。
 
 ## Phase 0：effective gate

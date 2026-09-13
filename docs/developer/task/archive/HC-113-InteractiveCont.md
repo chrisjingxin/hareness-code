@@ -10,7 +10,7 @@ acceptance: `createInteractiveController` 在 packages/cli/src 生产代码中�
 user_docs: 不涉及
 developer_docs: docs/developer/architecture/架构总览.md
 test_evidence: "createInteractiveController 生产调用点仅 index.ts + web/app.tsx（架构测试显式豁免 HC-114，TUI 侧零引用）；web-handoff-root.test.tsx 两轮 handoff 往返后 controller 未被 close（spy 断言 closed=[]）且按 Web Thread 重同步；adapter-resync.test.ts 3 用例（Web Thread 重开/null 清空/closed no-op）；index.test.ts shutdown 顺序源码断言（runTui → controller.close → agent.stop）；cd packages/cli && bun test 396 测试 4 fail 全为 web server happy-dom 测试间干扰预存问题（单独运行全绿，属 HC-115 领域）；bun run typecheck、bun run project:check 通过"
-references: docs/developer/task/HC-102-实现单实例WebHandoff.md、docs/developer/task/HC-103-让SkillCatalog在下.md
+references: docs/developer/task/archive/HC-102-实现单实例WebHandoff.md、docs/developer/task/archive/HC-103-让SkillCatalog在下.md
 completed_at: 2026-08-05
 ---
 

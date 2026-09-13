@@ -2,7 +2,7 @@
 
 原始任务：[HC-124：统筹 Web UI 工作台体验升级与验收闭环](../task/HC-124-统筹WebUI工作台体验升级与.md)
 
-历史基础：[HC-104](../task/HC-104-实现WebInteractiv.md)、[HC-106](../task/HC-106-按蓝色工作台设计整改WebUI.md)、[HC-107](../task/HC-107-修复WebComposer、补.md)
+历史基础：[HC-104](../task/archive/HC-104-实现WebInteractiv.md)、[HC-106](../task/HC-106-按蓝色工作台设计整改WebUI.md)、[HC-107](../task/archive/HC-107-修复WebComposer、补.md)
 
 最终验收：[HC-115](../task/HC-115-最终架构验收矩阵与Browse.md)（已过时 HC-105 的 Browser E2E 范围并入其中）
 

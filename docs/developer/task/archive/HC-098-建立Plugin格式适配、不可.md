@@ -8,9 +8,9 @@ branch: master
 scope: 支持本地目录和 zip 的 Agent Plugins 1.0、Claude Code Plugin 自动识别与离线校验，建立内容寻址 PluginStore、版本化 registry、显式启停和组件兼容报告，并通过 JSON-RPC 暴露管理能力。
 acceptance: 原生或 Claude Plugin 可被安全校验并复制安装为停用状态；启用前必须明确接受当前 capability fingerprint；列表和详情不泄露宿主绝对路径；恶意路径、链接和超限归档被拒绝；删除只移除安装记录并默认保留数据目录。
 user_docs: docs/user/插件管理.md
-developer_docs: docs/developer/architecture/架构总览.md、docs/developer/扩展与插件机制设计方案.md
+developer_docs: docs/developer/architecture/架构总览.md、docs/developer/architecture/扩展与插件机制设计方案.md
 test_evidence: bun run test:ts：116 passed/1 skipped；packages/agent .venv/bin/python -m pytest -q：524 passed/1 skipped；bun run typecheck：通过；bun run protocol:check：通过；bun run docs:check：仅被用户未跟踪 HC-079 的缺失历史任务引用阻塞
-references: docs/developer/扩展与插件机制设计方案.md
+references: docs/developer/architecture/扩展与插件机制设计方案.md
 completed_at: 2026-07-30
 ---
 

@@ -13,7 +13,7 @@ acceptance: HC-125～HC-130 全部完成或有依据地标记过时；HC-115 的
 user_docs: docs/user/交互使用.md、docs/user/Web界面.md
 developer_docs: docs/developer/spec/HC-124-统筹WebUI工作台体验升级与.md、docs/developer/architecture/架构总览.md
 test_evidence: -
-references: docs/developer/task/HC-079-提供本地WebUI与受令牌保护.md、docs/developer/task/HC-104-实现WebInteractiv.md、docs/developer/task/HC-106-按蓝色工作台设计整改WebUI.md、docs/developer/task/HC-107-修复WebComposer、补.md、docs/developer/task/HC-115-最终架构验收矩阵与Browse.md
+references: docs/developer/task/archive/HC-079-提供本地WebUI与受令牌保护.md、docs/developer/task/archive/HC-104-实现WebInteractiv.md、docs/developer/task/HC-106-按蓝色工作台设计整改WebUI.md、docs/developer/task/archive/HC-107-修复WebComposer、补.md、docs/developer/task/HC-115-最终架构验收矩阵与Browse.md
 completed_at: -
 ---
 

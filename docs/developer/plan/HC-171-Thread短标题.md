@@ -1,6 +1,6 @@
 # HC-171 Thread短标题实施计划
 
-关联：[Task](../task/HC-171-Thread短标题.md) · [Spec](../spec/HC-171-Thread短标题.md) · [Todo](../todo/HC-171-Thread短标题.md)
+关联：[Task](../task/archive/HC-171-Thread短标题.md) · [Spec](../spec/HC-171-Thread短标题.md) · [Todo](../todo/HC-171-Thread短标题.md)
 
 不新增范围。实现严格按 Todo 执行，一次只推进到下一个可演示停点；每到停点必须更新 Todo 证据与 `tmp/handoff.md`，然后停下等用户验收。未经用户要求不得继续下一停点。
 

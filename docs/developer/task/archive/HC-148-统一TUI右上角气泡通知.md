@@ -5,7 +5,7 @@ feature_area: 终端交互与表现层
 parent_task: -
 decomposed_by: chrisjingxin
 priority: P1
-status: 待验收
+status: 已完成
 owner: chrisjingxin
 branch: feat/hc-148-tui-toast
 scope: 设计并实现 TUI 统一右上角气泡通知系统（Toast System）：在 TUI Adapter 建立多条目队列（最多 3 条）与定时自动淡出（默认 3 秒）状态模型；在 OpenTUI 表现层实现高层级（zIndex: 120）右上角气泡浮层组件 ToastContainer，支持 success / info / warning / error 四种语义样式与图标；将 /btw 复制等轻量操作迁移至气泡通知，同时保留 Timeline 末尾长系统日志。
@@ -14,7 +14,7 @@ user_docs: docs/user/交互使用.md
 developer_docs: docs/developer/spec/HC-148-统一TUI右上角气泡通知.md、docs/developer/plan/HC-148-统一TUI右上角气泡通知.md、docs/developer/todo/HC-148-统一TUI右上角气泡通知.md
 test_evidence: bun test packages/cli/tests/tui/toast.test.ts packages/cli/tests/tui/btw-modal.test.ts packages/cli/tests/tui/architecture.test.ts (15 passed); bun run test (714 TS passed, 2174 py passed); bun run typecheck; bun run project:check
 references: docs/developer/task/archive/HC-147-实现BTW临时问答.md
-completed_at: -
+completed_at: 2026-09-13
 ---
 
 # HC-148 统一 TUI 右上角气泡通知

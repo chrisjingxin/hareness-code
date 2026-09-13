@@ -13,7 +13,7 @@ acceptance: 主 Agent、受控子 Agent、tool_search、静态 schema 指纹和�
 user_docs: docs/user/交互使用.md、docs/user/安全与沙箱.md
 developer_docs: docs/developer/spec/HC-131-统筹弱模型优先的文件读写可靠性.md、docs/developer/architecture/架构总览.md
 test_evidence: focused: packages/agent/.venv/bin/python -m pytest -q tests/tools/test_tools_file.py tests/tools/test_harness_tools.py tests/runtime/test_agent.py tests/runtime/test_deferred_tools.py tests/runtime/test_subagents_tools.py tests/policy/test_approval_policy.py tests/policy/test_rule_parser.py tests/policy/test_tool_risk.py tests/policy/test_concurrency.py tests/policy/test_permission_rules.py tests/policy/test_sensitive_paths.py tests/host/test_approval_protocol.py -> 382 passed, 1 warning; Agent full: bun run test:py with loopback permission -> 1718 passed, 2 skipped, 23 warnings; bun run project:check -> passed; bun run typecheck -> passed; bun run test:project -> 9 passed; bun run test -> test:ts 534 passed, 1 skipped, 6 environment failures (5 EADDRINUSE loopback ports, 1 EISDIR Bun symlink bundle), test:py separately passed; no version change.
-references: docs/developer/task/HC-131-统筹弱模型优先的文件读写可靠性.md、docs/developer/task/HC-092-落实角色级Policy与能力视.md、docs/developer/spec/HC-117-「本项目允许」生成的规则匹配不.md
+references: docs/developer/task/HC-131-统筹弱模型优先的文件读写可靠性.md、docs/developer/task/archive/HC-092-落实角色级Policy与能力视.md、docs/developer/spec/HC-117-「本项目允许」生成的规则匹配不.md
 completed_at: -
 ---
 

@@ -13,7 +13,7 @@ acceptance: 文件审批明确显示操作、逻辑路径、增删统计和截�
 user_docs: docs/user/交互使用.md、docs/user/Web界面.md、docs/user/安全与沙箱.md
 developer_docs: docs/developer/spec/HC-144-文件审批高亮Diff.md、docs/developer/architecture/架构总览.md
 test_evidence: 修复拒绝并反馈恢复值：LangChain RejectDecision 使用顶层 message，feedback 不再被忽略；Agent approval focused 26 passed，Web presentation feedback payload 回归通过，git diff --check 通过。
-references: docs/developer/task/HC-131-统筹弱模型优先的文件读写可靠性.md、docs/developer/spec/HC-131-统筹弱模型优先的文件读写可靠性.md、docs/developer/task/HC-142-截断Diff失败关闭.md、docs/developer/task/HC-112-Skill安全文件层与AGEN.md
+references: docs/developer/task/HC-131-统筹弱模型优先的文件读写可靠性.md、docs/developer/spec/HC-131-统筹弱模型优先的文件读写可靠性.md、docs/developer/task/HC-142-截断Diff失败关闭.md、docs/developer/task/archive/HC-112-Skill安全文件层与AGEN.md
 completed_at: 2026-08-12
 ---
 

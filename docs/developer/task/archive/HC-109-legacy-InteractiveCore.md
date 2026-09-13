@@ -10,7 +10,7 @@ acceptance: `interactive/` 目录对 `../ipc/`、react、opentui、DOM、WebSock
 user_docs: 不涉及
 developer_docs: docs/developer/architecture/架构总览.md
 test_evidence: bun run typecheck (pass), bun test --isolate (346 pass, 0 fail), bun run build (pass), bun run project:check (pass)
-references: docs/developer/task/HC-103-让SkillCatalog在下.md
+references: docs/developer/task/archive/HC-103-让SkillCatalog在下.md
 completed_at: 2026-08-05
 ---
 

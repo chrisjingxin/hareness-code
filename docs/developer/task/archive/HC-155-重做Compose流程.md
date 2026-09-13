@@ -5,7 +5,7 @@ feature_area: Agent 工作模式与结构化研发流程
 parent_task: -
 decomposed_by: Grok
 priority: P1
-status: 待验收
+status: 已完成
 owner: Grok
 branch: feat/hc-155-compose-session
 scope: 按已确认意图重做 Compose：删除 Work Item 引擎，保留 Tab 独立 Mode 与 Grill→Task→Spec→Plan→实现→检视主路径；测试不是进度格，由实现内部 Runtime 推断并最多跑一次；检视用内置 code-review-and-quality 看本套 Compose 改过的代码并写出 review.md。主对话流式可见，Grill 用 ask_user；进度只靠 docs/compose 文档与确认；Implement / 检视用同一 Thread 的 fresh execution。不为 HC-138/140 内部实现保留兼容层。
@@ -14,7 +14,7 @@ user_docs: docs/user/交互使用.md、docs/user/安全与沙箱.md
 developer_docs: docs/developer/architecture/Compose 工作模式.md、docs/developer/architecture/架构总览.md、docs/developer/spec/HC-155-重做Compose流程.md、docs/developer/plan/HC-155-重做Compose流程.md、docs/developer/todo/HC-155-重做Compose流程.md
 test_evidence: pytest -q tests/compose、bun test packages/cli/tests/presentation-shared/compose-progress-bar.test.ts、bun run protocol:check、bun run project:check
 references: docs/developer/task/archive/HC-140-重构组合工作模式.md、docs/developer/task/HC-138-建立BuildCompose双.md、docs/developer/task/archive/HC-139-组合模式过程可观察.md、docs/developer/research/Compose Mode 可行性调研.md
-completed_at: -
+completed_at: 2026-09-13
 ---
 
 # HC-155 重做 Compose 流程

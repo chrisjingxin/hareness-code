@@ -13,7 +13,7 @@ acceptance: Topbar 与 Composer 上方分别表达全局 Run 和当前动作且�
 user_docs: docs/user/交互使用.md、docs/user/Web界面.md
 developer_docs: docs/developer/spec/HC-124-统筹WebUI工作台体验升级与.md
 test_evidence: -
-references: docs/developer/task/HC-124-统筹WebUI工作台体验升级与.md、docs/developer/task/HC-107-修复WebComposer、补.md、docs/developer/task/HC-125-统一Web工作台视觉token.md、docs/developer/task/HC-126-建立Web工作台三档响应式与外.md
+references: docs/developer/task/HC-124-统筹WebUI工作台体验升级与.md、docs/developer/task/archive/HC-107-修复WebComposer、补.md、docs/developer/task/HC-125-统一Web工作台视觉token.md、docs/developer/task/HC-126-建立Web工作台三档响应式与外.md
 completed_at: -
 ---
 

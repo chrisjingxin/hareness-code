@@ -1,6 +1,6 @@
 # HC-102：单实例 Web Handoff 与 TUI 接管生命周期
 
-原始需求：[HC-102](../task/HC-102-实现单实例WebHandoff.md)  
+原始需求：[HC-102](../task/archive/HC-102-实现单实例WebHandoff.md)  
 前置方案：[HC-101：Host 控制租约与可撤销 Web Attachment](../task/archive/HC-101-Thread规范记录与Plug.md)  
 架构依据：[ADR 0002：Project-scoped Agent Host、多个 Connection 与单 Run owner](../architecture/adr/0002-project-host-multi-connection.md)
 

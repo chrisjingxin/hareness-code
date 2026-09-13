@@ -1,6 +1,6 @@
 # HC-157 Qwen 扩展兼容 Todo
 
-关联 [Task](../task/HC-157-Qwen扩展兼容.md)、[Spec](../spec/HC-157-Qwen扩展兼容.md) 与 [Plan](../plan/HC-157-Qwen扩展兼容.md)。
+关联 [Task](../task/archive/HC-157-Qwen扩展兼容.md)、[Spec](../spec/HC-157-Qwen扩展兼容.md) 与 [Plan](../plan/HC-157-Qwen扩展兼容.md)。
 
 ## 可演示停点：Qwen/DevAgent 静态校验
 

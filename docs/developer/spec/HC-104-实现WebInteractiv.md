@@ -1,8 +1,8 @@
 # HC-104：Web Interactive Adapter 与 React 工作台
 
-原始需求：[HC-104：实现 Web Interactive Adapter 与 TUI 功能对齐](../task/HC-104-实现WebInteractiv.md)
+原始需求：[HC-104：实现 Web Interactive Adapter 与 TUI 功能对齐](../task/archive/HC-104-实现WebInteractiv.md)
 
-前置方案：[HC-102：单实例 Web Handoff 与 TUI 接管生命周期](../task/HC-102-实现单实例WebHandoff.md) · [HC-103：Interactive Core 与 TUI 迁移](../task/archive/HC-103-让SkillCatalog在下.md)
+前置方案：[HC-102：单实例 Web Handoff 与 TUI 接管生命周期](../task/archive/HC-102-实现单实例WebHandoff.md) · [HC-103：Interactive Core 与 TUI 迁移](../task/archive/HC-103-让SkillCatalog在下.md)
 
 后续验证：[HC-115：最终架构验收矩阵与 Browser E2E](../task/HC-115-最终架构验收矩阵与Browse.md)
 

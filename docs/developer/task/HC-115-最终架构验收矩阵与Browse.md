@@ -13,7 +13,7 @@ acceptance: A-01~A-12 每项有可重复执行的自动化断言与证据（记�
 user_docs: docs/user/交互使用.md、docs/user/故障排查.md
 developer_docs: docs/developer/architecture/架构总览.md、docs/developer/architecture/adr/0002-project-host-multi-connection.md
 test_evidence: -
-references: docs/developer/task/HC-105-建立WebBrowserE2E.md、docs/developer/task/HC-108-收敛迁移子进程强制清理与残留文.md、docs/developer/task/HC-109-修复旧版PromptEpoch.md、docs/developer/task/HC-110-修复compact操作门禁与超.md、docs/developer/task/HC-111-让手动压缩按正收益提交.md、docs/developer/task/HC-112-Skill安全文件层与AGEN.md、docs/developer/task/archive/HC-113-InteractiveCont.md、docs/developer/task/archive/HC-114-WebUiGateway与Pr.md
+references: docs/developer/task/HC-105-建立WebBrowserE2E.md、docs/developer/task/archive/HC-108-收敛迁移子进程强制清理与残留文.md、docs/developer/task/archive/HC-109-修复旧版PromptEpoch.md、docs/developer/task/archive/HC-110-修复compact操作门禁与超.md、docs/developer/task/archive/HC-111-让手动压缩按正收益提交.md、docs/developer/task/archive/HC-112-Skill安全文件层与AGEN.md、docs/developer/task/archive/HC-113-InteractiveCont.md、docs/developer/task/archive/HC-114-WebUiGateway与Pr.md
 completed_at: -
 ---
 

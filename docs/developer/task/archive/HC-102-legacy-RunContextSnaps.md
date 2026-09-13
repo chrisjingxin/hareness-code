@@ -8,7 +8,7 @@ branch: master
 scope: 将 Thread 永久 PromptEpoch 改为每次顶层 Run 的不可变上下文快照，并解析 Claude Plugin command Hook、stdio LSP、background Monitor，接入 Host 生命周期、工具边界和统一资源清理。
 acceptance: 同一 Thread 修改 AGENTS 后下一 Run 使用新内容且当前 Run 不变；启用 Plugin 可执行受信 command Hook、提供 stdio code intelligence、启动并关闭 Monitor；不支持类型逐项诊断且不静默生效。
 user_docs: docs/user/交互使用.md、docs/user/插件管理.md、docs/user/安全与沙箱.md
-developer_docs: docs/developer/architecture/架构总览.md、docs/developer/扩展与插件机制设计方案.md、docs/developer/architecture/上下文管理改造需求.md、docs/developer/architecture/上下文管理顶层设计.md
+developer_docs: docs/developer/architecture/架构总览.md、docs/developer/architecture/扩展与插件机制设计方案.md、docs/developer/architecture/上下文管理改造需求.md、docs/developer/architecture/上下文管理顶层设计.md
 test_evidence: Python 非沙箱回归 808 passed、2 skipped；Host Plugin Runtime 专项通过；TypeScript 128 passed、1 skipped；bun run typecheck、bun run build、bun run protocol:check、bun run test:project 通过。
 references: HC-098、HC-099、HC-101
 completed_at: 2026-08-05

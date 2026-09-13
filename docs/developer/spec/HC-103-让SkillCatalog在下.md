@@ -2,9 +2,9 @@
 
 原始需求：[HC-103：提取共享交互内核并迁移 TUI](../task/archive/HC-103-legacy-提取共享交互内核并迁移TUI.md)
 
-相关方案：[HC-102：单实例 Web Handoff 与 TUI 接管生命周期](../task/HC-102-实现单实例WebHandoff.md)
+相关方案：[HC-102：单实例 Web Handoff 与 TUI 接管生命周期](../task/archive/HC-102-实现单实例WebHandoff.md)
 
-后续任务：[HC-104：实现 Web UI Adapter 与 TUI 功能对齐](../task/HC-104-实现WebInteractiv.md)
+后续任务：[HC-104：实现 Web UI Adapter 与 TUI 功能对齐](../task/archive/HC-104-实现WebInteractiv.md)
 
 ## 通俗说明
 

@@ -1,6 +1,6 @@
 # HC-176 Agent Plugins 1.0.0 完整支持与多格式共存设计
 
-关联任务：[HC-176](../task/HC-176-支持Agent插件1.0.0.md)
+关联任务：[HC-176](../task/archive/HC-176-支持Agent插件1.0.0.md)
 
 ## 通俗问题说明
 

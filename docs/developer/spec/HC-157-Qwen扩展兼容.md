@@ -1,6 +1,6 @@
 # HC-157 Qwen 扩展兼容规格
 
-关联 [Task](../task/HC-157-Qwen扩展兼容.md)。
+关联 [Task](../task/archive/HC-157-Qwen扩展兼容.md)。
 
 ## 通俗流程
 

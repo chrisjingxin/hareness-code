@@ -10,7 +10,7 @@ acceptance: presentation-shared/ 下 7 个模块全部落地且只含纯函数/�
 user_docs: 不涉及
 developer_docs: docs/developer/architecture/架构总览.md
 test_evidence: "presentation-shared 7 模块落地（language-catalog 复用 HC-108 产物，activity-presenter 并入 timeline-presenter）；tests/presentation-shared 40 用例全绿（含零平台 import 架构断言与两端语义键收敛断言）；interactive/selectors 5 个 Selector + FeatureAvailability 12 用例全绿（含 JSON 往返相等可序列化断言、纯 capability 门 run 期间保持 true）；grep Capability src/tui src/web 仅剩 web/app.tsx 启动层 clientCapabilities 声明，presentation 层面板可见性与 skills/mcp manage 门全部经 selectNavigationView 消费（CAPABILITY_GATE 白名单有真实消费方）；TUI/Web 各自重复实现已删除（collapseToolOutput/argumentSummary/truncateSingleLine/APPROVAL_LABELS 等，grep 单一定义）；cd packages/cli && bun test 389+ pass，4 fail 为 web server happy-dom 测试间干扰预存问题（单独运行全绿，属 HC-115 领域）；code review（code-reviewer agent）REQUEST-CHANGES 已闭环：panels manage 门迁移、可序列化断言加固、未知 decision 过滤、语义键收敛测试；bun run typecheck、bun run project:check 通过"
-references: docs/developer/task/HC-108-收敛迁移子进程强制清理与残留文.md
+references: docs/developer/task/archive/HC-108-收敛迁移子进程强制清理与残留文.md
 completed_at: 2026-08-05
 ---
 

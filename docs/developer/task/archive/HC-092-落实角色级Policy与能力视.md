@@ -8,9 +8,9 @@ branch: master
 scope: 从全局资源快照和角色 ExecutionPolicy 计算只会收紧的有效能力视图，并在工具暴露与实际执行两层强制执行。
 acceptance: Planner 等只读角色看不到也无法直接调用写文件、Shell 或未授权 MCP 工具；子 Agent 无法通过配置、Prompt 或伪造 tool call 扩大父级权限。
 user_docs: docs/user/安全与沙箱.md
-developer_docs: docs/developer/architecture/架构总览.md、docs/developer/adr/0001-agent-domain-model.md
+developer_docs: docs/developer/architecture/架构总览.md、docs/developer/architecture/adr/0001-agent-domain-model.md
 test_evidence: cd packages/agent && .venv/bin/python -m pytest -q（535 passed, 1 skipped）；局部能力策略/Agent catalog/spec/graph 回归 19 passed
-references: docs/developer/adr/0001-agent-domain-model.md
+references: docs/developer/architecture/adr/0001-agent-domain-model.md
 completed_at: 2026-07-30
 ---
 

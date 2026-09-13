@@ -2,7 +2,7 @@
 
 原始需求：[HC-106：按蓝色工作台设计整改 Web UI 并支持显式深浅主题](../task/HC-106-按蓝色工作台设计整改WebUI.md)
 
-前置方案：[HC-104：Web Interactive Adapter 与 React 工作台](../task/HC-104-实现WebInteractiv.md)
+前置方案：[HC-104：Web Interactive Adapter 与 React 工作台](../task/archive/HC-104-实现WebInteractiv.md)
 
 后续验收：[HC-115：最终架构验收矩阵与 Browser E2E](../task/HC-115-最终架构验收矩阵与Browse.md)
 

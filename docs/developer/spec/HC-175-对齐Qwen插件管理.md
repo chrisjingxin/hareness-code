@@ -2,7 +2,7 @@
 
 关联任务：[HC-175](../task/archive/HC-175-对齐Qwen插件管理.md)
 
-上游：[HC-157](../task/HC-157-Qwen扩展兼容.md)、[HC-158](../task/HC-158-对齐Qwen插件运行时.md)
+上游：[HC-157](../task/archive/HC-157-Qwen扩展兼容.md)、[HC-158](../task/archive/HC-158-对齐Qwen插件运行时.md)
 
 参考：Qwen Code 本地只读快照 `6a432ad2ebce57b0b48cd3d6a8f4f7fab50c33fe` 的 `packages/core/src/extension/`。
 

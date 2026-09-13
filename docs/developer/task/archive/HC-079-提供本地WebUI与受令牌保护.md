@@ -1,17 +1,20 @@
 ---
 id: HC-079
 title: 提供本地 Web UI 与受令牌保护的 Gateway
+feature_area: 历史未归类
+parent_task: -
+decomposed_by: 历史未记录
 priority: P1
-status: 进行中
+status: 已完成
 owner: codex
 branch: master
 scope: 在 CLI 包内增加仅监听 loopback 的本地 Web 界面，将浏览器 WebSocket 请求安全桥接到既有 Python sidecar JSON-RPC，并覆盖对话、流式事件、审批、Thread 和模型选择。
 acceptance: 用户可通过本地随机令牌 URL 打开浏览器界面并完成一次可取消的 Agent run；未授权 WebSocket 被拒绝；API Key 不进入浏览器；CLI、TUI 和无头模式保持兼容。
 user_docs: docs/user/Web界面.md、docs/user/快速开始.md
 developer_docs: docs/developer/architecture/架构总览.md
-test_evidence: -
+test_evidence: 经代码对账归档：本地 Web UI 与受令牌保护的 Gateway 已实现（packages/cli/src/web；HC-104/106/107 均在其上构建）；未单独留存 focused 证据，任务由债务清理批次关闭，功能验证并入内网整体人工测试
 references: -
-completed_at: -
+completed_at: 2026-09-13
 ---
 
 ## 范围

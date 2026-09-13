@@ -1,6 +1,6 @@
 # HC-157 Qwen 扩展兼容实施计划
 
-关联 [Task](../task/HC-157-Qwen扩展兼容.md) 与 [Spec](../spec/HC-157-Qwen扩展兼容.md)。
+关联 [Task](../task/archive/HC-157-Qwen扩展兼容.md) 与 [Spec](../spec/HC-157-Qwen扩展兼容.md)。
 
 ## 阶段顺序
 

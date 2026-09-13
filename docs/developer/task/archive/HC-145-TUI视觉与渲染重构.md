@@ -5,7 +5,7 @@ feature_area: TUI 表现层
 parent_task: -
 decomposed_by: Grok
 priority: P1
-status: 进行中
+status: 已完成
 owner: Grok
 branch: feat/hc-145-tui-visual
 scope: 只改 TUI 视觉系统与渲染架构。对话记录按类型拆成独立组件，工具按名字分流到 Inline/Block/Diff/Generic，审批和问答改到底部 Dock，思考与长输出做有界绘制。Web UI、Protocol、Agent、Sidebar 和新产品面不在范围。
@@ -14,7 +14,7 @@ user_docs: docs/user/交互使用.md
 developer_docs: docs/developer/spec/HC-145-TUI视觉与渲染重构.md、docs/developer/plan/HC-145-TUI视觉与渲染重构.md、docs/developer/todo/HC-145-TUI视觉与渲染重构.md、docs/developer/architecture/TUI表现层.md
 test_evidence: 2026-08-13 WP7：bun run typecheck exit 0；cd packages/cli && bun test tests/tui → 140 pass；bun run project:check exit 0；git diff --check 无空白错误；无版本号变更
 references: docs/developer/architecture/adr/0003-single-interactive-core-dual-renderer.md、docs/developer/task/archive/HC-118-TUIWeb思考摘要与运行进度.md、docs/developer/task/archive/HC-140-重构组合工作模式.md、docs/developer/project/新功能候选.md
-completed_at: -
+completed_at: 2026-09-13
 ---
 
 # HC-145 TUI 视觉与渲染重构
@@ -25,7 +25,7 @@ completed_at: -
 
 这些问题出在 TUI 表现层，不是 Interactive Core 或协议坏了。本任务换一套用户看得见的画法，并拆开渲染架构，让以后加一种工具不必再改整张时间线。
 
-需求已用 `mattpocock:grill-me` 确认，结论见下文与 [规格](../spec/HC-145-TUI视觉与渲染重构.md)。
+需求已用 `mattpocock:grill-me` 确认，结论见下文与 [规格](../../spec/HC-145-TUI视觉与渲染重构.md)。
 
 ## 用户最终得到什么
 
@@ -45,13 +45,13 @@ completed_at: -
 - `packages/cli/src/tui/application/adapter.ts` 的本地焦点、展开、有界绘制所需状态。
 - Interactive Core 仅允许补领域事实：用户消息带上该次 Run 的 `workMode`。不改 Web 外观。
 - 纯绘制限额函数可放进 `presentation-shared`，供 TUI 调用；Web 本任务不消费、不改样式。
-- 用户文档 `docs/user/交互使用.md`，以及 [TUI 表现层](../architecture/TUI表现层.md)。
+- 用户文档 `docs/user/交互使用.md`，以及 [TUI 表现层](../../architecture/TUI表现层.md)。
 
 ## 非范围
 
 - Web UI 任何外观或交互改动。
 - Sidebar、点进 Subagent 子对话、Plugin 专用 Renderer、独立 JSON 结果卡、独立 Skill 卡。
-- 重做 Compose 阶段顶栏（以后要做，已记入 [新功能候选](../project/新功能候选.md)）。
+- 重做 Compose 阶段顶栏（以后要做，已记入 [新功能候选](../../project/新功能候选.md)）。
 - 为恢复历史按条补 Mode 而改 Protocol / Transcript / SQLite。恢复时用已有 `threadMode`。
 - 修改审批授权语义、文件 Snapshot、CAS、Agent 执行或 JSON-RPC 方法。
 - 为旧 TUI 卡片、旧色值或旧审批位置保留兼容分支。
@@ -67,8 +67,8 @@ completed_at: -
 
 ## 文档与实现
 
-- 行为与 interface：[规格](../spec/HC-145-TUI视觉与渲染重构.md)
-- 步骤：[计划](../plan/HC-145-TUI视觉与渲染重构.md)
-- 勾选清单：[Todo](../todo/HC-145-TUI视觉与渲染重构.md)
+- 行为与 interface：[规格](../../spec/HC-145-TUI视觉与渲染重构.md)
+- 步骤：[计划](../../plan/HC-145-TUI视觉与渲染重构.md)
+- 勾选清单：[Todo](../../todo/HC-145-TUI视觉与渲染重构.md)
 - 实现使用 `agent-skills:test-driven-development`；Review 使用 `agent-skills:code-review-and-quality`。
 - 当前未发版，不改 `VERSION`。

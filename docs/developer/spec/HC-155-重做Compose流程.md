@@ -1,6 +1,6 @@
 # HC-155 重做 Compose 流程规格
 
-关联任务：[HC-155](../task/HC-155-重做Compose流程.md)  
+关联任务：[HC-155](../task/archive/HC-155-重做Compose流程.md)  
 被替代的现行实现：[HC-140](../task/archive/HC-140-重构组合工作模式.md) 及其 [Spec](HC-140-重构组合工作模式.md)  
 架构入口：[Compose 工作模式](../architecture/Compose 工作模式.md)
 

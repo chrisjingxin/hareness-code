@@ -8,7 +8,7 @@ branch: master
 scope: 在 ThreadPersistence 中建立只追加的用户、助手和工具语义记录，并补齐 Plugin Agent/Agent Team 的只读目录、生成、启动、查询、取消 Protocol、Client 与 TUI 入口。
 acceptance: 压缩后 threads.open 仍返回完整用户历史；用户可通过 /agents 和 /teams 操作扩展角色与 Team；成员任务统一经 AgentDelegator 执行并可恢复；旧数据迁移不伪造缺失记录。
 user_docs: docs/user/交互使用.md、docs/user/插件管理.md
-developer_docs: docs/developer/architecture/架构总览.md、docs/developer/扩展与插件机制设计方案.md、docs/developer/architecture/上下文管理改造需求.md、docs/developer/architecture/上下文管理顶层设计.md
+developer_docs: docs/developer/architecture/架构总览.md、docs/developer/architecture/扩展与插件机制设计方案.md、docs/developer/architecture/上下文管理改造需求.md、docs/developer/architecture/上下文管理顶层设计.md
 test_evidence: Python 非沙箱回归 808 passed、2 skipped；Host Agent/Team/Plugin 控制面专项通过；TypeScript 128 passed、1 skipped；bun run typecheck、bun run build、bun run protocol:check、bun run test:project 通过。
 references: HC-096、HC-097、HC-098
 completed_at: 2026-08-05

@@ -1,6 +1,6 @@
 # HC-155 重做 Compose 流程执行清单
 
-关联：[Task](../task/HC-155-重做Compose流程.md) · [Spec](../spec/HC-155-重做Compose流程.md) · [Plan](../plan/HC-155-重做Compose流程.md)
+关联：[Task](../task/archive/HC-155-重做Compose流程.md) · [Spec](../spec/HC-155-重做Compose流程.md) · [Plan](../plan/HC-155-重做Compose流程.md)
 
 每项写清改什么、跑哪条测试、期望看见什么。一个停点做完即停，等用户看过再做下一段。
 

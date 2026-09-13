@@ -10,7 +10,7 @@ acceptance: controller.ts 不再承载具体业务逻辑（≤300 行，只做 i
 user_docs: 不涉及
 developer_docs: docs/developer/architecture/架构总览.md
 test_evidence: "拆分后 `wc -l packages/cli/src/interactive/controller.ts` = 300（≤300）；`grep -rn \"from '../features\" packages/cli/src/interactive/features/` 无匹配（Feature 间零直接依赖）；`cd packages/cli && bun test --isolate tests/interactive`：71 pass / 0 fail（含拆分迁移后等价断言 + 新增 mcp-feature 失败路径测试）；`bunx tsc --noEmit` 通过；`bun run test` 全量（isolate）：interactive 相关全绿，11 个 TUI/index 失败为 `@opentui/core` 0.4.3 native 绑定在 bun --isolate 打包下的加载失败（node_modules 内部错误），已用 `git stash` 基线验证为改动前预存问题，非本任务引入；非 isolate `bun test` 下另有 4 个 web 子集 happy-dom fetch 测试间干扰失败（tests/web/integration.test.ts、tests/web/server.test.ts），单独运行各文件全绿，属 HC-115 Web 任务预存问题"
-references: docs/developer/task/HC-103-让SkillCatalog在下.md
+references: docs/developer/task/archive/HC-103-让SkillCatalog在下.md
 completed_at: 2026-08-05
 ---
 

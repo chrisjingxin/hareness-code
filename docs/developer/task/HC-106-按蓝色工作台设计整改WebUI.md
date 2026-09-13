@@ -13,7 +13,7 @@ acceptance: /web 首次打开固定使用浅色；用户可在当前 Web 接管�
 user_docs: docs/user/交互使用.md
 developer_docs: docs/developer/spec/HC-106-按蓝色工作台设计整改WebUI.md
 test_evidence: "bun test tests/web/application/adapter.test.ts tests/web/presentation: 93 pass 0 fail；bun run build: exit 0；bun run typecheck: exit 0；bun run test: 599 passed / 2 failed（test_package_root_contains_only_entrypoints 与 test_auto_edit_writes_without_interruption_but_shell_still_requires_approval 为预存基线失败，与本次改动无关，已用 git stash 复验基线）；bun run project:check: exit 0；真实 Chrome 抽查（1440×900/390×844 light/dark）22/22 PASS（几何、无根横向滚动、抽屉/scrim、tab、主题切换、状态语义色）"
-references: docs/developer/task/HC-104-实现WebInteractiv.md、docs/developer/task/HC-115-最终架构验收矩阵与Browse.md、docs/developer/task/HC-124-统筹WebUI工作台体验升级与.md
+references: docs/developer/task/archive/HC-104-实现WebInteractiv.md、docs/developer/task/HC-115-最终架构验收矩阵与Browse.md、docs/developer/task/HC-124-统筹WebUI工作台体验升级与.md
 completed_at: -
 ---
 

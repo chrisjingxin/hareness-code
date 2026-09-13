@@ -8,7 +8,7 @@ branch: master
 scope: 让 HC-098 已启用且 trust 有效的 Plugin Skill 和 MCP 进入 Host 启动时的统一 SkillRegistry 与 McpConfigSnapshot，兼容 Agent Plugins 1.0 和 Claude 格式，并保持命名空间、最小进程环境和组件失败隔离。
 acceptance: 重启 Harness 后可调用已启用 Plugin 的 Skill 并连接其 MCP；同名能力不会覆盖现有来源；Plugin MCP 进程只收到明确的最小环境和路径变量；坏 Skill 或坏 MCP 只禁用对应组件；Plugin 更新会产生新的 Skill/MCP/AgentEngine 指纹。
 user_docs: docs/user/插件管理.md、docs/user/交互使用.md
-developer_docs: docs/developer/architecture/架构总览.md、docs/developer/扩展与插件机制设计方案.md
+developer_docs: docs/developer/architecture/架构总览.md、docs/developer/architecture/扩展与插件机制设计方案.md
 test_evidence: Python: 531 passed, 1 skipped; TypeScript: 116 passed, 1 skipped; typecheck passed; protocol:check passed; docs/project check only blocked by a missing historical task reference in user-owned HC-079
 references: HC-087、HC-091、HC-098
 completed_at: 2026-07-30

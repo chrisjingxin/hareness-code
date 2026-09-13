@@ -10,7 +10,7 @@ acceptance: 合法 v3 数据库和已识别的旧分支 v7 数据库可自动备
 user_docs: docs/user/故障排查.md
 developer_docs: docs/developer/architecture/架构总览.md、docs/developer/architecture/adr/0003-transcript-context-projection-lifecycle.md
 test_evidence: ThreadPersistence 迁移专项 87 passed；旧分支 v7 临时副本升级后 integrity=ok、schema=11、PromptEpoch 表 0、Transcript/Team 数据保留；Python 非 Host full 809 passed、2 skipped、1 deselected；Host 扩展/生命周期专项 13 passed；project:check、protocol:check、typecheck、build、git diff --check passed
-references: docs/developer/task/HC-107-修复WebComposer、补.md、docs/developer/task/HC-108-收敛迁移子进程强制清理与残留文.md
+references: docs/developer/task/archive/HC-107-修复WebComposer、补.md、docs/developer/task/archive/HC-108-收敛迁移子进程强制清理与残留文.md
 completed_at: 2026-08-04
 ---
 

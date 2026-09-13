@@ -1,8 +1,8 @@
 # HC-101 / HC-102 回检问题整改方案
 
-原始需求：[HC-101](../task/archive/HC-101-legacy-建立Host控制租约与可撤销W.md)、[HC-102](../task/HC-102-实现单实例WebHandoff.md)
+原始需求：[HC-101](../task/archive/HC-101-legacy-建立Host控制租约与可撤销W.md)、[HC-102](../task/archive/HC-102-实现单实例WebHandoff.md)
 
-原始方案：[HC-101 方案](../task/archive/HC-101-Thread规范记录与Plug.md)、[HC-102 方案](../task/HC-102-实现单实例WebHandoff.md)
+原始方案：[HC-101 方案](../task/archive/HC-101-Thread规范记录与Plug.md)、[HC-102 方案](../task/archive/HC-102-实现单实例WebHandoff.md)
 
 > 本文是针对 2026-08-03 代码回检结果建立的独立整改方案。后续执行 Thread 必须同时读取两份原始任务、原始方案和本文；本文只覆盖下列已确认缺陷，与原方案冲突时以本文的整改决定为准。
 

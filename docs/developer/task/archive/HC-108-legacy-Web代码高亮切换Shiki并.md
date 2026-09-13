@@ -10,7 +10,7 @@ acceptance: Web 代码块由唯一 Shiki Worker 高亮且运行期零网络请�
 user_docs: docs/user/交互使用.md
 developer_docs: docs/developer/architecture/架构总览.md、docs/developer/architecture/adr/0003-single-interactive-core-dual-renderer.md
 test_evidence: bun run typecheck (pass), bun test --isolate (332 pass, 0 fail), bun run build (pass), bun run project:check (pass)
-references: docs/developer/task/HC-107-修复WebComposer、补.md
+references: docs/developer/task/archive/HC-107-修复WebComposer、补.md
 completed_at: 2026-08-05
 ---
 

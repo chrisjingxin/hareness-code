@@ -10,7 +10,7 @@ acceptance: 所有 dispatch 路径返回明确 IntentOutcome（无 void 分支�
 user_docs: 不涉及
 developer_docs: docs/developer/architecture/架构总览.md
 test_evidence: bun test --isolate, bun run typecheck, bun run build, bun run project:check 都 100% 通过；包含 IntentOutcome 类型定义、纯状态化领域 notices 移除中文字符串，以及 TUI & Web 双端草稿保护及 parity 测试
-references: docs/developer/task/HC-103-让SkillCatalog在下.md、docs/developer/task/HC-104-实现WebInteractiv.md
+references: docs/developer/task/archive/HC-103-让SkillCatalog在下.md、docs/developer/task/archive/HC-104-实现WebInteractiv.md
 completed_at: 2026-08-05
 ---
 

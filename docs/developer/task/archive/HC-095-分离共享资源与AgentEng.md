@@ -10,7 +10,7 @@ acceptance: 淘汰一个角色 AgentEngine 不会关闭仍被其他角色使用�
 user_docs: 不涉及
 developer_docs: docs/developer/architecture/架构总览.md
 test_evidence: cd packages/agent && .venv/bin/python -m pytest -q（539 passed, 1 skipped）；资源/Pool/Server/MCP 局部回归 123 passed
-references: docs/developer/Harness与dcode的Python-Agent架构评估.md
+references: docs/developer/research/archive/Harness与dcode的Python-Agent架构评估.md
 completed_at: 2026-07-30
 ---
 

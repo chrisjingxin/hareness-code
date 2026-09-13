@@ -10,7 +10,7 @@ acceptance: 同一 Thread 可同时获得完整 UI 历史、latest checkpoint + 
 user_docs: docs/user/交互使用.md、docs/user/故障排查.md
 developer_docs: docs/developer/architecture/架构总览.md、docs/developer/architecture/上下文管理改造需求.md、docs/developer/architecture/上下文管理顶层设计.md、docs/developer/architecture/adr/README.md、docs/developer/architecture/adr/0003-transcript-context-projection-lifecycle.md
 test_evidence: 用户接受最终评审遗留的 migration child 强制清理 P1，并转交 HC-108；不得描述为已修复。上下文连续性/迁移直接回归 72 passed；ThreadPersistence 68 passed（后续统一 failpoint 修正后 Python full 727 passed/2 skipped，唯一 sandbox WebSocket bind failure 在沙箱外单测 1 passed）；CLI full 114 passed/1 skipped/1 既有 Markdown renderer 波动；typecheck、project:check、git diff --check passed。
-references: docs/developer/task/HC-108-收敛迁移子进程强制清理与残留文.md
+references: docs/developer/task/archive/HC-108-收敛迁移子进程强制清理与残留文.md
 completed_at: 2026-08-03
 ---
 

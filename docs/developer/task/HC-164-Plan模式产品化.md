@@ -120,7 +120,7 @@ completed_at: -
 ## 与其它任务的关系
 
 - [HC-161](./HC-161-内置子代理可用化.md) 禁止子代理拥有 `enter_plan_mode` / `exit_plan_mode`。本任务只把主 Agent 这两扇门做成真能力，**不**把它们下放给子代理。
-- Compose 流程见 [HC-155](./HC-155-重做Compose流程.md)；本任务不改 Compose 的 Plan 确认门。
+- Compose 流程见 [HC-155](./archive/HC-155-重做Compose流程.md)；本任务不改 Compose 的 Plan 确认门。
 - 调研：[163-Plan模式产品化](../research/163-Plan模式产品化.md)（含 Qwen / Oh My Pi）。grill 中补充对照了 Grok Build 的计划文件、三动作审批与「身份不动、权限收紧」。产品取 Grok 的审计划方式，不取 Qwen 在卡上选下一档权限。
 
 ## 文档与架构

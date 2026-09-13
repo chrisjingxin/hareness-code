@@ -1,6 +1,6 @@
 # HC-158 Qwen 插件运行时对齐实施计划
 
-关联 [Task](../task/HC-158-对齐Qwen插件运行时.md) 与 [Spec](../spec/HC-158-对齐Qwen插件运行时.md)。
+关联 [Task](../task/archive/HC-158-对齐Qwen插件运行时.md) 与 [Spec](../spec/HC-158-对齐Qwen插件运行时.md)。
 
 ## 总体顺序
 

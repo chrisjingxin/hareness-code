@@ -1,6 +1,6 @@
 # HC-171 Thread短标题规格
 
-关联任务：[HC-171](../task/HC-171-Thread短标题.md)  
+关联任务：[HC-171](../task/archive/HC-171-Thread短标题.md)  
 命令架构：[斜杠命令体系](../architecture/斜杠命令体系.md)  
 全局架构：[架构总览](../architecture/架构总览.md)
 
