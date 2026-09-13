@@ -8,9 +8,9 @@ branch: codex/zc-088-thread-persistence
 scope: 保留单一 SQLite implementation，以 Thread、Run 和 Context 生命周期重塑持久化 interface，并把表级操作与 legacy schema 隔离在 module 内部。
 acceptance: 调用方通过少量生命周期操作完成 Thread 恢复、Run 受理/终结和 Context 读写；事务与兼容规则不再泄漏到 Server、middleware 或虚拟文件 adapter。
 user_docs: 不涉及
-developer_docs: docs/developer/architecture/架构重构计划.md、docs/developer/architecture/架构总览.md
+developer_docs: docs/developer/task/任务看板.md、docs/developer/architecture/架构总览.md
 test_evidence: ThreadPersistence 生命周期接口与命名收敛已落地；相关 Python 测试 60 passed；Python 全量 492 passed、1 skipped，4 个既有环境/协议 fixture 失败（WebSocket 本地端口权限 1 个，Protocol generated schema 漂移 3 个）；bun run typecheck 通过，bun run test:ts 123 passed、1 skipped；bun run project:check 被既有 packages/protocol/src/generated.ts 漂移阻塞；git diff --check 通过；未修改 Protocol schema。
-references: docs/developer/architecture/架构重构计划.md
+references: docs/developer/task/任务看板.md
 completed_at: 2026-07-29
 ---
 

@@ -8,9 +8,9 @@ branch: codex/zc-090-tui-workflow
 scope: 围绕现有 reducer、Command Registry 和 Dispatcher 建立 TUI 状态与工作流 module，集中 Thread 状态转换、命令计划、Picker/Dialog 工作流与 RPC effect，令 React 根组件退回表现 adapter。
 acceptance: TUI 用户流程可通过工作流 interface 测试；React 只保留渲染、焦点、终端尺寸和平台 ref；当前 Slash Command、模型选择、MCP 与 Thread 恢复行为不变。
 user_docs: 不涉及
-developer_docs: docs/developer/architecture/架构重构计划.md、docs/developer/architecture/架构总览.md、docs/developer/architecture/斜杠命令体系.md
+developer_docs: docs/developer/task/任务看板.md、docs/developer/architecture/架构总览.md、docs/developer/architecture/斜杠命令体系.md
 test_evidence: bun run typecheck；bun run test:ts（113 pass，1 skip）；bun run project:check；bun run test（TypeScript 113 pass/1 skip，Python 498 pass/1 skip）
-references: docs/developer/architecture/架构重构计划.md
+references: docs/developer/task/任务看板.md
 completed_at: 2026-07-29
 ---
 

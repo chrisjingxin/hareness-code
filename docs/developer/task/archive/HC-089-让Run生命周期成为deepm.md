@@ -8,7 +8,7 @@ branch: codex/zc-089-run-lifecycle
 scope: 从 AgentHost 的 protocol implementation 中提取完整 Run lifecycle module，集中拥有受理、owner、幂等、AgentEngine lease、执行、Interaction、终态和资源释放。
 acceptance: Protocol dispatcher 只负责校验、capability、wire 转换与 event fanout；Run 行为可通过一个稳定 interface 测试，不再依赖 Server private 方法。
 user_docs: 不涉及
-developer_docs: docs/developer/architecture/架构重构计划.md、docs/developer/architecture/架构总览.md、docs/developer/architecture/adr/0002-project-host-multi-connection.md
+developer_docs: docs/developer/task/任务看板.md、docs/developer/architecture/架构总览.md、docs/developer/architecture/adr/0002-project-host-multi-connection.md
 test_evidence: bun run typecheck；bun run test（TS 123 passed/1 skipped，Python 498 passed/1 skipped）；bun run project:check；RunCoordinator 生命周期回归 10 passed；packages/agent/.venv/bin/python -m py_compile 通过
 references: codex/zc-089-run-lifecycle
 completed_at: 2026-07-29

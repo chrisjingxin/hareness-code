@@ -8,7 +8,7 @@ branch: codex/zc-086-execution-binding
 scope: 建立一个拥有 Thread 根模型选择解析、legacy 兼容和不可变 RunExecutionBinding 构造的 deep module，停止在 Config、Server、ThreadPersistence 和 TUI 之间传递原始 dict。
 acceptance: 每次 Run 的选择意图、解析来源、AgentEngine 模型和不可变执行事实由同一解析结果产生；Server 与 TUI 只消费类型化结果；JSON-RPC v3 与 SQLite schema v6 保持不变，旧记录只读兼容。
 user_docs: 不涉及
-developer_docs: docs/developer/architecture/架构重构计划.md、docs/developer/architecture/架构总览.md、docs/developer/architecture/adr/0001-agent-domain-model.md
+developer_docs: docs/developer/task/任务看板.md、docs/developer/architecture/架构总览.md、docs/developer/architecture/adr/0001-agent-domain-model.md
 test_evidence: agent pytest: 320 passed, 1 skipped; bun run test:ts: 123 passed, 1 skipped; bun run typecheck; bun run build; bun run project:check; git diff --check
 references: codex/zc-086-execution-binding
 completed_at: 2026-07-28

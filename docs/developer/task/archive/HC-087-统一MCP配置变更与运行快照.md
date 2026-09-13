@@ -8,7 +8,7 @@ branch: codex/zc-087-mcp-snapshot
 scope: 让 MCP 添加、删除和读取统一经过受策略保护的配置变更 module，并让连接管理与 AgentEngineProfile 消费同一个不可变 MCP snapshot。
 acceptance: MCP 写入具备与其他受控配置相同的 revision、CAS、来源、锁、原子写入和审计语义；任何 MCP 配置变化都会产生准确的新 snapshot 与 AgentEngine 身份。
 user_docs: 不涉及
-developer_docs: docs/developer/architecture/架构重构计划.md、docs/developer/architecture/架构总览.md、docs/developer/architecture/配置架构.md
+developer_docs: docs/developer/task/任务看板.md、docs/developer/architecture/架构总览.md、docs/developer/architecture/配置架构.md
 test_evidence: agent focused pytest: 94 passed; agent pytest -q: 488 passed, 1 skipped, 4 pre-existing failures (WebSocket bind sandbox and approval protocol generated-schema mismatch); bun test: 123 passed, 1 skipped; bun run typecheck: passed; git diff --check: passed; bun run project:check: blocked by pre-existing stale packages/protocol/src/generated.ts
 references: codex/zc-087-mcp-snapshot
 completed_at: 2026-07-29
