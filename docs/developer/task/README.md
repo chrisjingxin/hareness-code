@@ -30,6 +30,17 @@ HC-XXX-功能简介.md
 
 不要编辑生成的 [任务看板](任务看板.md)。
 
+## 目录约束
+
+活动目录 `docs/developer/task/` 的根目录只允许两类 Markdown：
+
+- canonical 任务文件 `HC-XXX-功能简介.md`；
+- 两个固定例外：`README.md`（本文件）与 `任务看板.md`（生成物）。
+
+其他任何 Markdown（例如遗留的 `ZC-*.md`、`NOTE.md`，或缺少 front matter 的随手笔记）都会被 `tasks:check` 直接拒绝并给出路径，不再静默忽略。确实需要新增说明文档时，必须显式扩展白名单并同步本节，不得依赖跳过。
+
+`archive/` 目录采用同样的失败关闭策略但**不设白名单**：其中每个 Markdown 都必须是 canonical 历史 Task；同一 ID 出现在两个文件时会报错并列出全部冲突路径。
+
 ## Front matter
 
 ```md

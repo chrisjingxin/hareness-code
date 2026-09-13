@@ -1,4 +1,4 @@
-"""ZC-141 Agent Plugins 1.0 离线 fixture 的目录、ZIP 和规范边界测试。"""
+"""HC-176 Agent Plugins 1.0 离线 fixture 的目录、ZIP 和规范边界测试。"""
 
 from __future__ import annotations
 

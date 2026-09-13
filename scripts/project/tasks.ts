@@ -199,18 +199,44 @@ export function renderTaskDocument(task: TaskRecord): string {
   return `---\n${frontMatter}\n---\n${task.body.trimEnd()}\n`
 }
 
-function isTaskCandidateFile(fileName: string): boolean {
-  // README / 任务看板不是任务源；其余 HC- 前缀 Markdown 都必须符合命名规范。
-  return fileName.startsWith("HC-") && fileName.endsWith(".md")
+/** 活动任务根目录允许存在的非任务 Markdown：说明文件与生成的看板。 */
+const ACTIVITY_NON_TASK_FILES = ["README.md", "任务看板.md"] as const
+
+/**
+ * 枚举目录下的 canonical 任务文件，并对非任务 Markdown 失败关闭。
+ *
+ * 过去只按 `HC-` 前缀过滤，`ZC-*.md`、缺少 front matter 的随手笔记等都会被静默忽略，
+ * 于是畸形孤儿任务既不进看板也不报错。现在改为白名单之外的 Markdown 一律必须先通过
+ * 任务文件命名校验，避免问题再次隐身。
+ */
+async function listCanonicalTaskFiles(
+  projectRoot: string,
+  directory: string,
+  options: { nonTaskFiles?: readonly string[], recursive?: boolean } = {},
+): Promise<string[]> {
+  const nonTaskFiles = options.nonTaskFiles ?? []
+  const files = await listMarkdownFiles(directory)
+  // 活动任务只看根目录直接子级，archive/ 由归档流程单独处理。
+  const candidates = options.recursive ? files : files.filter(file => dirname(file) === directory)
+  const result: string[] = []
+  for (const file of candidates) {
+    if (nonTaskFiles.includes(basename(file))) continue
+    try {
+      parseTaskFileName(basename(file))
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      throw new Error(`${relative(projectRoot, file)} 不是合法任务文件：${reason}`)
+    }
+    result.push(file)
+  }
+  return result
 }
 
 /** 从任务目录读取全部活动 Markdown 任务，并保证任务 ID 唯一。 */
 export async function loadTasks(projectRoot = root): Promise<TaskRecord[]> {
   const directory = join(projectRoot, TASK_DIR)
   // 只加载任务目录根部的活动任务；archive 只保留审计记录，不应重新进入看板或认领流程。
-  const files = (await listMarkdownFiles(directory)).filter(
-    file => isTaskCandidateFile(basename(file)) && dirname(file) === directory,
-  )
+  const files = await listCanonicalTaskFiles(projectRoot, directory, { nonTaskFiles: ACTIVITY_NON_TASK_FILES })
   const tasks = await Promise.all(files.map(async file => parseTaskDocument(await readFile(file, "utf8"), relative(projectRoot, file))))
   const ids = new Set<string>()
   for (const task of tasks) {
@@ -317,15 +343,29 @@ async function archiveTaskFile(projectRoot: string, task: TaskRecord): Promise<v
   task.file = relative(projectRoot, destination)
 }
 
-/** 读取归档任务 ID，使历史文档可以继续互相引用，但不参与活动任务流程。 */
+/**
+ * 读取归档任务 ID，使历史文档可以继续互相引用，但不参与活动任务流程。
+ *
+ * 归档目录同样失败关闭：非 canonical Markdown 会直接报错，且归档内部声明同一 ID 的
+ * 两个任务必须被发现——`Set` 会静默去重，这里改用 Map 收集全部路径后显式报冲突。
+ */
 export async function loadArchivedTaskIds(projectRoot: string): Promise<Set<string>> {
   const directory = join(projectRoot, TASK_ARCHIVE_DIR)
-  const files = (await listMarkdownFiles(directory)).filter(file => isTaskCandidateFile(basename(file)))
+  const files = await listCanonicalTaskFiles(projectRoot, directory, { recursive: true })
   const tasks = await Promise.all(files.map(async file => parseTaskDocument(await readFile(file, "utf8"), relative(projectRoot, file))))
+  const filesByID = new Map<string, string[]>()
   for (const task of tasks) {
     validateTask(task)
+    const paths = filesByID.get(task.metadata.id) ?? []
+    paths.push(task.file)
+    filesByID.set(task.metadata.id, paths)
   }
-  return new Set(tasks.map(task => task.metadata.id))
+  const conflicts = [...filesByID].filter(([, paths]) => paths.length > 1)
+  if (conflicts.length) {
+    const detail = conflicts.map(([id, paths]) => `${id}（${paths.join("、")}）`).join("；")
+    throw new Error(`归档任务 ID 重复：${detail}`)
+  }
+  return new Set(filesByID.keys())
 }
 
 async function saveTask(projectRoot: string, task: TaskRecord): Promise<void> {

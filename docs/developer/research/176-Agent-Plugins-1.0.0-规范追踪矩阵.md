@@ -1,6 +1,6 @@
-# ZC-141 Agent Plugins 1.0.0 规范追踪矩阵
+# HC-176 Agent Plugins 1.0.0 规范追踪矩阵
 
-> 本文是备用仓库 `harness-code-feature` 的 ZC-141 Todo 1 研究证据，不是规范本身。
+> 本文是备用仓库 `harness-code-feature` 的 HC-176 Todo 1 研究证据，不是规范本身。
 > 规范事实源固定为规划工作区 `agent-plugins-spec` 的提交
 > `bd383552095128f6effe895b9257cfd580a6d179`；优先服从
 > `spec/1.0.0.md`，机器可读 schema 只作辅助。
@@ -27,7 +27,7 @@ fixture 和真实测试结果；未验证的项目级检查与客户端自定义
 | §4.1(3) | 发现、读取、执行的包路径解析后 MUST 留在 plugin root；越界 symlink/junction 等 MUST 拒绝。 | `plugins/store.py: _copy_directory_secure, _extract_zip_secure, package_digest`；`plugins/common.py: safe_package_path` | `test_directory_symlink_and_hardlink_are_rejected`；`test_zip_with_parent_traversal_is_rejected_before_validation`；`malicious-paths/mcp.json` | 已实现 |
 | §4.1(4) | 规范定义的 plugin-relative path MUST 以 `./` 开头，解析后仍在 root 内。 | `plugins/mcp_schema.py: validate_stdio_command/validate_stdio_cwd`；`plugins/mcp_adapter.py: _portable_server_config` | `test_malicious_mcp_paths_are_isolated_before_runtime`；malicious path fixture | 已实现 |
 | §4.1(5) | command args/env 等非 path 配置是 opaque strings；MUST NOT 按包路径强制解释。 | `plugins/mcp_adapter.py: _portable_server_config`；`plugins/mcp_schema.py` | `test_enabled_portable_skill_and_mcp_enter_one_runtime_catalog`；unknown placeholder 断言 | 已实现 |
-| §4.1 failure boundary | 根 manifest 越界拒绝；固定位置错误只隔离组件；坏 `SKILL.md` 跳过；MCP command/cwd 错误只隔离 server；其他包路径拒绝访问。 | `plugins/store.py`、`plugins/portable.py`、`plugins/common.py`、`plugins/mcp_schema.py`、`plugins/mcp_adapter.py` | symlink/ZIP 安全测试；`partial-components` 和 `malicious-paths` fixture；149 项 focused ZC-141 测试 | 已实现 |
+| §4.1 failure boundary | 根 manifest 越界拒绝；固定位置错误只隔离组件；坏 `SKILL.md` 跳过；MCP command/cwd 错误只隔离 server；其他包路径拒绝访问。 | `plugins/store.py`、`plugins/portable.py`、`plugins/common.py`、`plugins/mcp_schema.py`、`plugins/mcp_adapter.py` | symlink/ZIP 安全测试；`partial-components` 和 `malicious-paths` fixture；149 项 focused HC-176 测试 | 已实现 |
 | §4.2 | 标准 layout 固定根 `plugin.json`、`skills/`、`mcp.json` 与 top-level client namespace。 | `plugins/portable.py` 固定发现；Adapter 分离 native manifest | `google-spanner-0.3.4`、`google-alloydb-0.2.0` 的 `SOURCE.md` 与目录/ZIP 形状测试 | 已实现 |
 
 ## §5 Manifest
@@ -94,7 +94,7 @@ fixture 和真实测试结果；未验证的项目级检查与客户端自定义
 | §9.1 | 启动 stdio subprocess MUST 提供绝对 `PLUGIN_ROOT` 与每安装实例专属 `PLUGIN_DATA`。 | `mcp_adapter.py: _load_portable, _prepare_data_path, _portable_server_config`；`extensions/mcp.py` | `test_enabled_portable_skill_and_mcp_enter_one_runtime_catalog`；stdio placeholder regression | 已实现 |
 | §9.1 data lifecycle | client MUST 在启动前创建可写 data、更新时保留；卸载可删除。 | `mcp_adapter.py: _prepare_data_path`；`plugins/store.py: data_path/remove` | `test_remove_retains_data_unless_purge_is_explicit`；更新 snapshot 测试 | 已实现（Harness 生命周期边界） |
 | §9.1 environment layering | base environment 可继承/清理；展开后的 manifest env overlay base；最后 client MUST 覆盖保留变量。 | `mcp_adapter.py` 与 `extensions/mcp.py` 的 plugin minimal environment | `test_enabled_portable_skill_and_mcp_enter_one_runtime_catalog`；reserved env/unknown placeholder regression | 已实现 |
-| §9.1 ambient dependency | 除 executable search 外，conformant plugin MUST NOT 依赖未声明 ambient env。 | `mcp_adapter.py` 固定不继承完整宿主环境；`extensions/mcp.py` plugin env allowlist | plugin environment isolation assertions；expanded ZC-141 tests | 已实现 |
+| §9.1 ambient dependency | 除 executable search 外，conformant plugin MUST NOT 依赖未声明 ambient env。 | `mcp_adapter.py` 固定不继承完整宿主环境；`extensions/mcp.py` plugin env allowlist | plugin environment isolation assertions；expanded HC-176 tests | 已实现 |
 | §9.2 placeholders | MUST 对 args 每个 string、env value、cwd 做一次非递归 `${PLUGIN_ROOT}`/`${PLUGIN_DATA}` 替换；不得作用于 env key、command、固定位置。 | `mcp_schema.py` portable validation；`mcp_adapter.py` `_replace_known` | `test_plugin_stdio_keeps_unknown_placeholders_and_forces_reserved_env`；portable runtime test | 已实现 |
 | §9.2 safety | 未知 placeholder MUST 原样保留；MUST NOT 做其他宿主环境展开；保留变量不得由 manifest env 伪造；env 是可见配置不是秘密机制。 | `mcp_adapter.py` reserved env overlay；`extensions/mcp.py` minimal env | unknown placeholder/reserved env regression；no-secret runtime tests | 已实现 |
 
@@ -141,8 +141,8 @@ fixture 和真实测试结果；未验证的项目级检查与客户端自定义
 - 两组 Google fixture 是手工最小脱敏形状，不是在线 clone 或上游源码 vendoring；root `mcp.json`
   使用空 `mcpServers`，因此测试不会启动真实 MCP、访问 Google Cloud 或读取凭据。
 - `tests/test_plugin_fixtures.py` 验证静态目录、ZIP staging、portable root/manifest/MCP 语义和边界输入；
-  2026-08-13 直接运行结果为 `99 passed`，扩展 ZC-141 focused 集合最终为 `149 passed in 10.06s`。
-- ZC-141 实现已覆盖 `portable.py`、`mcp_schema.py`、`mcp_adapter.py`、`store.py`、`manager.py`、
+  2026-08-13 直接运行结果为 `99 passed`，扩展 HC-176 focused 集合最终为 `149 passed in 10.06s`。
+- HC-176 实现已覆盖 `portable.py`、`mcp_schema.py`、`mcp_adapter.py`、`store.py`、`manager.py`、
   `common.py`、`model.py`、`adapters.py`、`claude.py` 及对应回归测试；没有新增 Protocol/公开数据字段、
   JSON-RPC 方法或 VERSION/CHANGELOG 版本变更。
 

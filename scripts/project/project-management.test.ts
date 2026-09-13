@@ -15,6 +15,7 @@ import {
   claimTask,
   compareSemVer,
   completeTask,
+  loadArchivedTaskIds,
   loadTasks,
   parseSemVer,
   renderChangelogSection,
@@ -233,6 +234,93 @@ test("任务文件名必须带功能简介且与 id 一致", async () => {
     await rm(join(projectRoot, TASK_DIR, "HC-001.md"))
     await writeFile(join(projectRoot, TASK_DIR, "HC-009-错误简介.md"), renderTask(taskMetadata), "utf8")
     await expect(loadTasks(projectRoot)).rejects.toThrow("不一致")
+  } finally {
+    await rm(projectRoot, { recursive: true, force: true })
+  }
+})
+
+/** 归档任务夹具：与活动任务同构，但补齐已完成所需字段。 */
+const archivedMetadata = {
+  ...taskMetadata,
+  id: "HC-000",
+  title: "归档任务",
+  status: "已完成",
+  owner: "codex",
+  branch: "codex/archive",
+  test_evidence: "bun test",
+  completed_at: "2026-07-30",
+}
+
+test("活动任务目录拒绝非 canonical Markdown，而不是静默忽略", async () => {
+  const projectRoot = await createFixture()
+  try {
+    await writeFile(join(projectRoot, TASK_DIR, "ZC-001.md"), renderTask({ ...taskMetadata, id: "ZC-001" }), "utf8")
+    await expect(loadTasks(projectRoot)).rejects.toThrow("ZC-001.md")
+  } finally {
+    await rm(projectRoot, { recursive: true, force: true })
+  }
+})
+
+test("活动任务目录拒绝缺少 front matter 的畸形 Markdown", async () => {
+  const projectRoot = await createFixture()
+  try {
+    await writeFile(join(projectRoot, TASK_DIR, "NOTE.md"), "# 随手笔记\n", "utf8")
+    await expect(loadTasks(projectRoot)).rejects.toThrow("NOTE.md")
+  } finally {
+    await rm(projectRoot, { recursive: true, force: true })
+  }
+})
+
+test("活动任务目录继续接受 README 与生成的看板文件", async () => {
+  const projectRoot = await createFixture()
+  try {
+    // 夹具里只有 README.md、任务看板.md 两个非任务 Markdown，二者必须合法。
+    await expect(loadTasks(projectRoot)).resolves.toHaveLength(1)
+    await expect(checkTasks(projectRoot)).resolves.toBeUndefined()
+  } finally {
+    await rm(projectRoot, { recursive: true, force: true })
+  }
+})
+
+test("归档目录中重复任务 ID 报错并列出全部冲突路径", async () => {
+  const projectRoot = await createFixture()
+  try {
+    const archiveDirectory = join(projectRoot, TASK_ARCHIVE_DIR)
+    await mkdir(archiveDirectory, { recursive: true })
+    await writeFile(join(archiveDirectory, "HC-000-归档任务.md"), renderTask(archivedMetadata), "utf8")
+    await writeFile(join(archiveDirectory, "HC-000-另一归档.md"), renderTask({ ...archivedMetadata, title: "另一归档" }), "utf8")
+
+    await expect(loadArchivedTaskIds(projectRoot)).rejects.toThrow("归档任务 ID 重复：HC-000")
+    await expect(loadArchivedTaskIds(projectRoot)).rejects.toThrow("HC-000-归档任务.md")
+    await expect(loadArchivedTaskIds(projectRoot)).rejects.toThrow("HC-000-另一归档.md")
+  } finally {
+    await rm(projectRoot, { recursive: true, force: true })
+  }
+})
+
+test("归档目录拒绝非 canonical Markdown", async () => {
+  const projectRoot = await createFixture()
+  try {
+    const archiveDirectory = join(projectRoot, TASK_ARCHIVE_DIR)
+    await mkdir(archiveDirectory, { recursive: true })
+    await writeFile(join(archiveDirectory, "snapshot.md"), "# 说明\n", "utf8")
+    await expect(loadArchivedTaskIds(projectRoot)).rejects.toThrow("snapshot.md")
+  } finally {
+    await rm(projectRoot, { recursive: true, force: true })
+  }
+})
+
+test("活动与归档使用相同任务 ID 时仍按原错误失败", async () => {
+  const projectRoot = await createFixture()
+  try {
+    const archiveDirectory = join(projectRoot, TASK_ARCHIVE_DIR)
+    await mkdir(archiveDirectory, { recursive: true })
+    await writeFile(join(archiveDirectory, "HC-001-历史测试任务.md"), renderTask({
+      ...archivedMetadata,
+      id: "HC-001",
+      title: "历史测试任务",
+    }), "utf8")
+    await expect(loadTasks(projectRoot)).rejects.toThrow("活动与归档任务 ID 重复：HC-001")
   } finally {
     await rm(projectRoot, { recursive: true, force: true })
   }

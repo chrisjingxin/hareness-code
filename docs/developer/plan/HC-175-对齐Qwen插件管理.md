@@ -1,6 +1,6 @@
-# HC-166 对齐 Qwen 插件管理实施计划
+# HC-175 对齐 Qwen 插件管理实施计划
 
-关联：[Task](../task/archive/HC-166-对齐Qwen插件管理.md) · [Spec](../spec/HC-166-对齐Qwen插件管理.md) · [Todo](../todo/HC-166-对齐Qwen插件管理.md)
+关联：[Task](../task/archive/HC-175-对齐Qwen插件管理.md) · [Spec](../spec/HC-175-对齐Qwen插件管理.md) · [Todo](../todo/HC-175-对齐Qwen插件管理.md)
 
 本 Plan 是实现设计，执行代理只负责按设计 TDD 落地，不重新决定产品范围。开发严格分两轮，每轮只有一个联合验收点；第一轮通过主任务验收后才能进入第二轮。
 
@@ -221,7 +221,7 @@ harness plugins settings remove <name> <setting> [--scope user|workspace]
 
 第一轮实现已由主任务正式验收通过：registry v3/v2 migration、activation/name mutation、四状态与 static preview 删除、Settings 内部 binding/CAS、Host consent、Protocol v3.8 生成物和 Shell CLI grammar 已同步。replace 后只能证明结果不确定并返回 `PLUGIN_REGISTRY_COMMIT_UNCERTAIN`，保留 backup 并尽力恢复；这不是“任一步失败旧文件绝对不变”的承诺，主任务已接受该设计。第一轮管理/迁移与 Plugin/refresh/fixtures 为 108 passed，Host server/Settings RPC/config 为 128 passed，Qwen/MCP/Phase3/runtime/full-demo 为 187 passed；CLI/Protocol focused Bun 为 69 passed，Python Protocol contract 为 13 passed；`bun run protocol:generate`、`bun run protocol:check`、`bun run typecheck` 和 `git diff --check` 通过。
 
-上述第一轮记录中的 bare-node Phase3 失败是主任务确认的仓库基线，不归因 HC-166；`bun run project:check` 的 HC-151 阻塞也与本任务无关。自动化没有真实模型、网络、凭据或 ZA38 MCP/Hook/LSP 外部执行。
+上述第一轮记录中的 bare-node Phase3 失败是主任务确认的仓库基线，不归因 HC-175；`bun run project:check` 的 HC-151 阻塞也与本任务无关。自动化没有真实模型、网络、凭据或 ZA38 MCP/Hook/LSP 外部执行。
 
 ## 6. 第二轮：启动加载与整体验收
 
@@ -236,7 +236,7 @@ harness plugins settings remove <name> <setting> [--scope user|workspace]
 - `docs/user/插件管理.md`
 - `docs/developer/architecture/扩展与插件机制设计方案.md`
 - `docs/developer/architecture/架构总览.md`
-- HC-166 文档链与 `tmp/handoff.md`
+- HC-175 文档链与 `tmp/handoff.md`
 
 ### 6.2 验证闭环
 
@@ -264,7 +264,7 @@ harness plugins settings remove <name> <setting> [--scope user|workspace]
 
 ### 6.5 第二轮执行证据（2026-09-02）
 
-新增 `packages/agent/tests/test_hc166_startup_integration.py`：`10 passed`。与 `test_hc166_plugin_management_red.py`、Plugin/refresh/fixtures 集合合并为 `118 passed`；Host server/Settings RPC/config `128 passed`；Qwen/MCP/Phase3/runtime/full-demo 集合 `250 passed, 1 failed`，唯一失败为主仓库已确认的 `test_qwen_bare_node_hook_and_lsp_are_frozen_without_inheriting_path` 基线失败。CLI/TUI/Web/Protocol focused Bun `141 pass, 0 fail`；Python Protocol contract `13 passed`。
+新增 `packages/agent/tests/test_hc175_startup_integration.py`：`10 passed`。与 `test_hc175_plugin_management_red.py`、Plugin/refresh/fixtures 集合合并为 `118 passed`；Host server/Settings RPC/config `128 passed`；Qwen/MCP/Phase3/runtime/full-demo 集合 `250 passed, 1 failed`，唯一失败为主仓库已确认的 `test_qwen_bare_node_hook_and_lsp_are_frozen_without_inheriting_path` 基线失败。CLI/TUI/Web/Protocol focused Bun `141 pass, 0 fail`；Python Protocol contract `13 passed`。
 
 自动化使用临时 HOME、临时 workspace、仓库离线 fixture、fake credential backend 和 fake MCP connection；没有真实模型、网络、凭据或外部 Hook/LSP/MCP 进程。`protocol:generate`、`protocol:check`、`typecheck`、`git diff --check` 均通过；`bun run project:check` 仍被 HC-151 复核日期 `2026-08-30` 阻塞。真实 ZA38 手工路径只写入用户文档和 handoff，未自动执行。
 
@@ -284,7 +284,7 @@ harness plugins settings remove <name> <setting> [--scope user|workspace]
 
 ## 8. 回滚
 
-- 第一轮尚未通过时，可按完整 HC-166 diff 回滚到 registry v2；不得删除用户 store。
+- 第一轮尚未通过时，可按完整 HC-175 diff 回滚到 registry v2；不得删除用户 store。
 - v3 migration 保留 `registry.v2.backup.json`，回滚工具只恢复 schema，不执行 Plugin 进程或迁移 secret。
 - Protocol 与生成文件必须作为同一变更回滚，禁止只回滚 TS 或 Python 一端。
 - 第二轮仅做启动 consumer 适配和文档，不引入独立持久格式；可与第一轮一起回滚。

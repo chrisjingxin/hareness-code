@@ -1,4 +1,4 @@
-"""HC-166 第二轮启动 Host 与 TUI/Web 共享快照的纵向回归测试。"""
+"""HC-175 第二轮启动 Host 与 TUI/Web 共享快照的纵向回归测试。"""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def _initialize_params(*, client_kind: str = "test") -> dict[str, Any]:
     """以完整 read 能力启动一个离线 Host，禁止任何真实外部进程。"""
     return {
         "protocol": {"major": 3, "min_minor": 0, "max_minor": 8},
-        "client": {"name": "hc166-test", "version": "0", "kind": client_kind},
+        "client": {"name": "hc175-test", "version": "0", "kind": client_kind},
         "capabilities": {
             "requests": [
                 "run.cancel",

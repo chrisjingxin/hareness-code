@@ -1,6 +1,6 @@
-# ZC-141 Agent Plugins 1.0.0 完整支持与多格式共存设计
+# HC-176 Agent Plugins 1.0.0 完整支持与多格式共存设计
 
-关联任务：[ZC-141](../task/ZC-141.md)
+关联任务：[HC-176](../task/HC-176-支持Agent插件1.0.0.md)
 
 ## 通俗问题说明
 

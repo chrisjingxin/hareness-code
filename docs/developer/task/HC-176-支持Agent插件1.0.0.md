@@ -1,6 +1,6 @@
 ---
-id: ZC-141
-title: 完整支持 Agent Plugins 1.0.0 并保留多格式扩展
+id: HC-176
+title: 支持Agent插件1.0.0
 feature_area: Plugin 生态兼容
 parent_task: -
 decomposed_by: Codex
@@ -11,8 +11,8 @@ branch: -
 scope: 以 Agent Plugins 1.0.0 固定规范为一等 portable 标准，完整落实所有适用于 Harness 的 MUST/MUST NOT、Skill、MCP、环境与失败隔离语义；规范有效的本地目录和 ZIP 即使当前没有可执行组件也可安装为 disabled，启用仍要求至少一个有效组件；同时保留 Claude Plugin、hybrid、Harness client extension 和当前已交付的组件能力。2026-08-14 范围收缩：工程未发布，旧开发构建的 registry v1 数据不作为保留对象，v1→v2 迁移机制整体移除。
 acceptance: 每条适用 Agent Plugins 1.0.0 规范要求都有可追溯实现或测试证据；合法包可从本地目录或 ZIP 校验和安装，Skill 与 stdio/Streamable HTTP/SSE MCP 按规范运行；一个坏组件、不支持能力或运行失败不影响独立有效组件；规范有效性与 Harness 当前可用性不会混淆；能力指纹变化撤销既有信任并要求显式重新确认；registry 只承认当前 canonical v2 版本；Claude/Harness/Hybrid、Command、Agent、Team、Hook、LSP、Monitor、安全 staging 和本地管理入口继续保留并持续可用。
 user_docs: docs/user/插件管理.md、docs/user/故障排查.md
-developer_docs: docs/developer/spec/ZC-141.md、docs/developer/扩展与插件机制设计方案.md、docs/developer/architecture/架构总览.md
-test_evidence: "2026-08-14 focused ZC-141 pytest: 140 passed; Agent full run: 1906 passed, 2 skipped; TypeScript suite: 542 pass, 1 skip; protocol/project/typecheck/docs/tasks/project-test checks passed."
+developer_docs: docs/developer/spec/HC-176-支持Agent插件1.0.0.md、docs/developer/扩展与插件机制设计方案.md、docs/developer/architecture/架构总览.md
+test_evidence: "2026-08-14 focused HC-176 pytest: 140 passed; Agent full run: 1906 passed, 2 skipped; TypeScript suite: 542 pass, 1 skip; protocol/project/typecheck/docs/tasks/project-test checks passed."
 references: docs/developer/task/archive/HC-098-建立Plugin格式适配、不可.md、docs/developer/task/archive/HC-099-将PluginSkill与MC.md、https://agent-plugins.org/specification、https://github.com/agentplugins/agent-plugins-spec/commit/bd383552095128f6effe895b9257cfd580a6d179、https://developers.googleblog.com/agent-plugins-package-your-skills-tools-and-more/、https://github.com/gemini-cli-extensions/spanner/tree/0.3.4、https://github.com/gemini-cli-extensions/alloydb/tree/0.2.0
 completed_at: -
 ---
@@ -63,7 +63,7 @@ Claude、hybrid 与 Harness client extension 继续通过同一内部 descriptor
   `.harness/plugins` 或 `registry.lock`。v1→v2 迁移在锁内重读并原子写入，失败保留旧 registry/恢复证据。
 - Claude Plugin 与 portable MCP 来源分离；Claude `.mcp.json` 保留 placeholder/timeout 语义，但 HTTP/SSE
   使用 `follow_redirects=False` client factory，防止配置 header 随跨源 redirect 转发。
-- 149 项 ZC-141 focused/expanded 测试通过；项目级失败和环境阻断按命令分别记录在本 Task、矩阵和
+- 149 项 HC-176 focused/expanded 测试通过；项目级失败和环境阻断按命令分别记录在本 Task、矩阵和
   `tmp/handoff.md`，未使用真实 API key、用户凭据、网络 MCP 或真实模型。
 
 ## 2026-08-14 增量修复计划与执行 Todo
@@ -92,7 +92,7 @@ Claude、hybrid 与 Harness client extension 继续通过同一内部 descriptor
 - [x] `mcp_adapter.py`：hybrid 分支逐 manifest 捕获 `PluginError` 并合并隔离结果。
 - [x] `model.py`：`_aggregate_compatibility` 接受插件级 diagnostics，识别 `PLUGIN_REGISTRY_REINDEX_FAILED`
   隔离记录并聚合为 `invalid`。
-- [x] 测试：新增 hybrid 双方向隔离用例；更新迁移隔离断言；重跑 ZC-141 聚焦集合与既有 fixture 断言。
+- [x] 测试：新增 hybrid 双方向隔离用例；更新迁移隔离断言；重跑 HC-176 聚焦集合与既有 fixture 断言。
 - [x] 运行聚焦 pytest、Agent 全量、`bun run typecheck`，真实命令与结果见下。
 
 ### 2026-08-14 验证证据
@@ -171,7 +171,7 @@ registry v1 + 不可变 store
 ```
 
 完整的状态、失败边界、安全不变式和撤销记录见
-[ZC-141 设计方案](../spec/ZC-141.md)。
+[HC-176 设计方案](../spec/HC-176-支持Agent插件1.0.0.md)。
 
 ## 实施计划与执行 Todo
 
@@ -293,7 +293,7 @@ Protocol/CLI 公共数据字段、JSON-RPC 方法、VERSION 或 CHANGELOG，未�
 
 ## 本次真实验证
 
-- 直接相关 ZC-141 集合：
+- 直接相关 HC-176 集合：
   `cd packages/agent && PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=/tmp/zc-141-posttest-pycache
   .venv/bin/python -m pytest -p no:cacheprovider -q tests/test_plugins.py tests/test_plugin_fixtures.py
   tests/test_plugin_runtime.py tests/test_full_demo_plugin.py tests/extensions/test_mcp.py

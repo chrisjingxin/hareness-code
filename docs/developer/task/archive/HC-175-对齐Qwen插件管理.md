@@ -1,5 +1,5 @@
 ---
-id: HC-166
+id: HC-175
 title: 对齐Qwen插件管理
 feature_area: Plugin 管理与加载
 parent_task: -
@@ -11,13 +11,13 @@ branch: -
 scope: 将 Harness 的 Shell CLI Plugin 安装、启停、更新、卸载、Settings 和 Adapter 识别改为接近 Qwen Code 的名称加作用域模型；安装后由后续启动的 TUI/Web 统一加载，移除用户侧能力指纹、授权哈希、digest/CAS 参数、静态假预览和过度兼容状态机，同时保留多格式 Adapter、事务安装、路径安全及 Harness 原有运行权限边界。
 acceptance: Plugin 通过 Shell CLI 安装一次后可在所选 user/workspace scope 自动加载且无需再次提供源目录；所有管理操作使用插件名称而非 capability fingerprint、package/declaration digest、store revision 或内部 ID；格式默认自动识别；安装确认成功后直接启用，后续启动的 TUI 与 Web 从同一 canonical catalog 使用真实 Commands、Skills、Agents、Context、MCP、Hook 和 LSP，不新增对话内安装或 Plugin 管理 UI；列表只呈现真实已加载组件、禁用状态、警告或失败，不再暴露 static preview 和兼容矩阵；旧 registry 可迁移且 ZA38、Claude、portable Plugin 运行能力不回退。
 user_docs: docs/user/插件管理.md
-developer_docs: docs/developer/spec/HC-166-对齐Qwen插件管理.md、docs/developer/plan/HC-166-对齐Qwen插件管理.md、docs/developer/todo/HC-166-对齐Qwen插件管理.md、docs/developer/architecture/扩展与插件机制设计方案.md
+developer_docs: docs/developer/spec/HC-175-对齐Qwen插件管理.md、docs/developer/plan/HC-175-对齐Qwen插件管理.md、docs/developer/todo/HC-175-对齐Qwen插件管理.md、docs/developer/architecture/扩展与插件机制设计方案.md
 test_evidence: 用户在主仓库真实安装/更新 ZA38 Extension、启动 Harness 并验证插件命令可用；管理与启动集成 118 passed，Host/Settings 128 passed，Qwen/MCP/runtime 250 passed（另 1 个既有 bare-node 基线失败），CLI/TUI/Web/Protocol 141 passed，Python Protocol 13 passed，typecheck、protocol:check、git diff --check 通过
 references: HC-157、HC-158；master 本次提交
 completed_at: 2026-09-02
 ---
 
-# HC-166 对齐 Qwen 插件管理
+# HC-175 对齐 Qwen 插件管理
 
 ## 背景与问题
 
@@ -97,9 +97,9 @@ HC-157、HC-158 已让 Qwen/DevAgent Extension 的 Commands、Skills、Agents、
 
 第一轮“管理内核与 Shell CLI”已由主任务正式验收通过。本轮完成 registry v3、user/workspace activation、名称操作、自动 Adapter、四种产品状态、Settings 内部 binding/CAS、Plugin consent、Protocol v3.8、Shell CLI grammar 和生成文件同步，并补齐 v2 迁移故障注入。v2 migration 的 replace 前故障保持 v2 bytes；replace 后结果或目录 durability 无法确认时返回 `PLUGIN_REGISTRY_COMMIT_UNCERTAIN`，保留 backup 并尽力恢复，该 POSIX 限制已由主任务接受。
 
-基线为 HEAD `c2871031ac411a52c0e1ebaa508e3c17e326747f`、detached HEAD、无 staged/tracked 修改；基线已有本 HC-166 四份过程文档未跟踪文件。本轮只在这些文档、两端 Plugin 管理实现、Protocol 生成物、架构文档和对应测试范围内修改，未执行 git add/commit/push/reset/checkout/clean。
+基线为 HEAD `c2871031ac411a52c0e1ebaa508e3c17e326747f`、detached HEAD、无 staged/tracked 修改；基线已有本 HC-175 四份过程文档未跟踪文件。本轮只在这些文档、两端 Plugin 管理实现、Protocol 生成物、架构文档和对应测试范围内修改，未执行 git add/commit/push/reset/checkout/clean。
 
-自动化均使用临时 home、离线 fixture、fake credential backend/fake process；没有真实模型、网络、凭据或 ZA38 MCP/Hook/LSP 外部执行。使用主仓库 `/Users/beichen/Desktop/大模型/github projects/harness-code/packages/agent/.venv/bin/python` 完成 Host/Settings 和 Qwen/runtime 集合；Qwen 集合唯一失败是主任务已指出的 bare-node Phase3 既有基线用例，未归因 HC-166。`bun run project:check` 的唯一阻塞是既有无关任务 HC-151 的复核日期 `2026-08-30`，本轮未修改该任务规避检查。
+自动化均使用临时 home、离线 fixture、fake credential backend/fake process；没有真实模型、网络、凭据或 ZA38 MCP/Hook/LSP 外部执行。使用主仓库 `/Users/beichen/Desktop/大模型/github projects/harness-code/packages/agent/.venv/bin/python` 完成 Host/Settings 和 Qwen/runtime 集合；Qwen 集合唯一失败是主任务已指出的 bare-node Phase3 既有基线用例，未归因 HC-175。`bun run project:check` 的唯一阻塞是既有无关任务 HC-151 的复核日期 `2026-08-30`，本轮未修改该任务规避检查。
 
 ## 第二轮执行记录（2026-09-02）
 

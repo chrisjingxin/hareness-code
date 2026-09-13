@@ -1,6 +1,6 @@
-# HC-166 对齐 Qwen 插件管理规格
+# HC-175 对齐 Qwen 插件管理规格
 
-关联任务：[HC-166](../task/archive/HC-166-对齐Qwen插件管理.md)
+关联任务：[HC-175](../task/archive/HC-175-对齐Qwen插件管理.md)
 
 上游：[HC-157](../task/HC-157-Qwen扩展兼容.md)、[HC-158](../task/HC-158-对齐Qwen插件运行时.md)
 

@@ -524,7 +524,7 @@ def test_extract_interaction_all_safe_tools_auto_resume() -> None:
 def test_extract_interaction_directory_trust_not_auto_resumed() -> None:
     """需要目录信任的只读工具不得按并发安全自动放行。
 
-    回归：ZC-142 把只读工具纳入 HITL 后，它们进入 interrupt 的唯一原因是
+    回归：HC-177 把只读工具纳入 HITL 后，它们进入 interrupt 的唯一原因是
     需要目录信任决策；此前 _CONCURRENCY_SAFE_TOOLS 会将其自动 approve，
     信任卡片被静默跳过且信任不会注册，执行层只能硬拒绝，用户看不到弹窗。
     """

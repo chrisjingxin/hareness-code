@@ -1,4 +1,4 @@
-"""HC-166 Plugin Adapter 重解析与 activation 保留测试。"""
+"""HC-175 Plugin Adapter 重解析与 activation 保留测试。"""
 
 from __future__ import annotations
 

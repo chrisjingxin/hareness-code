@@ -1,12 +1,12 @@
-# HC-166 对齐 Qwen 插件管理执行清单
+# HC-175 对齐 Qwen 插件管理执行清单
 
-关联：[Task](../task/archive/HC-166-对齐Qwen插件管理.md) · [Spec](../spec/HC-166-对齐Qwen插件管理.md) · [Plan](../plan/HC-166-对齐Qwen插件管理.md)
+关联：[Task](../task/archive/HC-175-对齐Qwen插件管理.md) · [Spec](../spec/HC-175-对齐Qwen插件管理.md) · [Plan](../plan/HC-175-对齐Qwen插件管理.md)
 
 执行代理按本清单 TDD，不修改产品决策。只有两个联合验收点；轮内完成所有条目再汇报，不按文件或字段要求主任务逐项验收。
 
 ## 执行约束
 
-- [x] 开始前读取仓库 `AGENTS.md`、HC-166 Task/Spec/Plan/Todo、相关架构和 `tmp/handoff.md`。
+- [x] 开始前读取仓库 `AGENTS.md`、HC-175 Task/Spec/Plan/Todo、相关架构和 `tmp/handoff.md`。
 - [x] 记录当前 HEAD、branch、`git status --short --branch`、staged/unstaged/untracked 基线；保护用户已有修改。
 - [x] 不执行真实模型、网络、ZA38 MCP/Hook/LSP、真实 credential 读取；使用临时 home、fixture、fake process/backend。
 - [x] 不执行 git add/commit/push/reset/checkout/clean；没有主任务明确指令不得进入下一轮。
@@ -38,10 +38,10 @@
 
 - [x] Qwen、Claude、portable/Hybrid 离线 fixtures 都通过同一 install→enabled→name mutation 流程；参数化闭环测试 4 passed。
 - [x] 临时 home 的 user plugin 在另一个 workspace 创建的新 Host 可加载；显式 workspace plugin 只在绑定 workspace 的新 Host 加载；Host scope 闭环测试 3 passed。
-- [x] v2 registry/Settings 迁移、故障恢复、并发冲突和 name conflict 回归已覆盖并通过 26 个 HC-166 migration/management tests；replace 后 commit-uncertain 无法保证旧文件 durability，已按主任务接受的设计记录，未宣称旧文件绝对不变。
+- [x] v2 registry/Settings 迁移、故障恢复、并发冲突和 name conflict 回归已覆盖并通过 26 个 HC-175 migration/management tests；replace 后 commit-uncertain 无法保证旧文件 durability，已按主任务接受的设计记录，未宣称旧文件绝对不变。
 - [x] `static_preview` 不再出现在 Plugin/Skill/Agent/MCP Protocol response 或 CLI 输出。
 - [x] `protocol:generate`、`protocol:check`、Python Protocol tests、focused Agent tests、CLI tests、`typecheck`、`git diff --check` 通过（第一轮 Python Protocol 13 passed、CLI/Protocol Bun 69 passed、生成/check/typecheck/diff 通过；project:check 被无关 HC-151 复核日期阻塞，Qwen 集合另有 1 个既有 bare-node Phase3 基线失败）。
-- [x] 更新 HC-166 文档链和 `tmp/handoff.md`，写明命令、计数、diff、未验证项；停止等待主任务验收。
+- [x] 更新 HC-175 文档链和 `tmp/handoff.md`，写明命令、计数、diff、未验证项；停止等待主任务验收。
 
 ## 第二轮：启动加载与整体验收
 
