@@ -14,7 +14,7 @@ user_docs: docs/user/交互使用.md、docs/user/安全与沙箱.md
 developer_docs: docs/developer/spec/HC-138-建立BuildCompose双.md、docs/developer/research/Compose Mode 可行性调研.md、docs/developer/plan/HC-138-建立BuildCompose双.md、docs/developer/todo/HC-138-建立BuildCompose双.md、docs/developer/architecture/架构总览.md、docs/developer/architecture/adr/0001-agent-domain-model.md
 test_evidence: 见正文「实施证据」小节
 references: HC-140（替代任务）、docs/developer/spec/HC-138-建立BuildCompose双.md、docs/developer/research/Compose Mode 可行性调研.md、docs/developer/plan/HC-138-建立BuildCompose双.md、docs/developer/todo/HC-138-建立BuildCompose双.md、docs/developer/architecture/adr/0001-agent-domain-model.md
-completed_at: 待用户确认后由 task:complete 填写
+completed_at: -
 ---
 
 > **已过时：** 本任务记录固定 `Understand → Plan → Build → Verify → Review` ComposeRun 的首次实现。后续调研确认其以 `run_id` 作为流程身份，导致每个新 Turn 都重新 Understand，且 Compose Stage 与 Plugin Agent 仍存在分叉执行入口。目标设计与后续实施由 [HC-140 重构组合工作模式](archive/HC-140-重构组合工作模式.md) 及其 [Spec](../spec/HC-140-重构组合工作模式.md) 替代；本文与原 Spec/Plan/Todo 保留为历史，不再继续实施或验收。

@@ -5,10 +5,10 @@ feature_area: Web UI 工作台体验升级
 parent_task: HC-124
 decomposed_by: Codex
 priority: P0
-status: 待认领
+status: 已过时
 owner: 未认领
 branch: -
-scope: 移除 1280px 固定最小宽度，建立 wide/compact/narrow 三档 viewport 状态和 Sidebar/Context Dock column、overlay、drawer/fullscreen 行为，保证 Conversation 与 Composer 在窄屏、缩放和面板切换时始终可达。
+scope: （2026-09-13 已过时）原定移除 1280px 固定最小宽度，建立 wide/compact/narrow 三档 viewport 状态和 Sidebar/Context Dock 的 column、overlay、drawer/fullscreen 行为。该方向已被仓库既定的「桌面化」路线取代，不再实施。
 acceptance: 1440×900 列式 Conversation 不低于 640px；1280×800/1024×768 打开 Dock 时使用 overlay 且不挤压 Conversation；390×844、320×720 与 200% zoom 无根横向滚动，Sidebar/Dock 互斥且 Composer、取消、审批可达；viewport 切换不触发业务 RPC、不丢 draft/scroll/active Run；focused tests、build、typecheck 通过。
 user_docs: docs/user/Web界面.md、docs/user/交互使用.md
 developer_docs: docs/developer/spec/HC-124-统筹WebUI工作台体验升级与.md
@@ -16,6 +16,22 @@ test_evidence: -
 references: docs/developer/task/HC-124-统筹WebUI工作台体验升级与.md、docs/developer/task/HC-125-统一Web工作台视觉token.md
 completed_at: -
 ---
+
+> **2026-09-13 作废说明（本任务已过时）**
+>
+> **作废原因**：本任务要求"建立 wide/compact/narrow 三档 viewport 状态与 drawer/fullscreen 行为"，
+> 与仓库当前既定的**桌面化**路线正面冲突。当前代码已显式删除移动端抽屉与窄屏断点样式
+> （`packages/cli/tests/web/presentation/styles.test.ts` 有断言「桌面化清理：移动端抽屉、
+> workspace-header 与窄屏断点样式已删除」）；`styles.css` 的 `@media` 只剩
+> `max-width: 1240px` / `max-width: 900px` 两档降级，且 `.desktop-workspace` 仍保留
+> `min-width: 1280px`（正是本任务 scope 首句要移除的属性）。
+>
+> **替代范围**：窄屏与缩放下的可达性由 [HC-124](HC-124-统筹WebUI工作台体验升级与.md) 的验收
+> 与 [HC-115](HC-115-最终架构验收矩阵与Browse.md) 的最终验收覆盖；视觉层统一由
+> [HC-125](HC-125-统一Web工作台视觉token.md) 承载。
+>
+> **未交付范围（明确不补）**：三档 viewport 状态机、Sidebar/Context Dock 的 drawer 与
+> fullscreen 形态、窄屏互斥规则。保留本文件作为历史记录，不再独立认领。
 
 ## 背景
 
