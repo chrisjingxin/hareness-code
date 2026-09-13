@@ -13,7 +13,7 @@ acceptance: Tabbit 中可连续输入中文、英文、换行和 IME 文本并�
 user_docs: docs/user/交互使用.md
 developer_docs: docs/developer/spec/HC-107-修复WebComposer、补.md、docs/developer/architecture/架构总览.md
 test_evidence: "2026-08-04：bun test --isolate tests/web（181 pass）；bun run typecheck、bun run build、bun run project:check 通过；bun run test 的 CLI/TS 324 pass、1 skip，Python 为 599 pass、1 skip、2 个既有 agent 失败（auto-edit write、package-root subagents.py），与本任务无交集。Tabbit 现有 handoff 已结束；OCR 外部 LLM 审查尚未获授权。"
-references: docs/developer/task/HC-104-实现WebInteractiv.md、docs/developer/task/HC-105-建立WebBrowserE2E.md、docs/developer/task/HC-106-按蓝色工作台设计整改WebUI.md、docs/developer/task/HC-124-统筹WebUI工作台体验升级与.md
+references: docs/developer/task/HC-104-实现WebInteractiv.md、docs/developer/task/HC-115-最终架构验收矩阵与Browse.md、docs/developer/task/HC-106-按蓝色工作台设计整改WebUI.md、docs/developer/task/HC-124-统筹WebUI工作台体验升级与.md
 completed_at: -
 ---
 
@@ -79,7 +79,7 @@ Markdown fenced code
 5. 修复 Timeline 的空 Assistant 行与 avatar 溢出，增加角色 header，收敛 User surface、长文 measure、Tool 组间距和代码/表格局部滚动。
 6. 按 design 的控件层级调整 Brand、Topbar、Sidebar、Composer、Interaction、Utility：桌面紧凑、移动端触控目标放大，所有图标使用同一 Lucide optical weight。
 7. 补齐 light/dark、1440×900/390×844、200% zoom、键盘、长文本、连续 Tool、超长代码和高亮失败测试；在 Tabbit 中完成真实输入与视觉抽查。
-8. 更新用户/架构文档，运行 focused tests、build、typecheck、项目级检查和 open-code-review；高/中优先级问题修复后才能交给 HC-105 固化 Browser E2E 与截图基线。
+8. 更新用户/架构文档，运行 focused tests、build、typecheck、项目级检查和 open-code-review；高/中优先级问题修复后才能交给 HC-115 固化 Browser E2E 与截图基线。
 
 ## 范围
 
@@ -97,7 +97,7 @@ Markdown fenced code
 - 不新增附件、上传、拖放、消息编辑、代码执行或远端图片。
 - 不从 CDN、GitHub 或其它网络地址加载字体、图标、WASM、query 或高亮主题。
 - 不引入第二套 Markdown parser，也不使用 `dangerouslySetInnerHTML` 或高亮器生成的 HTML 字符串。
-- 不扩大到完整 Browser E2E fixture；最终跨进程自动化与四组基线仍由 HC-105 完成。
+- 不扩大到完整 Browser E2E fixture；最终跨进程自动化与四组基线仍由 HC-115 完成。
 - 不修改 TUI 视觉；Web 只复用 TUI 已分发的语法资产和语义 scope，不共享渲染组件。
 
 ## 验收清单
@@ -133,4 +133,4 @@ Markdown fenced code
 
 ## 后续
 
-- HC-105：在本任务最终 UI 上建立 Browser E2E 和视觉基线。
+- HC-115：在本任务最终 UI 上建立 Browser E2E 和视觉基线。

@@ -13,7 +13,7 @@ acceptance: /web 首次打开固定使用浅色；用户可在当前 Web 接管�
 user_docs: docs/user/交互使用.md
 developer_docs: docs/developer/spec/HC-106-按蓝色工作台设计整改WebUI.md
 test_evidence: "bun test tests/web/application/adapter.test.ts tests/web/presentation: 93 pass 0 fail；bun run build: exit 0；bun run typecheck: exit 0；bun run test: 599 passed / 2 failed（test_package_root_contains_only_entrypoints 与 test_auto_edit_writes_without_interruption_but_shell_still_requires_approval 为预存基线失败，与本次改动无关，已用 git stash 复验基线）；bun run project:check: exit 0；真实 Chrome 抽查（1440×900/390×844 light/dark）22/22 PASS（几何、无根横向滚动、抽屉/scrim、tab、主题切换、状态语义色）"
-references: docs/developer/task/HC-104-实现WebInteractiv.md、docs/developer/task/HC-105-建立WebBrowserE2E.md、docs/developer/task/HC-124-统筹WebUI工作台体验升级与.md
+references: docs/developer/task/HC-104-实现WebInteractiv.md、docs/developer/task/HC-115-最终架构验收矩阵与Browse.md、docs/developer/task/HC-124-统筹WebUI工作台体验升级与.md
 completed_at: -
 ---
 
@@ -35,7 +35,7 @@ HC-104 已将 `/web` 从最小 DOM 页面改为 React DOM 工作台，并通过�
 
 ## 为什么现在要修改
 
-HC-105 将建立真实 Browser E2E 和 light/dark 截图基线。如果先对旧主题固化截图，再实施新设计，测试与基线需要重复建设。应先完成单一视觉整改，再由 HC-105 对最终 UI 建立稳定验收证据。
+HC-115 将建立真实 Browser E2E 和 light/dark 截图基线。如果先对旧主题固化截图，再实施新设计，测试与基线需要重复建设。应先完成单一视觉整改，再由 HC-115 对最终 UI 建立稳定验收证据。
 
 ## 目标设计
 
@@ -67,7 +67,7 @@ InteractiveSnapshot + Web 表现状态
 5. 将 UtilityPanels 整理为稳定工作台壳与 Model/Skills/MCP/Status tab；保留 Help 入口、搜索、刷新、错误、空态、管理权限和 typed intent。
 6. 完成 `<900px` 的响应式收敛：顶栏只显示必要信息，Thread/Utility 使用抽屉与遮罩，Interaction 和 Composer 在 390px 内换行，长路径/代码只在自身滚动。
 7. 为 theme、header menu、tab、响应式 class、ARIA 状态和视觉语义增加 presentation/adapter focused tests；不得用大范围 snapshot 替代行为断言。
-8. 更新 Web 用户说明；运行 CLI focused tests、build、typecheck 和项目级检查，再交给 HC-105 建立真实浏览器双主题截图基线。
+8. 更新 Web 用户说明；运行 CLI focused tests、build、typecheck 和项目级检查，再交给 HC-115 建立真实浏览器双主题截图基线。
 
 ## 范围
 
@@ -83,7 +83,7 @@ InteractiveSnapshot + Web 表现状态
 - 不把主题偏好写入 TOML、SQLite、localStorage 或服务端；跨 `/web` 接管持久化另立需求。
 - 不引入新的 UI 框架、CSS-in-JS、远端字体、远端图片或图标依赖。
 - 不复制设计稿中的硬编码模型、Thread、工具输出、版本号和示例文案。
-- 不在本任务建立 Playwright fixture 或提交最终视觉基线；该工作属于 HC-105。
+- 不在本任务建立 Playwright fixture 或提交最终视觉基线；该工作属于 HC-115。
 
 ## 验收清单
 
@@ -96,7 +96,7 @@ InteractiveSnapshot + Web 表现状态
 - [ ] active Run/Interaction 时的 Thread 切换和返回限制、capability 隐藏/禁用、Markdown 安全和 Handoff 规则与 HC-104 保持一致。
 - [ ] 全部可交互元素具有 hover、pressed、focus-visible 和 disabled 状态；窄屏主要触控目标不小于 44px，并遵守 `prefers-reduced-motion`。
 - [ ] `styles.css` 不再存在同一组件的两套历史 class 规则或依赖文件后半段覆盖前半段才能正确显示的情况。
-- [ ] Web focused tests、`bun run build`、`bun run typecheck`、`bun run test` 与 `bun run project:check` 通过；随后由 HC-105 生成最终四组浏览器截图。
+- [ ] Web focused tests、`bun run build`、`bun run typecheck`、`bun run test` 与 `bun run project:check` 通过；随后由 HC-115 生成最终四组浏览器截图。
 
 ## 前置
 
@@ -104,7 +104,7 @@ InteractiveSnapshot + Web 表现状态
 
 ## 后续
 
-- HC-105。
+- HC-115。
 
 ## 定期复核记录
 

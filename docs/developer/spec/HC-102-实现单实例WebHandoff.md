@@ -405,7 +405,7 @@ bun run test
 bun run project:check
 ```
 
-OpenTUI 接管页属于用户可见变更，交付 PR 需附空首页打开、active 接管和 returning 三种终端截图。真实 Browser 跨进程矩阵、双视口和视觉基线仍由 HC-105 完成。
+OpenTUI 接管页属于用户可见变更，交付 PR 需附空首页打开、active 接管和 returning 三种终端截图。真实 Browser 跨进程矩阵、双视口和视觉基线仍由 HC-115 完成。
 
 ## 非范围与交接
 
@@ -413,6 +413,6 @@ OpenTUI 接管页属于用户可见变更，交付 PR 需附空首页打开、ac
 - 不提取 Interactive Core、`InteractiveController` 或迁移 TUI 业务语义；这些属于 HC-103。HC-102 只在 OpenTUI 根层处理宿主接管。
 - 不新增 Protocol v3 operation/capability/event，也不改变 HC-101 `ControlLease`、attachment 或 Run 语义。
 - 不实现 active Run replay、页面刷新恢复、多 Browser 前台窗口、远程访问、daemon、登录或多用户。
-- 不引入 Playwright；真实 Browser E2E、截图基线和完整安全矩阵属于 HC-105。
+- 不引入 Playwright；真实 Browser E2E、截图基线和完整安全矩阵属于 HC-115。
 - 不新增第三方依赖；使用 Bun server/WebSocket、现有 AgentClient 和浏览器原生 API。
 - 版本影响默认为“无根版本变更”；若执行 Thread 发现发布规则要求调整，只能通过 `bun run version:set`，并先修订任务与本方案。

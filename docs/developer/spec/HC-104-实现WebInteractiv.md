@@ -4,7 +4,7 @@
 
 前置方案：[HC-102：单实例 Web Handoff 与 TUI 接管生命周期](../task/HC-102-实现单实例WebHandoff.md) · [HC-103：Interactive Core 与 TUI 迁移](../task/archive/HC-103-让SkillCatalog在下.md)
 
-后续验证：[HC-105：真实 Browser E2E](../task/HC-105-建立WebBrowserE2E.md)
+后续验证：[HC-115：最终架构验收矩阵与 Browser E2E](../task/HC-115-最终架构验收矩阵与Browse.md)
 
 ## 通俗说明
 
@@ -402,7 +402,7 @@ mcp.read + mcp.manage
 
 - 改什么：实施完成后更新 `docs/user/交互使用.md` 与 `docs/user/故障排查.md`，说明新工作台、运行中限制、刷新不恢复和重新 `/web` 的方式。
 - 为什么：用户需要能观察和理解接管/归还，不应把一次性 URL 或内部 Thread ID 当作操作入口。
-- 如何验证：文档链接检查、任务定向测试、项目级检查和 HC-104 范围的 open-code-review；真实 Browser 端到端矩阵仍由 HC-105 承担。
+- 如何验证：文档链接检查、任务定向测试、项目级检查和 HC-104 范围的 open-code-review；真实 Browser 端到端矩阵仍由 HC-115 承担。
 
 ## 测试方案
 
@@ -448,7 +448,7 @@ bun run project:check
 bun run test
 ```
 
-HC-104 需人工检查 1440×900、390×844、系统浅色和深色四种组合并保存截图证据。HC-105 再使用真实 Browser 自动化覆盖 attachment、WebSocket、刷新/关闭、TUI 恢复和跨浏览器矩阵；HC-104 不引入 Playwright 代替该后续任务。
+HC-104 需人工检查 1440×900、390×844、系统浅色和深色四种组合并保存截图证据。HC-115 再使用真实 Browser 自动化覆盖 attachment、WebSocket、刷新/关闭、TUI 恢复和跨浏览器矩阵；HC-104 不引入 Playwright 代替该后续任务。
 
 ## 可观察验收
 
@@ -468,4 +468,4 @@ HC-104 需人工检查 1440×900、390×844、系统浅色和深色四种组合�
 - 不实现刷新后恢复 active Run、Event replay、离线队列或自动重连。
 - 不改变 Protocol v3 的业务方法、Run/Event/Interaction 数据形状；这里新增的 `active/exit.requested` 仅属于 CLI 内部 lifecycle。
 - 不改变 TUI 的视觉布局、快捷键或现有产品语义；共享 Skill seam 只补能力，不给 TUI 自动增加启停 UI。
-- 不在 HC-104 承担 HC-105 的真实浏览器端到端矩阵、安装包或发布流程。
+- 不在 HC-104 承担 HC-115 的真实浏览器端到端矩阵、安装包或发布流程。

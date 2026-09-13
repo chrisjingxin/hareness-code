@@ -4,7 +4,7 @@
 
 前置方案：[HC-104：Web Interactive Adapter 与 React 工作台](../task/HC-104-实现WebInteractiv.md)、[HC-106：蓝色 Web 工作台与显式深浅主题](../task/HC-106-按蓝色工作台设计整改WebUI.md)
 
-后续验收：[HC-105：建立 Web Browser E2E 与完成验收闭环](../task/HC-105-建立WebBrowserE2E.md)
+后续验收：[HC-115：最终架构验收矩阵与 Browser E2E 闭环](../task/HC-115-最终架构验收矩阵与Browse.md)
 
 ## 通俗说明
 
@@ -406,7 +406,7 @@ WebAssembly 在目标浏览器 CSP 下需要显式授权时，只在 `script-src
 - Adapter：`submit` 不携带 value，读取当前 draft；并发 submit 去重；用户在等待时修改 draft 不被旧结果清空。
 - Adapter：成功、throw、present、request-exit、active Run、readonly、close 的状态与错误。
 - Component：没有命令式 `.value =`；form submit 是 click/keyboard 统一入口；IME 不误发；auto-grow 只改 height。
-- 集成：真实 adapter + WebApp，原生 setter + `input`/composition/submit event 更新 DOM、snapshot 和 mock Controller；若 Happy DOM 仍无法承载，不能再次用 React 私有 props 替代该层证据，应把此用例放入 HC-105 Browser smoke 并在 HC-107 保留 Tabbit 手工证据。
+- 集成：真实 adapter + WebApp，原生 setter + `input`/composition/submit event 更新 DOM、snapshot 和 mock Controller；若 Happy DOM 仍无法承载，不能再次用 React 私有 props 替代该层证据，应把此用例放入 HC-115 Browser smoke 并在 HC-107 保留 Tabbit 手工证据。
 
 ### Syntax tests
 
@@ -438,7 +438,7 @@ WebAssembly 在目标浏览器 CSP 下需要显式授权时，只在 `script-src
 | 390×844 | light | IME、软键盘、drawer、Interaction actions、44px targets |
 | 390×844 | dark | 长 project/model、code 横向滚动、safe area、200% zoom |
 
-每组记录：根 `scrollWidth <= clientWidth`、主要控件 bounding box、不重叠 hit area、输入/发送实际结果、代码 plain/highlighted text 一致。截图只作为 HC-107 实施证据；HC-105 再将这些场景自动化。
+每组记录：根 `scrollWidth <= clientWidth`、主要控件 bounding box、不重叠 hit area、输入/发送实际结果、代码 plain/highlighted text 一致。截图只作为 HC-107 实施证据；HC-115 再将这些场景自动化。
 
 ### 项目级验证
 
@@ -462,7 +462,7 @@ bun run project:check
 6. **修复 Timeline 内容模型的表现漏洞**：省略空 final Assistant、分离 avatar/author、增加 prose measure、连续 Tool 分组间距。验证截图对应 fixture。
 7. **统一组件尺寸与布局**：按 Brand/Topbar/Sidebar/Composer/Utility 顺序使用三档 control token；完成 light/dark 和 narrow override。验证 CSS contract、键盘和 hit area。
 8. **文档与真实验收**：更新用户说明和架构静态路由/CSP/Worker说明，在 Tabbit 完成四组抽查，运行项目级检查和 OCR。
-9. **交接 HC-105**：把输入、IME、代码高亮 fallback、连续 Tool 和四组布局加入 Browser E2E/截图基线，避免 HC-105 只验证旧场景。
+9. **交接 HC-115**：把输入、IME、代码高亮 fallback、连续 Tool 和四组布局加入 Browser E2E/截图基线，避免 HC-115 只验证旧场景。
 
 ## 可观察验收
 
@@ -483,4 +483,4 @@ bun run project:check
 - 不把 syntax Worker 暴露为通用 Worker 平台，也不允许 Plugin 注入 parser/query。
 - 不引入远端 asset、第二个 icon set、第二套 Markdown parser 或 UI framework。
 - 不重构 TUI renderer，不要求 Web/TUI 共用 CSS，只共享 canonical syntax asset manifest。
-- 不在本任务完成 HC-105 的完整 Playwright/Host fixture、生命周期竞争和最终基线管理。
+- 不在本任务完成 HC-115 的完整 Playwright/Host fixture、生命周期竞争和最终基线管理。

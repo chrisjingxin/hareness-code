@@ -4,7 +4,7 @@
 
 历史基础：[HC-104](../task/HC-104-实现WebInteractiv.md)、[HC-106](../task/HC-106-按蓝色工作台设计整改WebUI.md)、[HC-107](../task/HC-107-修复WebComposer、补.md)
 
-最终验收：[HC-105](../task/HC-105-建立WebBrowserE2E.md)、[HC-115](../task/HC-115-最终架构验收矩阵与Browse.md)
+最终验收：[HC-115](../task/HC-115-最终架构验收矩阵与Browse.md)（已过时 HC-105 的 Browser E2E 范围并入其中）
 
 ## 通俗问题说明
 
@@ -392,8 +392,7 @@ Run 状态有两个同步视图：
 4. HC-128：实现 Run 状态、Composer 层级、quick prompt 和 Interaction 精修。
 5. HC-129：在完整结构上补键盘、separator、skip link、对比度和 focus 管理。
 6. HC-130：加入功能性动效，完成长会话性能测量和必要优化。
-7. HC-105：固化双主题多视口截图、真实输入、主要工作流和安全边界。
-8. HC-115：完成架构验收矩阵，关闭上层 HC-124。
+7. HC-115：完成架构验收矩阵，固化双主题多视口截图、真实输入、主要工作流和安全边界（范围含已过时 HC-105），关闭上层 HC-124。
 
 ## 测试方案
 

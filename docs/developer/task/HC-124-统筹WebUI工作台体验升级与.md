@@ -9,11 +9,11 @@ status: 进行中
 owner: Codex (Luna Max)
 branch: codex/zc-124-web-ui-upgrade
 scope: 以当前 React DOM Web 工作台为基础，统一视觉语言、响应式布局、Timeline/Tool、Run/Composer/Interaction、可访问性和功能性动效，并协调 HC-125～HC-130 与既有 Browser E2E/最终架构验收形成一个可观察的用户结果。
-acceptance: HC-125～HC-130 全部完成或有依据地标记过时；HC-105 的双主题多视口 Browser E2E 与 HC-115 最终验收覆盖新设计；1440×900、1280×800、1024×768、390×844、320px 和 200% zoom 下核心对话、运行状态、审批与 Composer 均可达；用户/开发文档、测试证据和版本影响闭环。
+acceptance: HC-125～HC-130 全部完成或有依据地标记过时；HC-115 的最终验收（含承接自已过时 HC-105 的双主题多视口 Browser E2E）覆盖新设计；1440×900、1280×800、1024×768、390×844、320px 和 200% zoom 下核心对话、运行状态、审批与 Composer 均可达；用户/开发文档、测试证据和版本影响闭环。
 user_docs: docs/user/交互使用.md、docs/user/Web界面.md
 developer_docs: docs/developer/spec/HC-124-统筹WebUI工作台体验升级与.md、docs/developer/architecture/架构总览.md
 test_evidence: -
-references: docs/developer/task/HC-079-提供本地WebUI与受令牌保护.md、docs/developer/task/HC-104-实现WebInteractiv.md、docs/developer/task/HC-105-建立WebBrowserE2E.md、docs/developer/task/HC-106-按蓝色工作台设计整改WebUI.md、docs/developer/task/HC-107-修复WebComposer、补.md、docs/developer/task/HC-115-最终架构验收矩阵与Browse.md
+references: docs/developer/task/HC-079-提供本地WebUI与受令牌保护.md、docs/developer/task/HC-104-实现WebInteractiv.md、docs/developer/task/HC-106-按蓝色工作台设计整改WebUI.md、docs/developer/task/HC-107-修复WebComposer、补.md、docs/developer/task/HC-115-最终架构验收矩阵与Browse.md
 completed_at: -
 ---
 
@@ -35,7 +35,7 @@ Web UI 已经具备 Thread、对话、Tool、Interaction、Composer、文件树�
 
 ## 为什么现在要修改
 
-HC-105/HC-115 即将建立最终 Browser E2E 和验收基线。若先对当前失效的窄屏布局和过时视觉目标固化截图，后续会再次重建基线。应先由本任务确认最终体验，再用既有验收任务关闭产品与架构证据。
+HC-115 即将建立最终 Browser E2E 和验收基线（已过时 HC-105 的范围并入其中）。若先对当前失效的窄屏布局和过时视觉目标固化截图，后续会再次重建基线。应先由本任务确认最终体验，再用既有验收任务关闭产品与架构证据。
 
 ## 目标设计
 
@@ -60,8 +60,7 @@ HC-105/HC-115 即将建立最终 Browser E2E 和验收基线。若先对当前�
 | 4 | HC-128 | 强化 Run 状态、Composer、空态和 Interaction 决策层级 |
 | 5 | HC-129 | 补齐键盘、焦点、对比度、触控目标和可访问分隔条 |
 | 6 | HC-130 | 落地功能性动效、长会话性能测量和滚动稳定性 |
-| 7 | HC-105 | 在最终 UI 上建立真实 Browser 双主题、多视口与主要工作流证据 |
-| 8 | HC-115 | 完成最终架构验收矩阵和 TUI/Web 连续性闭环 |
+| 7 | HC-115 | 完成最终架构验收矩阵和 TUI/Web 连续性闭环，并承接已过时 HC-105 的真实 Browser 双主题、多视口与主要工作流证据 |
 
 上述顺序是依赖顺序，不表示所有任务必须由同一 Agent 认领。HC-127 与 HC-128 在 HC-125/HC-126 合并后可并行；HC-129/HC-130 是跨组件收敛任务，必须等待核心结构稳定。
 
@@ -72,7 +71,7 @@ HC-105/HC-115 即将建立最终 Browser E2E 和验收基线。若先对当前�
 3. 由 HC-127/HC-128 分别优化历史阅读流和当前执行流，不改变 Interactive Core 业务事实。
 4. 由 HC-129 对完整页面做键盘与可访问性复核，补齐 Pointer-only seam。
 5. 由 HC-130 在稳定结构上加动效、测量长会话，并只在证据表明需要时引入 windowing。
-6. 更新 Web 用户文档，由 HC-105/HC-115 固化最终 Browser、Handoff 和架构证据。
+6. 更新 Web 用户文档，由 HC-115 固化最终 Browser、Handoff 和架构证据。
 
 ## 范围
 
@@ -97,7 +96,7 @@ HC-105/HC-115 即将建立最终 Browser E2E 和验收基线。若先对当前�
 - [ ] Conversation 在列式布局中不被外围面板压到 640px 以下；空间不足时外围区域自动降级为 overlay/drawer。
 - [ ] Tool、Interaction、Run 和 error 状态的层级符合设计方案，长会话可快速扫读。
 - [ ] light/dark 对比度、键盘、焦点、44px 窄屏目标和 reduced-motion 验收通过。
-- [ ] HC-105 Browser E2E、HC-115 验收矩阵与项目级检查通过。
+- [ ] HC-115 验收矩阵（含承接自 HC-105 的 Browser E2E）与项目级检查通过。
 - [ ] `docs/user/`、`docs/developer/` 和版本影响有明确记录。
 
 ## 定期复核记录

@@ -64,7 +64,7 @@ Web 视觉参考 Codex/Claude 的工作台风格：桌面左侧 Thread 导航、
 5. 实现模型、Skill、MCP、status 面板；所有 capability、busy 和参数校验来自共享 snapshot/result。
 6. 接入 HC-102 lifecycle：ready、nullable `thread.changed`、return、shutdown 和 bootstrap abort。
 7. 完成浅/深色 CSS、键盘焦点、ARIA、响应式稳定尺寸和长文本/长工具输出处理。
-8. 增加 Interactive Adapter intent 映射与关键 presentation 测试；真实浏览器矩阵留给 HC-105。
+8. 增加 Interactive Adapter intent 映射与关键 presentation 测试；真实浏览器矩阵留给 HC-115。
 9. 更新用户交互文档，准确说明 `/web`、返回、关闭/刷新和运行中限制。
 
 ## 范围

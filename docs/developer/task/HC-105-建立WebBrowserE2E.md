@@ -5,10 +5,10 @@ feature_area: Web UI 工作台体验升级
 parent_task: HC-124
 decomposed_by: 历史未记录
 priority: P0
-status: 待认领
+status: 已过时
 owner: 未认领
 branch: -
-scope: 按最终架构（HC-114 WebUiGateway）重定 Browser E2E scope：Playwright 无真实模型凭据自动验证 Web 主要工作流、生命周期矩阵、安全边界与多视口/双主题；本任务作为 HC-115 的交付物，完成证据并入 HC-115。
+scope: （2026-09-13 已过时）原定按最终架构（HC-114 WebUiGateway）建立 Browser E2E：Playwright 无真实模型凭据自动验证 Web 主要工作流、生命周期矩阵、安全边界与多视口/双主题。该范围与验收已整体并入 HC-115，本任务不再独立认领或单独关闭。
 acceptance: `test:web:e2e` 可重复运行（fake Agent，无真实凭据）：空首页首条消息、真实 DOM/IME 输入、发送/失败保留、代码高亮与降级、完整 Timeline、Interaction、取消、Thread/catalog/command parity；第二窗口、ready 超时、断线重连（state.replace 重同步）、active Run 关闭、CLI exit 均收敛；UI token 单次/Origin 绑定、错误 Origin/非白名单路径/畸形帧被拒；1440×900、1280×800、1024×768、390×844、320×720 与 200% zoom 的响应式矩阵通过，light/dark 关键基线截图稳定；`bun run build/typecheck/test/project:check` 与 E2E 全绿；证据写入 HC-115。
 user_docs: docs/user/交互使用.md、docs/user/故障排查.md
 developer_docs: docs/developer/architecture/架构总览.md、docs/developer/architecture/adr/0002-project-host-multi-connection.md
@@ -16,6 +16,11 @@ test_evidence: -
 references: docs/developer/task/HC-112-Skill安全文件层与AGEN.md、docs/developer/task/archive/HC-113-InteractiveCont.md、docs/developer/task/archive/HC-114-WebUiGateway与Pr.md、docs/developer/task/HC-115-最终架构验收矩阵与Browse.md、docs/developer/task/HC-124-统筹WebUI工作台体验升级与.md
 completed_at: -
 ---
+
+> **2026-09-13 收敛说明（本任务已过时）**：本任务的 Browser E2E 范围与验收证据已整体并入
+> [HC-115](HC-115-最终架构验收矩阵与Browse.md)，不再独立认领，也不再单独关闭。
+> 保留本文件作为历史记录，用于追溯 Browser E2E 的原始范围、前置问题与旧 scope 演变；
+> 当前执行入口与验收基准一律以 HC-115 为准。
 
 ## 背景
 

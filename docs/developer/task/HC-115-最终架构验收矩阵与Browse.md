@@ -1,14 +1,17 @@
 ---
 id: HC-115
 title: 最终架构验收矩阵与 Browser E2E 闭环
+feature_area: Web UI 工作台体验升级
+parent_task: HC-124
+decomposed_by: 历史未记录
 priority: P0
 status: 待认领
 owner: 未认领
 branch: -
-scope: 按最终架构方案 §13/§14 建立全量验收闭环：A-01~A-12 逐项自动化验证、架构测试（§13.2）合并固化、按新架构重定 HC-105 的 Browser E2E scope 并落地 Playwright fixture（真实 Host + fake Agent，无真实凭据），覆盖 TUI→Web→TUI 连续性、功能 parity、生命周期异常、安全边界与双视口/双主题。
-acceptance: A-01~A-12 每项有可重复执行的自动化断言与证据（记录于本任务）；`test:web:e2e` 脚本可重复运行且覆盖空首页首条消息、Web 发消息/Tool/approval、返回 TUI 连续性、断线重连、第二窗口、ready 超时、CLI 退出、fragment/Origin/消息校验安全断言、1440×900 与 390×844 light/dark 基线截图；HC-105 已按新架构重定 scope 并与本任务证据合并；`bun run build/typecheck/test/project:check` 与 E2E 全绿。
-user_docs: docs/user/交互使用.md
-developer_docs: docs/developer/architecture/架构总览.md
+scope: 按最终架构方案 §13/§14 建立全量验收闭环：A-01~A-12 逐项自动化验证、架构测试（§13.2）合并固化、直接承接已过时 HC-105 的 Browser E2E 范围并落地 Playwright fixture（真实 Host + fake Agent，无真实凭据），覆盖 TUI→Web→TUI 连续性、功能 parity、生命周期异常、安全边界与双视口/双主题。
+acceptance: A-01~A-12 每项有可重复执行的自动化断言与证据（记录于本任务）；`test:web:e2e` 脚本可重复运行且覆盖空首页首条消息、Web 发消息/Tool/approval、返回 TUI 连续性、断线重连、第二窗口、ready 超时、CLI 退出、fragment/Origin/消息校验安全断言、1440×900 与 390×844 light/dark 基线截图；HC-105 已过时，其 Browser E2E 范围由本任务直接承接；`bun run build/typecheck/test/project:check` 与 E2E 全绿。
+user_docs: docs/user/交互使用.md、docs/user/故障排查.md
+developer_docs: docs/developer/architecture/架构总览.md、docs/developer/architecture/adr/0002-project-host-multi-connection.md
 test_evidence: -
 references: docs/developer/task/HC-105-建立WebBrowserE2E.md、docs/developer/task/HC-108-收敛迁移子进程强制清理与残留文.md、docs/developer/task/HC-109-修复旧版PromptEpoch.md、docs/developer/task/HC-110-修复compact操作门禁与超.md、docs/developer/task/HC-111-让手动压缩按正收益提交.md、docs/developer/task/HC-112-Skill安全文件层与AGEN.md、docs/developer/task/archive/HC-113-InteractiveCont.md、docs/developer/task/archive/HC-114-WebUiGateway与Pr.md
 completed_at: -
@@ -16,7 +19,7 @@ completed_at: -
 
 ## 背景
 
-最终架构方案 §13（测试与质量门禁）与 §14（12 条验收标准 A-01~A-12）要求每个架构承诺都有可观察证据。现有 HC-105（待认领）描述的 E2E scope 基于旧架构（Browser 直连 Agent attachment + host.control 转移），在 HC-114 落地后流程已改变，必须重定 scope 后执行。
+最终架构方案 §13（测试与质量门禁）与 §14（12 条验收标准 A-01~A-12）要求每个架构承诺都有可观察证据。原 HC-105（2026-09-13 已过时）描述的 E2E scope 基于旧架构（Browser 直连 Agent attachment + host.control 转移），在 HC-114 落地后流程已改变；其范围已整体并入本任务，由本任务按最终架构直接定义并落地，不再单独重定 HC-105 的 scope。
 
 12 条验收（方案 §14）：
 
@@ -39,8 +42,8 @@ completed_at: -
 
 1. 各验收项散落在任务验收清单中，缺一个集中、可重复执行的验收矩阵与证据台账。
 2. 架构测试（§13.2）目前只有 tests/tui、tests/web 的局部 regex 断言，缺少 interactive 零依赖（HC-109 已建）、Browser 无 AgentClient、单 Composition Root、presentation-shared 纯净性等全量断言；且无工具化集成（§13.2 禁止仅靠目录白名单/正则字符串代表完整架构约束——需要把架构断言统一收口）。
-3. HC-105 的 Playwright E2E scope 描述旧流程（fragment attachment、host.control acquire/release、TUI 卸载重建），与 HC-113/114 后的真实流程不符。
-4. 仓库尚无 Playwright 依赖、E2E script 与浏览器 fixture（HC-105 原样成立）。
+3. 原 HC-105 的 Playwright E2E scope 描述旧流程（fragment attachment、host.control acquire/release、TUI 卸载重建），与 HC-113/114 后的真实流程不符；该任务已过时，其范围必须由本任务按最终架构重新定义。
+4. 仓库尚无 Playwright 依赖、E2E script 与浏览器 fixture。
 
 ## 为什么现在要修改
 
@@ -55,11 +58,12 @@ completed_at: -
 - 架构断言统一收口：把 tests/tui、tests/web 的 regex 断言迁移/合并为共享 helper（`tests/acceptance/arch-imports.ts`），并补缺项（interactive 零依赖、Browser 无 AgentClient/host.control、createInteractiveController 单调用点、presentation-shared 纯净、Web 无 dangerouslySetInnerHTML）。
 - 每项验收记录命令 + 输出摘要（写入本任务 test_evidence）。
 
-### 2. HC-105 重定 scope
+### 2. 承接 HC-105 的 Browser E2E 范围
 
-- 改写 `docs/developer/task/HC-105-建立WebBrowserE2E.md` 的 scope/acceptance/references：按最终架构描述 E2E（WebUiGateway WS、UI token、state.replace/patch、intent/intent.outcome、handoff.state），删除 attachment/host.control 描述；状态保持待认领，完成证据并入本任务（HC-105 作为本任务的交付物一并关闭）。
+- HC-105 已于 2026-09-13 标记「已过时」，其范围与验收整体并入本任务，不再独立认领，也不再单独关闭；本任务保留其文件作为历史记录与吸收来源。
+- 本任务直接按最终架构定义 E2E：WebUiGateway WS、UI token、`state.replace/state.patch`、`intent/intent.outcome`、`handoff.state`；不再出现 attachment/host.control 描述。
 
-### 3. Playwright E2E fixture（承接重定后的 HC-105）
+### 3. Playwright E2E fixture（承接 HC-105 移交的范围）
 
 - 依赖：固定版本 Playwright（`@playwright/test`），独立 script `test:web:e2e`（根 package.json），不读取真实 API Key。
 - fixture：测试专用 CLI 启动入口（fake Agent 模式，参照 tests/gateway.integration.test.ts 的 HARNESS_ECHO/loopback 模式）→ 真实 Bun Web server + 真实 Browser。
@@ -75,16 +79,16 @@ completed_at: -
 
 ## 实施步骤
 
-1. 重定 HC-105 scope/acceptance/references（最终架构），在本文档记录版本与日期。
+1. 按最终架构定义本任务的 Browser E2E scope/acceptance（承接已过时 HC-105 移交的范围），在本文档记录版本与日期。
 2. 建立 tests/acceptance/ 验收矩阵与共享架构断言 helper；逐项落地 A-01~A-12 断言（可先静态断言后集成）。
 3. 引入 Playwright（固定版本）与 `test:web:e2e` script；建立 fake-Agent fixture 与测试专用启动入口。
 4. 实现 smoke/parity → lifecycle → security → visual-a11y 四组用例；四组基线截图入库（scripts 输出目录）。
 5. 全量回归：`bun run build`、`bun run typecheck`、`bun run test`、`bun run project:check`、`bun run test:web:e2e`；逐项记录 A-01~A-12 证据。
-6. 文档闭环与 OCR（open-code-review，范围限定本任务 diff）；任务完成证据写入 HC-105 与本任务。
+6. 文档闭环与 OCR（open-code-review，范围限定本任务 diff）；任务完成证据统一写入本任务。
 
 ## 范围
 
-- 验收矩阵 A-01~A-12、架构断言收口、HC-105 重定 scope、Playwright E2E 四组场景、文档闭环。
+- 验收矩阵 A-01~A-12、架构断言收口、承接 HC-105 的 Browser E2E 范围、Playwright E2E 四组场景、文档闭环。
 
 ## 非范围
 
@@ -96,7 +100,7 @@ completed_at: -
 
 - [ ] tests/acceptance/ 存在且 A-01~A-12 每项有可执行断言；`bun run test` 全绿。
 - [ ] 架构断言覆盖：interactive 零 ipc/平台 import；Browser 无 AgentClient/authenticate/host.control/attachment；createInteractiveController 仅 index.ts；presentation-shared 纯净；Web 无 dangerouslySetInnerHTML。
-- [ ] HC-105 已按最终架构重定 scope 并在看板保持待认领；其完成证据并入本任务。
+- [ ] HC-105 已标记「已过时」并指向本任务；其 Browser E2E 范围由本任务直接承接。
 - [ ] `test:web:e2e` 可重复运行：smoke/parity、lifecycle（第二窗口/超时/断线重连/active Run 关闭/CLI exit）、security、visual-a11y 四组全过；四组基线截图生成。
 - [ ] E2E 中 TUI→Web→TUI 后状态连续（A-05）且断言 Controller 未重建、Host holder 未转移（A-01/A-04）。
 - [ ] `bun run build/typecheck/test/project:check` 与 `test:web:e2e` 全绿；证据与 OCR 结论写入本任务。

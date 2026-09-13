@@ -4,7 +4,7 @@
 
 前置方案：[HC-104：Web Interactive Adapter 与 React 工作台](../task/HC-104-实现WebInteractiv.md)
 
-后续验收：[HC-105：真实 Browser E2E](../task/HC-105-建立WebBrowserE2E.md)
+后续验收：[HC-115：最终架构验收矩阵与 Browser E2E](../task/HC-115-最终架构验收矩阵与Browse.md)
 
 ## 通俗说明
 
@@ -76,10 +76,10 @@ Web 仍保留用户设计稿确认的浅色主题、Thread 导航、工具工作
   → Timeline / Tool / Interaction / Composer
   → Utility workspace 与移动端抽屉
   → focused tests 与真实浏览器抽查
-  → HC-105 自动化视觉基线
+  → HC-115 自动化视觉基线
 ```
 
-HC-105 仍是独立任务，因为它引入 Playwright、真实 Host fixture 和跨进程 lifecycle 测试，不应与 presentation 改造混在同一个 diff 中。
+HC-115 仍是独立任务，因为它引入 Playwright、真实 Host fixture 和跨进程 lifecycle 测试，不应与 presentation 改造混在同一个 diff 中。
 
 ## 关键 invariant
 
@@ -464,7 +464,7 @@ CSS 不使用：
 | 390×844 | light | 两个抽屉、Topbar、软键盘前布局、操作换行 |
 | 390×844 | dark | 长文本、safe area、Composer、无根横向滚动 |
 
-抽查截图只作为 HC-106 实施证据，不在本任务引入 Playwright 或提交最终基线。HC-105 使用真实 Host fixture 对同一四组场景建立可重复自动化截图、几何和键盘断言。
+抽查截图只作为 HC-106 实施证据，不在本任务引入 Playwright 或提交最终基线。HC-115 使用真实 Host fixture 对同一四组场景建立可重复自动化截图、几何和键盘断言。
 
 ### 项目级验证
 
@@ -488,7 +488,7 @@ bun run project:check
 6. **整理 Utility workspace**：增加四个主 tab 和 Help 模式，复用既有 panel 内容与 typed intent，不修改共享 Core。
 7. **收敛移动端**：实现互斥抽屉、scrim、focus、safe area 和 390px 几何；复用桌面组件，不创建移动端业务副本。
 8. **删除历史 CSS 双轨**：只在所有 canonical class 覆盖完成后删除旧规则，运行 focused tests 防止误删。
-9. **补文档和实施证据**：更新 `/web` 主题说明，记录四组 Chrome 抽查、测试、OCR 范围与结果；通过后交给 HC-105。
+9. **补文档和实施证据**：更新 `/web` 主题说明，记录四组 Chrome 抽查、测试、OCR 范围与结果；通过后交给 HC-115。
 
 ## 可观察验收
 
@@ -507,4 +507,4 @@ bun run project:check
 - 不为 Message/Tool 新增时间戳、duration 或 path Protocol 字段。
 - 不新增附件、上传、拖放、远端图片或语法高亮依赖。
 - 不改变 Model、Skill、MCP、approval mode 或 Slash Command 的业务语义。
-- 不建立 Browser E2E fixture 或最终截图基线；由 HC-105 完成。
+- 不建立 Browser E2E fixture 或最终截图基线；由 HC-115 完成。
