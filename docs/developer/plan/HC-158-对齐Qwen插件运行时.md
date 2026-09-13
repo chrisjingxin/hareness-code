@@ -358,7 +358,7 @@ backend 失败均不 spawn。实现证据、`protocol:generate/check`、回滚�
 
 ## Phase 5：Channels 延期决策（已完成，不实现）
 
-1. 已核对 `/Users/beichen/Desktop/大模型/za38-cli-extension/devagent-extension.json`：当前 ZA38 插件没有 `channels` 声明。
+1. 已核对 仓库外参考：当前 ZA38 插件没有 `channels` 声明。
 2. 2026-08-28 用户决定本次不开发 Channels；HC-158 以 Phase 0-4B 的核心运行时能力进入手工验证和收口。
 3. Adapter 继续把 Channels 报告为 `unsupported/effective=false`，不得动态 import、启动额外进程或建立外部连接。
 4. 未来出现真实 Channel 需求时另立任务；新任务必须先完成 Channel Host 安全评审和 threat model，定义独立子进程/受控 IPC、认证、入站身份、Thread/Run 所有权、速率限制、重放防护、断连/取消/关闭和审计，再做 fake E2E。

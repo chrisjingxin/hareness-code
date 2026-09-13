@@ -2,7 +2,7 @@
 
 ## 1. 调研对象
 
-- **MiMo Code**：`/Users/zhangjingxin/Code/OpenSource/MiMo-Code/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx`
+- **MiMo Code**：本地源码库
 - **Claude Code**：`!<command>` Shell 交互模式
 
 ---

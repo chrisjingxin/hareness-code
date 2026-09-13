@@ -44,7 +44,7 @@ HC-157 回归 `13 passed, 59 deselected`；portable/Claude/Hybrid `31 passed, 27
 - Phase 0 显式集合 → `20 passed`；HC-157 回归 → `13 passed, 77 deselected`。
 - portable/Claude/Hybrid runtime → `31 passed, 30 deselected`；Host Plugin/Skill/Run → `12 passed, 44 deselected`；CLI/Protocol focused（含 CLI 启动层版本门禁、Command Registry、Host/Protocol contract）→ `62 pass`；full-demo → `1 passed`。
 - `protocol:generate`、`protocol:check`、`typecheck`、`git diff --check` 通过；未启动真实 ZA38 Hook/MCP/LSP/Monitor、模型或网络，未读取真实 `.env*`/`.npmrc`/凭据。
-- 真实 `/Users/beichen/Desktop/大模型/za38-cli-extension` 使用临时 home 只读安装并 enable：Commands 3、Skill 1，Commands/Skills preview 均去重；store 不含 `.git`、`.env*` 或 `.npmrc`，但保留净化源中的 `references/origin/`，runtime snapshot 不含 origin。沙箱禁止创建真实 Unix socket，离线 fixture 使用 `stat.S_IFSOCK` fake lstat 验证剪枝。
+- 真实 仓库外参考使用临时 home 只读安装并 enable：Commands 3、Skill 1，Commands/Skills preview 均去重；store 不含 `.git`、`.env*` 或 `.npmrc`，但保留净化源中的 `references/origin/`，runtime snapshot 不含 origin。沙箱禁止创建真实 Unix socket，离线 fixture 使用 `stat.S_IFSOCK` fake lstat 验证剪枝。
 - `git diff --check` 与四份已修改的 HC-158 文档、`tmp/handoff.md` 的独立 trailing-whitespace 扫描另行记录；docs/tasks/project 检查如被 HC-130 既有复核日期阻塞，不修改 HC-130。
 
 ## Phase 2：MCP
@@ -63,7 +63,7 @@ HC-157 回归 `13 passed, 59 deselected`；portable/Claude/Hybrid `31 passed, 27
 - `tests/extensions/test_mcp.py` → `72 passed`：canonical server status、partial failure、tool namespace、close、snapshot replacement 和资源 lease；`tests/host/test_run_coordinator.py` → `39 passed`，验证既有 Host/Run cancellation seam 的取消后资源释放。
 - `tests/host/test_server.py` → `56 passed`；三个 Phase 1 主文件仍为 `150 passed`；CLI/Protocol focused 为 `62 pass`；Python Protocol contract 为 `12 passed`。
 - `bun run protocol:generate`、`bun run protocol:check`、`bun run typecheck` 和 `git diff --check` 通过；`mcpStatusResult.diagnostics` 只由 canonical schema 生成。
-- 真实 `/Users/beichen/Desktop/大模型/za38-cli-extension` 只读临时 home：Commands 3、Skill 1、MCP config 1，conversion diagnostics 为空，Commands/Skills/MCP preview 均为 0；store 有 122 个 origin 条目，runtime snapshot 无 origin。只做安装、快照和配置转换，不调用 client、不读 `.env*`/`.npmrc`/凭据。
+- 真实 仓库外参考只读临时 home：Commands 3、Skill 1、MCP config 1，conversion diagnostics 为空，Commands/Skills/MCP preview 均为 0；store 有 122 个 origin 条目，runtime snapshot 无 origin。只做安装、快照和配置转换，不调用 client、不读 `.env*`/`.npmrc`/凭据。
 
 ## Phase 3：Hook + LSP
 

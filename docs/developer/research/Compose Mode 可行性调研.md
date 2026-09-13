@@ -132,22 +132,22 @@ MiMo 的体验优势主要来自“当前工作目标可以跨消息持续，下
 
 ### Compose 是 Agent 配置，不是 Workflow Runtime
 
-- `compose` 与 `build`、`plan` 同为 `mode: "primary"` 的原生 Agent。它的 `options` 为空，只在默认权限上允许 `question` 和 `skill`；定义中没有 stage、artifact 或 transition 字段：`/Users/zhangjingxin/Code/OpenSource/MiMo-Code/packages/opencode/src/agent/agent.ts:177-191`。
-- Compose 系统提示把自己定义为 Skill orchestrator，并规定“匹配 Skill 必须调用”；同时明确允许需求完整、无设计歧义的 Bug 或 well-specified change 跳过 brainstorm，直接进入 debug、TDD 或实现：`/Users/zhangjingxin/Code/OpenSource/MiMo-Code/packages/opencode/src/session/prompt/compose.txt:1-13`。
-- Skill 选择发生在模型侧：收到消息后判断 Skill 是否适用，适用则调用 `skill` Tool，并按 Skill checklist 执行；Runtime 没有在这里计算阶段：`/Users/zhangjingxin/Code/OpenSource/MiMo-Code/packages/opencode/src/session/prompt/compose.txt:54-67`。
-- `skill` Tool 的实现只是按名字读取 Skill 内容、经过权限检查、把 `SKILL.md` 和少量相关文件返回给模型；它不保存阶段，也不触发 transition：`/Users/zhangjingxin/Code/OpenSource/MiMo-Code/packages/opencode/src/tool/skill.ts:15-72`。
+- `compose` 与 `build`、`plan` 同为 `mode: "primary"` 的原生 Agent。它的 `options` 为空，只在默认权限上允许 `question` 和 `skill`；定义中没有 stage、artifact 或 transition 字段：本地源码库。
+- Compose 系统提示把自己定义为 Skill orchestrator，并规定“匹配 Skill 必须调用”；同时明确允许需求完整、无设计歧义的 Bug 或 well-specified change 跳过 brainstorm，直接进入 debug、TDD 或实现：本地源码库。
+- Skill 选择发生在模型侧：收到消息后判断 Skill 是否适用，适用则调用 `skill` Tool，并按 Skill checklist 执行；Runtime 没有在这里计算阶段：本地源码库。
+- `skill` Tool 的实现只是按名字读取 Skill 内容、经过权限检查、把 `SKILL.md` 和少量相关文件返回给模型；它不保存阶段，也不触发 transition：本地源码库。
 
-MiMo 将内置 Compose Skills 打包后解压到版本化 data 目录，再向 Prompt 注入一个只含 name、description、location 的 `<compose_skills>` 索引：`/Users/zhangjingxin/Code/OpenSource/MiMo-Code/packages/opencode/src/skill/compose/extract.ts:32-49,63-84`。这些 Skill 标记为 hidden，不出现在普通 `available` 列表，但仍能按确切名称从 registry 读取：`/Users/zhangjingxin/Code/OpenSource/MiMo-Code/packages/opencode/src/skill/index.ts:250-272`。因此 MiMo 实现的是“Compose 专属的 progressive-disclosure 方法库”，不是“每个 Runtime stage 私有注入一份 method asset”。
+MiMo 将内置 Compose Skills 打包后解压到版本化 data 目录，再向 Prompt 注入一个只含 name、description、location 的 `<compose_skills>` 索引：本地源码库。这些 Skill 标记为 hidden，不出现在普通 `available` 列表，但仍能按确切名称从 registry 读取：本地源码库。因此 MiMo 实现的是“Compose 专属的 progressive-disclosure 方法库”，不是“每个 Runtime stage 私有注入一份 method asset”。
 
 ### 所谓阶段实际由 Skill 文本链接
 
 MiMo 有可辨认的研发流程，但流程边是自然语言契约：
 
-1. `compose:brainstorm` 的 checklist 负责理解、澄清、方案、Spec 和批准，其 terminal state 明确要求调用 `compose:plan`：`/Users/zhangjingxin/Code/OpenSource/MiMo-Code/packages/opencode/src/skill/compose/.bundle/brainstorm/SKILL.md:25-73,123-160`。
-2. `compose:plan` 写完并自检 Plan 后，根据记忆偏好或用户选择进入 `compose:subagent` 或 `compose:execute`：`/Users/zhangjingxin/Code/OpenSource/MiMo-Code/packages/opencode/src/skill/compose/.bundle/plan/SKILL.md:128-161`。
-3. `compose:execute` 逐项执行 Plan、运行指定验证，全部完成后调用 `compose:report`，Report 再进入 Merge：`/Users/zhangjingxin/Code/OpenSource/MiMo-Code/packages/opencode/src/skill/compose/.bundle/execute/SKILL.md:17-38`、`/Users/zhangjingxin/Code/OpenSource/MiMo-Code/packages/opencode/src/skill/compose/.bundle/report/SKILL.md:37-46,173-180`。
-4. `compose:subagent` 则为每个任务创建 Task、派 fresh implementer、先做 Spec compliance Review、再做 Code quality Review；所有任务完成后做最终 Review 并进入 Merge：`/Users/zhangjingxin/Code/OpenSource/MiMo-Code/packages/opencode/src/skill/compose/.bundle/subagent/SKILL.md:43-128`。
-5. `compose:verify` 是所有完成声明前都应使用的 evidence gate，但它本身仍是模型执行的 checklist，不是 Runtime 读取 exit code 后触发的状态迁移：`/Users/zhangjingxin/Code/OpenSource/MiMo-Code/packages/opencode/src/skill/compose/.bundle/verify/SKILL.md:17-38,118-138`。
+1. `compose:brainstorm` 的 checklist 负责理解、澄清、方案、Spec 和批准，其 terminal state 明确要求调用 `compose:plan`：本地源码库。
+2. `compose:plan` 写完并自检 Plan 后，根据记忆偏好或用户选择进入 `compose:subagent` 或 `compose:execute`：本地源码库。
+3. `compose:execute` 逐项执行 Plan、运行指定验证，全部完成后调用 `compose:report`，Report 再进入 Merge：本地源码库。
+4. `compose:subagent` 则为每个任务创建 Task、派 fresh implementer、先做 Spec compliance Review、再做 Code quality Review；所有任务完成后做最终 Review 并进入 Merge：本地源码库。
+5. `compose:verify` 是所有完成声明前都应使用的 evidence gate，但它本身仍是模型执行的 checklist，不是 Runtime 读取 exit code 后触发的状态迁移：本地源码库。
 
 这也暴露了软流程的边界：`execute` 路径显式要求 `report → merge`，而 `subagent` 流程图在最终 Reviewer 后直接进入 `merge`。Runtime 不会发现或拒绝这种流程差异。MiMo 能灵活跳步，但不保证所有路径满足同一套合法迁移和完成判定。
 
@@ -160,14 +160,14 @@ MiMo 有可辨认的研发流程，但流程边是自然语言契约：
 | 执行进度 | Task Tool 的 Task/子 Task 状态，以及 Plan checkbox | 不是单独的阶段 Markdown。证据：`execute/SKILL.md:19-32`、`subagent/SKILL.md:101-128`。 |
 | Final Report | 默认 `docs/compose/reports/<feature-name>.md`，原地覆盖最终状态并回链 Spec/Plan | 标准复杂功能需要；trivial fix 可跳过。证据：`report/SKILL.md:15-35`。 |
 
-所以“直接写入 workspace MD”确实是 MiMo 连续性的关键部分，但不是完整答案。MiMo 同时依赖 Conversation、SQLite Session、Task ledger、Checkpoint 和按任务保存的 progress；README 明确列出 `checkpoint.md`、`tasks/<id>/progress.md` 及 Task tree，并说明 resume 时自动注入：`/Users/zhangjingxin/Code/OpenSource/MiMo-Code/README.md:55-75`。
+所以“直接写入 workspace MD”确实是 MiMo 连续性的关键部分，但不是完整答案。MiMo 同时依赖 Conversation、SQLite Session、Task ledger、Checkpoint 和按任务保存的 progress；README 明确列出 `checkpoint.md`、`tasks/<id>/progress.md` 及 Task tree，并说明 resume 时自动注入：本地源码库。
 
 ### 为什么输入“继续”不会回到开头
 
-- 每次主循环先读取当前 Session 的未压缩消息切片，并从最后一条 user message 解析本轮 Agent，而不是构造新的 Compose workflow state：`/Users/zhangjingxin/Code/OpenSource/MiMo-Code/packages/opencode/src/session/prompt.ts:2120-2154,2393-2400`。
-- 只要当前上下文中存在任意 `agent === "compose"` 的 user message，就会把 Compose orchestrator prompt 和 Compose Skill 索引前置到那条消息；这个 reminder 在每轮模型调用前重新处理：`/Users/zhangjingxin/Code/OpenSource/MiMo-Code/packages/opencode/src/session/prompt.ts:443-464,2512-2515`。
-- Context rebuild 会注入 Task ledger 和 Session checkpoint，并明确告诉模型直接从最近状态继续、不要重述或重新询问目标：`/Users/zhangjingxin/Code/OpenSource/MiMo-Code/packages/opencode/src/session/checkpoint.ts:1096-1122,1216-1232`。
-- CLI `-c` 只是导航到最近 Session；`/resume` 和 `/continue` 只是打开 Session list 的 alias，不触发任何 Compose stage：`/Users/zhangjingxin/Code/OpenSource/MiMo-Code/packages/opencode/src/cli/cmd/tui/app.tsx:377-397,428-440`。
+- 每次主循环先读取当前 Session 的未压缩消息切片，并从最后一条 user message 解析本轮 Agent，而不是构造新的 Compose workflow state：本地源码库。
+- 只要当前上下文中存在任意 `agent === "compose"` 的 user message，就会把 Compose orchestrator prompt 和 Compose Skill 索引前置到那条消息；这个 reminder 在每轮模型调用前重新处理：本地源码库。
+- Context rebuild 会注入 Task ledger 和 Session checkpoint，并明确告诉模型直接从最近状态继续、不要重述或重新询问目标：本地源码库。
+- CLI `-c` 只是导航到最近 Session；`/resume` 和 `/continue` 只是打开 Session list 的 alias，不触发任何 Compose stage：本地源码库。
 
 MiMo 的 resume 单位因此是“有完整历史与账本的 Session/Goal”，不是“某个 Compose stage”。这能自然处理“继续”“按反馈改 Plan”“修复上次失败”等输入；代价是历史、文档和 Task 状态若互相矛盾，模型可能选错 Skill，因为没有 deterministic resolver 负责裁决。
 

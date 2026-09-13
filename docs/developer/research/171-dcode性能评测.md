@@ -6,7 +6,7 @@
 
 dcode 已有三类互补评测：**运行时微基准、真实模型行为评测、Harbor 沙箱任务评测**。它们回答的问题不同，不能把 SDK 的分数、CLI 的启动时间和完整任务成绩混成一个“性能分”。
 
-本地源码：`/Users/zhangjingxin/Code/OpenSource/deepagents`，commit `03436b369c0324498602fe6b7918cf36f3629d76`（提交日期 2026-09-02）。已读取根目录、`libs/code`、`libs/evals` 的 AGENTS；尝试 CodeGraph 后确认该 checkout 无索引，回退到定向源码检索。下文源码路径均相对此目录；行号对应上述 commit，可用 `https://github.com/langchain-ai/deepagents/blob/03436b369c0324498602fe6b7918cf36f3629d76/<路径>#L<行号>` 复核。
+本地源码：本地源码库，commit `03436b369c0324498602fe6b7918cf36f3629d76`（提交日期 2026-09-02）。已读取根目录、`libs/code`、`libs/evals` 的 AGENTS；尝试 CodeGraph 后确认该 checkout 无索引，回退到定向源码检索。下文源码路径均相对此目录；行号对应上述 commit，可用 `https://github.com/langchain-ai/deepagents/blob/03436b369c0324498602fe6b7918cf36f3629d76/<路径>#L<行号>` 复核。
 
 ## 1. dcode 本体如何测运行速度
 

@@ -1,6 +1,6 @@
 # 163-Plan模式产品化（竞品源码调研）
 
-- 竞品：Qwen Code（`/Users/zhangjingxin/Code/OpenSource/qwen-code`）、Oh My Pi（`/Users/zhangjingxin/Code/OpenSource/oh-my-pi`）、Grok Build（`/Users/zhangjingxin/Code/OpenSource/grok-build`）
+- 竞品：Qwen Code、Oh My Pi、Grok Build
 - 调研日期：2026-08-29；Grok Build 补充调研：2026-08-31（commit `ba76b0a683fa52e4e60685017b85905451be17bc`）
 - 服务对象：HC-164（Plan 模式产品化：/plan 命令 + 计划产出闭环）。调研文件名保留 163；Task 编号因 HC-163 已用于「本地诊断日志体系」而改为 HC-164。grill 确认后的产品决策以 Task 为准，其中计划审批取 Grok Build 的文档+三动作，不取 Qwen 在卡上选下一档权限；假工具改为做成真门，而不是先删掉。
 - 范围决策（用户，2026-08-29）：**第一版仅在 build 工作模式下提供 /plan；Compose 下不做**。
@@ -178,27 +178,27 @@ provider 的 prompt cache 按**请求前缀**命中（system prompt → tools �
 
 ### 8.1 批注是客户端本地状态，不是线上协议字段
 
-- 客户端用 `PlanComment { id, line_range: Range<usize>, text }` 表示一条批注，`PlanApprovalViewState` 同时保存 `comments`、下一个 id、正在编辑的 comment id 和当前选区。`line_range` 内部是半开区间，但表示的是 **1-based 原始 Markdown 行号**；单行 `2..3` 显示为第 2 行，范围 `3..5` 显示为 3–4 行。来源：`/Users/zhangjingxin/Code/OpenSource/grok-build/crates/codegen/xai-grok-pager/src/views/plan_approval_view.rs:37-72` 的 `PlanApprovalFocus` / `PlanComment` / `PlanApprovalViewState`。
-- 选区不直接用渲染后的可见行索引。`LineViewerState::selected_line_range` 会从可见选区的首尾向内找到真实 source line，再返回原始行号范围；因此 Markdown 换行、空行、折行和已插入的批注行都不会让引用偏移。来源：`/Users/zhangjingxin/Code/OpenSource/grok-build/crates/codegen/xai-grok-pager/src/views/file_search/line_viewer.rs:943-969` 的 `selected_line_range`；软换行映射回归见同文件 `1815-1831`。
-- 交互上，`c` 或 `Enter` 对当前行/可视选区建批注；若光标在已有批注上则进入编辑。保存时仅修改/追加 `PlanComment`，再用 `rebuild_with_comments` 把批注行插回对应原文范围末尾；`x` 删除光标下的批注。来源：`/Users/zhangjingxin/Code/OpenSource/grok-build/crates/codegen/xai-grok-pager/src/app/agent_view/viewer.rs:121-183`、`/Users/zhangjingxin/Code/OpenSource/grok-build/crates/codegen/xai-grok-pager/src/app/agent_view/plan.rs:396-503`，以及 `/Users/zhangjingxin/Code/OpenSource/grok-build/crates/codegen/xai-grok-pager/src/views/file_search/line_viewer.rs:875-940`。
+- 客户端用 `PlanComment { id, line_range: Range<usize>, text }` 表示一条批注，`PlanApprovalViewState` 同时保存 `comments`、下一个 id、正在编辑的 comment id 和当前选区。`line_range` 内部是半开区间，但表示的是 **1-based 原始 Markdown 行号**；单行 `2..3` 显示为第 2 行，范围 `3..5` 显示为 3–4 行。来源：本地源码库的 `PlanApprovalFocus` / `PlanComment` / `PlanApprovalViewState`。
+- 选区不直接用渲染后的可见行索引。`LineViewerState::selected_line_range` 会从可见选区的首尾向内找到真实 source line，再返回原始行号范围；因此 Markdown 换行、空行、折行和已插入的批注行都不会让引用偏移。来源：本地源码库的 `selected_line_range`；软换行映射回归见同文件 `1815-1831`。
+- 交互上，`c` 或 `Enter` 对当前行/可视选区建批注；若光标在已有批注上则进入编辑。保存时仅修改/追加 `PlanComment`，再用 `rebuild_with_comments` 把批注行插回对应原文范围末尾；`x` 删除光标下的批注。来源：本地源码库，以及 本地源码库。
 
 **对 HC-164 的直接启示：** 互动协议不必边输入边同步批注；TUI/Web 都可以在本地维护统一的 `{id, startLine, endLine, text}` 视图状态，但行号必须锨定原始 Markdown，不能锨定视觉折行。
 
 ### 8.2 发给模型的 feedback 是由批注压成的可读文本
 
-- `PlanApprovalViewState::format_feedback` 遍历批注，将单行编成 `Proposed plan line N:`，范围编成 `Proposed plan lines N-M:`，紧接用 `> ` 引用所选原文，然后加 `Comment:` 和意见。若还有整体打回文字，则作为 `Additional feedback:` 追加；多条批注以空行分隔。来源：`/Users/zhangjingxin/Code/OpenSource/grok-build/crates/codegen/xai-grok-pager/src/views/plan_approval_view.rs:112-146`，预期完整文本的回归见 `435-455`。
+- `PlanApprovalViewState::format_feedback` 遍历批注，将单行编成 `Proposed plan line N:`，范围编成 `Proposed plan lines N-M:`，紧接用 `> ` 引用所选原文，然后加 `Comment:` 和意见。若还有整体打回文字，则作为 `Additional feedback:` 追加；多条批注以空行分隔。来源：本地源码库，预期完整文本的回归见 `435-455`。
 - Grok Build 保留两种来源：内联计划把当时原文摘录进 feedback，文件计划则只发 `@plan.md:N-M` 和意见。其分支位于同文件 `112-145`、`194-229`，文件引用格式回归见 `474-488`。HC-164 的 `interaction.plan` 已携带计划正文，按 Spec 的“行号 + 摘录 + 意见”实现就应固定使用内联格式，避免模型还要额外读文件才知道批注指什么。
-- 打回时，客户端只在 wire response 中发 `{ outcome: "cancelled", feedback?: string }`，批注数组本身不过线；空白 feedback 会被折叠成缺省。来源：`/Users/zhangjingxin/Code/OpenSource/grok-build/crates/codegen/xai-grok-pager/src/views/plan_approval_view.rs:149-187`；协议定义见 `/Users/zhangjingxin/Code/OpenSource/grok-build/crates/codegen/xai-grok-tools/src/implementations/grok_build/exit_plan_mode/types.rs:6-24`。
-- Shell 收到 `cancelled` 后把该字符串包成 `The user wants to revise the plan. The user said:\n{feedback}` 的工具结果，留在 Plan 模式继续本轮；无 feedback 时改为让模型询问用户想怎么改。来源：`/Users/zhangjingxin/Code/OpenSource/grok-build/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs:221-254` 与 `1277-1297`。
-- 批准时的批注不是打回 feedback：客户端先回 `approved`，如果存在批注，另外产生 `Action::Interject`，内容为 `The user approved the plan with the following review comments:` 加同一份格式化批注。来源：`/Users/zhangjingxin/Code/OpenSource/grok-build/crates/codegen/xai-grok-pager/src/app/agent_view/plan.rs:178-215`。这与 HC-164 “批准时批注附在实现轮提示”同构，应用同一个 formatter 生成一份稳定文本，再分流给 `revise.feedback` 或批准后的实现提示。
+- 打回时，客户端只在 wire response 中发 `{ outcome: "cancelled", feedback?: string }`，批注数组本身不过线；空白 feedback 会被折叠成缺省。来源：本地源码库；协议定义见 本地源码库。
+- Shell 收到 `cancelled` 后把该字符串包成 `The user wants to revise the plan. The user said:\n{feedback}` 的工具结果，留在 Plan 模式继续本轮；无 feedback 时改为让模型询问用户想怎么改。来源：本地源码库与 `1277-1297`。
+- 批准时的批注不是打回 feedback：客户端先回 `approved`，如果存在批注，另外产生 `Action::Interject`，内容为 `The user approved the plan with the following review comments:` 加同一份格式化批注。来源：本地源码库。这与 HC-164 “批准时批注附在实现轮提示”同构，应用同一个 formatter 生成一份稳定文本，再分流给 `revise.feedback` 或批准后的实现提示。
 
 ### 8.3 “再打开”复用同一预览，但状态分两类
 
-- `/view-plan` 是 session-scoped 命令，别名正是 `/show-plan` 和 `/plan-view`，唯一动作是派发 `Action::ShowPlan`。来源：`/Users/zhangjingxin/Code/OpenSource/grok-build/crates/codegen/xai-grok-pager/src/slash/commands/view_plan.rs:1-32`。
-- `dispatch_show_plan` 不切换模式：如果当前还有 `plan_approval_view`，则调 `reopen_plan_approval()` 回到那次待决策交互；否则只调 `show_plan_preview()` 打开已保存计划。来源：`/Users/zhangjingxin/Code/OpenSource/grok-build/crates/codegen/xai-grok-pager/src/app/dispatch/modes.rs:12-25`。
-- 预览正文的优先级是：当前审批请求携带的非空正文 → 最新内联计划 → 当前 session 的 `plan.md`。如果是挂起的空计划审批，仍打开带操作按钮的占位预览；真没计划且没有挂起审批时才提示 `No plan written yet.`。来源：`/Users/zhangjingxin/Code/OpenSource/grok-build/crates/codegen/xai-grok-pager/src/app/agent_view/plan.rs:69-155`。
-- 重开挂起审批时，`reopen_plan_approval` 先 stash 用户当前输入，把审批焦点放回 Preview，并恢复 `feedback_active`；审批完成后再把原输入还回编辑器，避免“打开看一眼计划”丢掉半写的 prompt。来源：`/Users/zhangjingxin/Code/OpenSource/grok-build/crates/codegen/xai-grok-pager/src/app/agent_view/plan.rs:272-285`；恢复草稿的回归测试见 `/Users/zhangjingxin/Code/OpenSource/grok-build/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/interactions.rs:341-385`。
-- 除了命令，状态栏的 plan chip / 待批准状态也可点击，复用同样的“有挂起审批则 reopen，否则普通 preview”分支。来源：`/Users/zhangjingxin/Code/OpenSource/grok-build/crates/codegen/xai-grok-pager/src/app/mouse.rs:76-93`。
-- 普通（非挂起审批）计划预览也支持“casual comments”：用户可继续对行批注，按 `s` 或 `Ctrl+Enter` 后组成 `Plan feedback:\n\n{body}` 并作为新 Prompt 发给模型。来源：`/Users/zhangjingxin/Code/OpenSource/grok-build/crates/codegen/xai-grok-pager/src/app/agent_view/viewer.rs:125-169` 与 `/Users/zhangjingxin/Code/OpenSource/grok-build/crates/codegen/xai-grok-pager/src/app/agent_view/plan.rs:505-674`。
+- `/view-plan` 是 session-scoped 命令，别名正是 `/show-plan` 和 `/plan-view`，唯一动作是派发 `Action::ShowPlan`。来源：本地源码库。
+- `dispatch_show_plan` 不切换模式：如果当前还有 `plan_approval_view`，则调 `reopen_plan_approval()` 回到那次待决策交互；否则只调 `show_plan_preview()` 打开已保存计划。来源：本地源码库。
+- 预览正文的优先级是：当前审批请求携带的非空正文 → 最新内联计划 → 当前 session 的 `plan.md`。如果是挂起的空计划审批，仍打开带操作按钮的占位预览；真没计划且没有挂起审批时才提示 `No plan written yet.`。来源：本地源码库。
+- 重开挂起审批时，`reopen_plan_approval` 先 stash 用户当前输入，把审批焦点放回 Preview，并恢复 `feedback_active`；审批完成后再把原输入还回编辑器，避免“打开看一眼计划”丢掉半写的 prompt。来源：本地源码库；恢复草稿的回归测试见 本地源码库。
+- 除了命令，状态栏的 plan chip / 待批准状态也可点击，复用同样的“有挂起审批则 reopen，否则普通 preview”分支。来源：本地源码库。
+- 普通（非挂起审批）计划预览也支持“casual comments”：用户可继续对行批注，按 `s` 或 `Ctrl+Enter` 后组成 `Plan feedback:\n\n{body}` 并作为新 Prompt 发给模型。来源：本地源码库与 本地源码库。
 
 **对 HC-164 的直接启示：** `/view-plan` 不应创建第二个独立审批对象。挂起 `interaction.plan` 时要恢复原交互及未提交批注；没有挂起交互时才是只读预览。停点 4 的明确范围是“空闲再打开”，是否像 Grok Build 一样允许从闲看预览另起一条 plan feedback Prompt，属于额外行为，不应在 HC-164 未修订 Spec 前顺带实现。

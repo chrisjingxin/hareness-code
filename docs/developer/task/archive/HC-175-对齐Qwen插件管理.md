@@ -99,7 +99,7 @@ HC-157、HC-158 已让 Qwen/DevAgent Extension 的 Commands、Skills、Agents、
 
 基线为 HEAD `c2871031ac411a52c0e1ebaa508e3c17e326747f`、detached HEAD、无 staged/tracked 修改；基线已有本 HC-175 四份过程文档未跟踪文件。本轮只在这些文档、两端 Plugin 管理实现、Protocol 生成物、架构文档和对应测试范围内修改，未执行 git add/commit/push/reset/checkout/clean。
 
-自动化均使用临时 home、离线 fixture、fake credential backend/fake process；没有真实模型、网络、凭据或 ZA38 MCP/Hook/LSP 外部执行。使用主仓库 `/Users/beichen/Desktop/大模型/github projects/harness-code/packages/agent/.venv/bin/python` 完成 Host/Settings 和 Qwen/runtime 集合；Qwen 集合唯一失败是主任务已指出的 bare-node Phase3 既有基线用例，未归因 HC-175。`bun run project:check` 的唯一阻塞是既有无关任务 HC-151 的复核日期 `2026-08-30`，本轮未修改该任务规避检查。
+自动化均使用临时 home、离线 fixture、fake credential backend/fake process；没有真实模型、网络、凭据或 ZA38 MCP/Hook/LSP 外部执行。使用主仓库 本地路径 projects/harness-code/packages/agent/.venv/bin/python` 完成 Host/Settings 和 Qwen/runtime 集合；Qwen 集合唯一失败是主任务已指出的 bare-node Phase3 既有基线用例，未归因 HC-175。`bun run project:check` 的唯一阻塞是既有无关任务 HC-151 的复核日期 `2026-08-30`，本轮未修改该任务规避检查。
 
 ## 第二轮执行记录（2026-09-02）
 

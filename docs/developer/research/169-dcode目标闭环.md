@@ -4,7 +4,7 @@
 
 本文回答 Deep Agents Code（下称 dcode）如何实现 `/goal`，覆盖命令入口、状态模型、持久化与恢复、执行循环、预算与终止条件、TUI 反馈和测试覆盖；并结合 Harness Code 当前架构，判断可复用部分、不可照搬部分以及建议的整合边界。
 
-- 一手源码：`/Users/zhangjingxin/Code/OpenSource/deepagents`
+- 一手源码：本地源码库
 - 固定提交：`03436b369c0324498602fe6b7918cf36f3629d76`
 - 引用路径均相对上述源码仓库根目录，格式为 `文件:起止行`
 - 方法：静态追踪 dcode TUI、server graph、LangGraph checkpoint、goal middleware 与 SDK `RubricMiddleware`，并交叉核对对应一手测试
