@@ -219,8 +219,9 @@ def _create_controlled_inline_subagents(
     file_tool_contract: Any | None = None,
     rules_provider: Callable[[], list[PermissionRule]] | None = None,
     dynamic: bool = False,
+    managed_builtin_ids: frozenset[str] = frozenset(),
 ) -> tuple[list[dict[str, Any]], Any]:
-    """创建内置 Inline worker，并合并 Host 注册的 Managed Plugin target。"""
+    """创建内置 Inline worker，并合并 Host 注册的 Managed target。"""
     from deepagents.middleware.filesystem import FilesystemMiddleware
     from langchain.agents import create_agent
     from langchain.agents.middleware import TodoListMiddleware
@@ -346,8 +347,9 @@ def _create_controlled_inline_subagents(
         )
 
     graphs = {
-        "general-purpose": build_inline_graph("general-purpose", include_plugin=True),
-        "explore": build_inline_graph("explore", include_plugin=False),
+        agent_id: build_inline_graph(agent_id, include_plugin=agent_id == "general-purpose")
+        for agent_id in ("general-purpose", "explore")
+        if agent_id not in managed_builtin_ids
     }
 
     def make_runner(agent_id: str) -> Any:
@@ -385,6 +387,7 @@ def _create_controlled_inline_subagents(
             definition_fingerprint=record.fingerprint,
         )
         for record in BUILTIN_AGENTS
+        if record.agent_id not in managed_builtin_ids
     )
     targets = (
         *builtin_targets,
@@ -775,6 +778,7 @@ def create_harness_agent(
     workspace_root_registry: Any | None = None,
     extra_root_tools: Sequence[BaseTool | Any] = (),
     rubric_middleware: Any | None = None,
+    managed_builtin_ids: frozenset[str] = frozenset(),
 ) -> Any:
     """创建 za38 编码 agent。
 
@@ -1135,6 +1139,7 @@ def create_harness_agent(
             file_tool_contract=file_tool_contract,
             rules_provider=rules_provider,
             dynamic=shared_engine,
+            managed_builtin_ids=managed_builtin_ids,
         )
         agent_middleware.append(delegation_middleware)
 

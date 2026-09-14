@@ -360,6 +360,7 @@ def test_manifest_exposes_all_planned_configuration_sections():
     # mcp 与 ui 已激活为 implemented
     assert ConfigManifest.SECTIONS["mcp"].status == "implemented"
     assert ConfigManifest.SECTIONS["ui"].status == "implemented"
+    assert ConfigManifest.SECTIONS["experimental"].status == "implemented"
 
 
 def test_multiple_profiles_build_catalog_with_roles_and_safe_picker_summary(tmp_path: Path):
@@ -466,6 +467,7 @@ def test_execution_defaults_to_local_and_redacts_security_summary(tmp_path: Path
         "ui": "default",
         "diagnostics": "default",
         "goal": "default",
+        "experimental": "default",
     }
 
 
@@ -927,4 +929,174 @@ def test_goal_section_rejects_invalid_values(tmp_path: Path):
 
     with pytest.raises(ConfigError, match="unsupported fields"):
         _load_with_goal(tmp_path, "\n[goal]\nunknown_field = true\n", environ={})
+
+
+_FAST_PROFILE = """
+[models.profiles.fast]
+provider = "openai-compatible"
+model = "fast-model"
+base_url = "https://gateway.example.internal/v1"
+api_key_env = "HARNESS_API_KEY"
+"""
+
+
+def _load_with_experimental(
+    tmp_path: Path,
+    table: str,
+    *,
+    extra_profiles: str = "",
+    environ: dict[str, str] | None = None,
+) -> "config_module.Za38Config":
+    """在最小 v1 配置上附加 experimental 表并加载。"""
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    config_path = home / ".harness" / "config.toml"
+    _write_config(config_path)
+    with open(config_path, "a", encoding="utf-8") as handle:
+        handle.write(extra_profiles)
+        handle.write(table)
+    return load_config(workspace=workspace, config_path=config_path, home=home, environ=environ)
+
+
+def test_experimental_delegation_defaults_when_section_omitted(tmp_path: Path) -> None:
+    """省略 [experimental] 等价于关闭，不绑定任何内建角色。"""
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    _write_config(home / ".harness" / "config.toml")
+    config = load_config(
+        workspace=workspace,
+        config_path=home / ".harness" / "config.toml",
+        home=home,
+        environ={},
+    )
+    assert config.experimental.delegation.enabled is False
+    assert dict(config.experimental.delegation.models) == {}
+    summary = config.redacted()
+    assert summary["experimental"]["delegation"]["enabled"] is False
+    assert summary["experimental"]["delegation"]["models"] == {}
+    assert summary["experimental"]["delegation"]["applies_to"] == "restart"
+    assert summary["sources"]["experimental"] == "default"
+
+
+def test_experimental_delegation_parses_bound_explore(tmp_path: Path) -> None:
+    """开启后只绑定 explore 时保留指定 Profile，并出现在脱敏摘要中。"""
+    config = _load_with_experimental(
+        tmp_path,
+        "\n[experimental.delegation]\nenabled = true\n\n"
+        "[experimental.delegation.models]\nexplore = \"fast\"\n",
+        extra_profiles=_FAST_PROFILE,
+        environ={},
+    )
+    assert config.experimental.delegation.enabled is True
+    assert dict(config.experimental.delegation.models) == {"explore": "fast"}
+    summary = config.redacted()
+    assert summary["experimental"]["delegation"] == {
+        "enabled": True,
+        "models": {"explore": "fast"},
+        "applies_to": "restart",
+    }
+    assert summary["sources"]["experimental"] == "explicit"
+
+
+def test_experimental_delegation_disabled_keeps_idle_unknown_profile(tmp_path: Path) -> None:
+    """关闭时仍检查结构，但不解析闲置角色引用。"""
+    config = _load_with_experimental(
+        tmp_path,
+        "\n[experimental.delegation]\nenabled = false\n\n"
+        "[experimental.delegation.models]\nexplore = \"missing\"\n",
+        environ={},
+    )
+    assert config.experimental.delegation.enabled is False
+    assert dict(config.experimental.delegation.models) == {"explore": "missing"}
+
+
+def test_experimental_delegation_enabled_requires_at_least_one_role(tmp_path: Path) -> None:
+    """开启但未指定任何角色必须失败。"""
+    with pytest.raises(ConfigError, match="experimental.delegation.enabled"):
+        _load_with_experimental(
+            tmp_path,
+            "\n[experimental.delegation]\nenabled = true\n",
+            environ={},
+        )
+
+
+def test_experimental_delegation_enabled_rejects_unknown_profile(tmp_path: Path) -> None:
+    """开启后引用不存在的 Profile 必须指出字段和 Profile ID。"""
+    with pytest.raises(
+        ConfigError,
+        match=r"experimental\.delegation\.models\.explore.*missing",
+    ):
+        _load_with_experimental(
+            tmp_path,
+            "\n[experimental.delegation]\nenabled = true\n\n"
+            "[experimental.delegation.models]\nexplore = \"missing\"\n",
+            environ={},
+        )
+
+
+def test_experimental_delegation_rejects_unknown_fields_roles_and_empty_ids(tmp_path: Path) -> None:
+    """未知子表、未知角色、空串和错误类型都是配置错误。"""
+    with pytest.raises(ConfigError, match="unsupported"):
+        _load_with_experimental(
+            tmp_path,
+            "\n[experimental]\nfoo = true\n",
+            environ={},
+        )
+    with pytest.raises(ConfigError, match="unsupported"):
+        _load_with_experimental(
+            tmp_path,
+            "\n[experimental.delegation]\nenabled = false\nextra = 1\n",
+            environ={},
+        )
+    with pytest.raises(ConfigError, match="reviewer"):
+        _load_with_experimental(
+            tmp_path,
+            "\n[experimental.delegation]\nenabled = false\n\n"
+            "[experimental.delegation.models]\nreviewer = \"enterprise\"\n",
+            environ={},
+        )
+    with pytest.raises(ConfigError, match="explore"):
+        _load_with_experimental(
+            tmp_path,
+            "\n[experimental.delegation]\nenabled = false\n\n"
+            "[experimental.delegation.models]\nexplore = \"\"\n",
+            environ={},
+        )
+    with pytest.raises(ConfigError, match="enabled"):
+        _load_with_experimental(
+            tmp_path,
+            "\n[experimental.delegation]\nenabled = \"yes\"\n",
+            environ={},
+        )
+
+
+def test_experimental_delegation_merges_models_field_by_field(tmp_path: Path) -> None:
+    """用户与显式配置按字段覆盖，models 子表逐角色合并。"""
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    user = home / ".harness" / "config.toml"
+    explicit = tmp_path / "explicit.toml"
+    _write_config(user)
+    user.write_text(
+        user.read_text(encoding="utf-8")
+        + _FAST_PROFILE
+        + "\n[experimental.delegation]\nenabled = true\n\n"
+        "[experimental.delegation.models]\nexplore = \"enterprise\"\n",
+        encoding="utf-8",
+    )
+    _write_config(explicit)
+    explicit.write_text(
+        explicit.read_text(encoding="utf-8")
+        + _FAST_PROFILE
+        + "\n[experimental.delegation.models]\nexplore = \"fast\"\n"
+        "general-purpose = \"enterprise\"\n",
+        encoding="utf-8",
+    )
+    config = load_config(workspace=workspace, home=home, config_path=explicit, environ={})
+    assert config.experimental.delegation.enabled is True
+    assert dict(config.experimental.delegation.models) == {
+        "explore": "fast",
+        "general-purpose": "enterprise",
+    }
+    assert config.redacted()["sources"]["experimental"] == "explicit"
 

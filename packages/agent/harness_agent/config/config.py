@@ -357,6 +357,50 @@ class GoalSettings:
         }
 
 
+DELEGATION_ROLES = frozenset({"explore", "general-purpose"})
+"""实验性角色绑定只允许这两个内建 ID，与 [models.roles] 不是同一组。"""
+
+
+@dataclass(frozen=True, slots=True)
+class ExperimentalDelegationSettings:
+    """实验性内建角色模型绑定；默认关闭，重启后对下一次 Run 生效。"""
+
+    enabled: bool = False
+    models: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """冻结角色到 Profile ID 的映射。"""
+        object.__setattr__(self, "models", MappingProxyType(dict(self.models)))
+
+    @property
+    def bound_models(self) -> Mapping[str, str]:
+        """仅在开启时返回有效角色绑定；关闭时为空。"""
+        if not self.enabled:
+            return MappingProxyType({})
+        return self.models
+
+    def redacted(self) -> dict[str, object]:
+        """返回开关、角色 Profile ID 和生效范围，不含连接信息。"""
+        return {
+            "enabled": self.enabled,
+            "models": dict(self.models),
+            "applies_to": "restart",
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ExperimentalSettings:
+    """Host TOML [experimental] 区段；当前仅含 delegation。"""
+
+    delegation: ExperimentalDelegationSettings = field(
+        default_factory=ExperimentalDelegationSettings
+    )
+
+    def redacted(self) -> dict[str, object]:
+        """返回脱敏后的实验配置。"""
+        return {"delegation": self.delegation.redacted()}
+
+
 @dataclass(frozen=True, slots=True)
 class Za38Config:
     """最终生效的 Harness v1 配置、来源路径和运行时摘要。"""
@@ -375,6 +419,7 @@ class Za38Config:
     ui: UiSettings = field(default_factory=UiSettings)
     diagnostics: DiagnosticsSettings = field(default_factory=DiagnosticsSettings)
     goal: GoalSettings = field(default_factory=GoalSettings)
+    experimental: ExperimentalSettings = field(default_factory=ExperimentalSettings)
 
     def require_model(self, profile_id: str | None = None) -> ModelSettings:
         """返回指定或默认模型；保留单 Profile 调用方的兼容入口。"""
@@ -419,6 +464,7 @@ class Za38Config:
             "ui": self.ui.redacted(),
             "diagnostics": self.diagnostics.redacted(),
             "goal": self.goal.redacted(),
+            "experimental": self.experimental.redacted(),
         }
 
 
@@ -461,6 +507,7 @@ def load_config(
         ui_values,
         diagnostics_values,
         goal_values,
+        experimental_values,
         sources,
     ) = _merge_documents(documents)
     _apply_environment_overrides(
@@ -493,6 +540,7 @@ def load_config(
         ui=_parse_ui(ui_values),
         diagnostics=_parse_diagnostics(diagnostics_values),
         goal=_parse_goal(goal_values),
+        experimental=_parse_experimental(experimental_values, model_catalog),
     )
 
 
@@ -584,6 +632,7 @@ def _merge_documents(
     dict[str, object],
     dict[str, object],
     dict[str, object],
+    dict[str, object],
     dict[str, str],
 ]:
     """按用户到显式配置的顺序合并已验证字段，并记录最后贡献来源。"""
@@ -597,6 +646,7 @@ def _merge_documents(
     ui_values: dict[str, object] = {}
     diagnostics_values: dict[str, object] = {}
     goal_values: dict[str, object] = {}
+    experimental_values: dict[str, object] = {}
     sources = {
         "models": "default",
         "approval": "default",
@@ -608,6 +658,7 @@ def _merge_documents(
         "ui": "default",
         "diagnostics": "default",
         "goal": "default",
+        "experimental": "default",
     }
     for _, source, document in documents:
         if "models" in document:
@@ -642,6 +693,11 @@ def _merge_documents(
         if "goal" in document:
             goal_values = _merge_flat_values(goal_values, document["goal"])
             sources["goal"] = source.value
+        if "experimental" in document:
+            experimental_values = _merge_experimental_values(
+                experimental_values, document["experimental"]
+            )
+            sources["experimental"] = source.value
     return (
         models,
         approval_values,
@@ -653,6 +709,7 @@ def _merge_documents(
         ui_values,
         diagnostics_values,
         goal_values,
+        experimental_values,
         sources,
     )
 
@@ -742,6 +799,28 @@ def _merge_flat_values(base: dict[str, object], override: object) -> dict[str, o
     if not isinstance(override, dict):
         raise ConfigError("Configuration section must be a TOML table")
     return {**base, **override}
+
+
+def _merge_experimental_values(base: dict[str, object], override: object) -> dict[str, object]:
+    """合并 [experimental]，delegation.models 按角色逐项覆盖，避免整表替换。"""
+    values = _merge_flat_values(base, override)
+    if not isinstance(override, dict) or "delegation" not in override:
+        return values
+    delegation = override["delegation"]
+    if not isinstance(delegation, dict):
+        raise ConfigError("[experimental.delegation] must be a TOML table")
+    current = base.get("delegation", {})
+    merged_delegation = {**current, **delegation} if isinstance(current, dict) else dict(delegation)
+    if "models" in delegation:
+        models = delegation["models"]
+        if not isinstance(models, dict):
+            raise ConfigError("[experimental.delegation.models] must be a TOML table")
+        current_models = current.get("models", {}) if isinstance(current, dict) else {}
+        merged_delegation["models"] = (
+            {**current_models, **models} if isinstance(current_models, dict) else dict(models)
+        )
+    values["delegation"] = merged_delegation
+    return values
 
 
 def _merge_execution_values(base: dict[str, object], override: object) -> dict[str, object]:
@@ -1175,5 +1254,63 @@ def _parse_goal(values: Mapping[str, object]) -> GoalSettings:
     return GoalSettings(
         grader_model=grader_model,
         max_iterations=max_iterations,
+    )
+
+
+def _parse_experimental(
+    values: Mapping[str, object],
+    model_catalog: ModelCatalog | None,
+) -> ExperimentalSettings:
+    """解析 [experimental.delegation]：关闭只检查结构，开启才解析 Profile 引用。"""
+    if not values:
+        return ExperimentalSettings()
+    unknown = set(values) - {"delegation"}
+    if unknown:
+        raise ConfigError(
+            f"[experimental] contains unsupported fields: {', '.join(sorted(unknown))}"
+        )
+    raw_delegation = values.get("delegation", {})
+    if not isinstance(raw_delegation, dict):
+        raise ConfigError("[experimental.delegation] must be a TOML table")
+    unknown_delegation = set(raw_delegation) - {"enabled", "models"}
+    if unknown_delegation:
+        raise ConfigError(
+            "[experimental.delegation] contains unsupported fields: "
+            f"{', '.join(sorted(unknown_delegation))}"
+        )
+    raw_enabled = raw_delegation.get("enabled", False)
+    if not isinstance(raw_enabled, bool):
+        raise ConfigError("experimental.delegation.enabled must be a boolean")
+    raw_models = raw_delegation.get("models", {})
+    if raw_models is None:
+        raw_models = {}
+    if not isinstance(raw_models, dict):
+        raise ConfigError("[experimental.delegation.models] must be a TOML table")
+    parsed_models: dict[str, str] = {}
+    for role, profile_id in raw_models.items():
+        if role not in DELEGATION_ROLES:
+            raise ConfigError(
+                f"experimental.delegation.models.{role} is not a supported delegation role"
+            )
+        if not isinstance(profile_id, str) or not profile_id.strip():
+            raise ConfigError(
+                f"experimental.delegation.models.{role} must be a non-empty profile name"
+            )
+        parsed_models[str(role)] = profile_id.strip()
+    if raw_enabled:
+        if not parsed_models:
+            raise ConfigError(
+                "experimental.delegation.enabled requires at least one role "
+                "in experimental.delegation.models"
+            )
+        profiles = model_catalog.profiles if model_catalog is not None else {}
+        for role, profile_id in parsed_models.items():
+            if profile_id not in profiles:
+                raise ConfigError(
+                    f"experimental.delegation.models.{role} must reference an existing profile: "
+                    f"{profile_id}"
+                )
+    return ExperimentalSettings(
+        delegation=ExperimentalDelegationSettings(enabled=raw_enabled, models=parsed_models)
     )
 

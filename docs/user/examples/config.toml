@@ -49,6 +49,13 @@ X-Enterprise-Tenant = "HARNESS_TENANT"
 # [models.roles]
 # planner = "pro"
 # executor = "fast"
+#
+# 实验性子代理模型绑定，默认关闭；与 [models.roles] 不是同一入口。
+# 修改后重启 sidecar，对下一次 Run 生效。
+# [experimental.delegation]
+# enabled = false
+# [experimental.delegation.models]
+# explore = "fast"
 
 [approval]
 mode = "auto"

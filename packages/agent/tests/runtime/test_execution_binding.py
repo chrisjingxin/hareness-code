@@ -10,6 +10,8 @@ import pytest
 from harness_agent.config.config import (
     ConfigError,
     ExecutionSettings,
+    ExperimentalDelegationSettings,
+    ExperimentalSettings,
     ModelCatalog,
     ModelProfile,
     ModelSettings,
@@ -26,6 +28,7 @@ from harness_agent.runtime.execution_binding import (
     ThreadExecutionSelection,
     describe_thread_binding,
     resolve_execution_binding,
+    validate_experimental_delegation_for_run,
 )
 
 
@@ -222,6 +225,61 @@ def test_resolve_execution_binding_rejects_unusable_model(
 
     with pytest.raises(ConfigError, match=error):
         resolve_execution_binding(config, None, PersistedBindingState())
+
+
+def _config_with_delegation(*, enabled: bool, models: dict[str, str], profiles: dict[str, ModelProfile] | None = None) -> Za38Config:
+    """构造带实验角色绑定的配置。"""
+    catalog_profiles = profiles or {"fast": _profile("fast"), "pro": _profile("pro")}
+    catalog = ModelCatalog(
+        default_profile="fast",
+        profiles=catalog_profiles,
+        role_profiles={},
+    )
+    return replace(
+        _config(),
+        model=catalog.require_profile().settings,
+        model_profile=catalog.default_profile,
+        model_catalog=catalog,
+        experimental=ExperimentalSettings(
+            delegation=ExperimentalDelegationSettings(enabled=enabled, models=models)
+        ),
+    )
+
+
+def test_experimental_delegation_precheck_skips_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """关闭时不校验闲置绑定，也不拒绝未交付的 general-purpose。"""
+    monkeypatch.delenv("HARNESS_API_KEY", raising=False)
+    config = _config_with_delegation(
+        enabled=False,
+        models={"explore": "missing", "general-purpose": "fast"},
+        profiles={"fast": _profile("fast")},
+    )
+    validate_experimental_delegation_for_run(config)
+
+
+def test_experimental_delegation_precheck_rejects_missing_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """开启后绑定角色缺少凭据时指出字段和 Profile ID，不回退主模型。"""
+    monkeypatch.delenv("HARNESS_API_KEY", raising=False)
+    config = _config_with_delegation(
+        enabled=True,
+        models={"explore": "flash"},
+        profiles={"fast": _profile("fast"), "flash": _profile("flash", api_key=None)},
+    )
+    with pytest.raises(ConfigError, match=r"experimental\.delegation\.models\.explore.*flash"):
+        validate_experimental_delegation_for_run(config)
+
+
+def test_experimental_delegation_precheck_rejects_undelivered_general_purpose() -> None:
+    """A 阶段已绑定但未交付的 general-purpose 必须明确拒绝运行。"""
+    config = _config_with_delegation(enabled=True, models={"general-purpose": "fast"})
+    with pytest.raises(ConfigError, match="general-purpose"):
+        validate_experimental_delegation_for_run(config)
+
+
+def test_experimental_delegation_precheck_accepts_bound_explore() -> None:
+    """只绑定可用的 explore 时预检通过。"""
+    config = _config_with_delegation(enabled=True, models={"explore": "pro"})
+    validate_experimental_delegation_for_run(config)
 
 
 def test_binding_decoders_reject_extra_sensitive_fields() -> None:

@@ -16,6 +16,7 @@ from harness_agent.runtime.agent_engine_profile import (
 )
 from harness_agent.runtime.agent_spec import (
     RUN_CONTEXT_SNAPSHOT_MIDDLEWARE_VERSION,
+    resolve_bound_builtin_child_spec,
     restrict_spec_to_read_only_stage,
     resolve_builtin_main_agent_spec,
 )
@@ -109,6 +110,87 @@ def test_goal_backed_spec_does_not_reuse_plain_engine_profile(tmp_path: Path) ->
     assert "grader" in {role.role for role in backed.runtime_profile.model_roles}
     assert backed.runtime_profile.profile_key != plain.runtime_profile.profile_key
     assert other.runtime_profile.profile_key != backed.runtime_profile.profile_key
+
+
+def test_bound_explore_child_spec_uses_specified_profile_and_readonly_tools(tmp_path: Path) -> None:
+    """绑定 explore 后使用指定 Profile，且保持五只读工具、无 MCP/Skill。"""
+    parent = _spec(tmp_path)
+    pro = ModelProfile(
+        profile_id="pro",
+        settings=ModelSettings("pro-model", "https://gateway.example/v1", api_key="secret"),
+        source="test",
+    )
+    child = resolve_bound_builtin_child_spec(
+        parent=parent,
+        agent_id="explore",
+        model_profile=pro,
+    )
+    assert child.agent_id == "explore"
+    assert child.model_profile_id == "pro"
+    assert child.model_view.profile_id == "pro"
+    assert set(child.capability_view.tool_names) <= {"glob", "grep", "ls", "lsp", "read_file"}
+    assert child.capability_view.mcp_tool_names == ()
+    assert child.enable_skills is False
+    assert child.enable_ask_user is False
+    assert child.interactive is False
+    assert "交付要求" in child.prompt
+    assert child.runtime_profile.profile_key != parent.runtime_profile.profile_key
+    same_parent_model = resolve_bound_builtin_child_spec(
+        parent=parent,
+        agent_id="explore",
+        model_profile=ModelProfile(
+            profile_id=parent.model_profile_id,
+            settings=parent.model_settings,
+            source="test",
+        ),
+    )
+    assert same_parent_model.runtime_profile.profile_key != parent.runtime_profile.profile_key
+
+
+def test_main_spec_fingerprint_includes_experimental_binding(tmp_path: Path) -> None:
+    """有效实验绑定必须进入主 engine 身份，关闭时闲置字段不改变身份。"""
+    plain = _spec(tmp_path)
+    bound = resolve_builtin_main_agent_spec(
+        project_fingerprint=component_fingerprint({"project": "test"}),
+        workspace=plain.workspace,
+        binding=_binding(),
+        execution=ExecutionSettings(approval_mode=DEFAULT_APPROVAL_MODE),
+        skill_registry=plain.skill_registry,
+        mcp_snapshot=plain.mcp_snapshot,
+        mcp_tools=(),
+        interactive=True,
+        pinned=False,
+        delegation_binding=(("explore", "fast"),),
+    )
+    idle = resolve_builtin_main_agent_spec(
+        project_fingerprint=component_fingerprint({"project": "test"}),
+        workspace=plain.workspace,
+        binding=_binding(),
+        execution=ExecutionSettings(approval_mode=DEFAULT_APPROVAL_MODE),
+        skill_registry=plain.skill_registry,
+        mcp_snapshot=plain.mcp_snapshot,
+        mcp_tools=(),
+        interactive=True,
+        pinned=False,
+        delegation_binding=(),
+    )
+    other = resolve_builtin_main_agent_spec(
+        project_fingerprint=component_fingerprint({"project": "test"}),
+        workspace=plain.workspace,
+        binding=_binding(),
+        execution=ExecutionSettings(approval_mode=DEFAULT_APPROVAL_MODE),
+        skill_registry=plain.skill_registry,
+        mcp_snapshot=plain.mcp_snapshot,
+        mcp_tools=(),
+        interactive=True,
+        pinned=False,
+        delegation_binding=(("explore", "pro"),),
+    )
+    assert bound.runtime_profile.profile_key != plain.runtime_profile.profile_key
+    assert idle.runtime_profile.profile_key == plain.runtime_profile.profile_key
+    assert other.runtime_profile.profile_key != bound.runtime_profile.profile_key
+    assert "实验性角色模型绑定已开启" in bound.prompt
+    assert "实验性角色模型绑定已开启" not in plain.prompt
 
 
 def test_compose_planning_stage_is_read_only_and_bounded(tmp_path: Path) -> None:

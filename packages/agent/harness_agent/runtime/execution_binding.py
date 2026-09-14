@@ -548,3 +548,26 @@ def _validate_model_profile(profile: ModelProfile) -> None:
     if missing_capabilities:
         missing = ",".join(sorted(missing_capabilities))
         raise ConfigError(f"MODEL_PROFILE_CAPABILITY_MISSING: {missing}")
+
+
+def validate_experimental_delegation_for_run(config: Za38Config) -> None:
+    """Run 受理前校验已启用的实验角色绑定；失败不静默回退。
+
+    A 阶段尚未交付 general-purpose 运行路径：配置可以解析该字段，
+    但绑定后必须明确拒绝本次 Run。该限制不是最终产品接口。
+    """
+    delegation = config.experimental.delegation
+    if not delegation.enabled:
+        return
+    if "general-purpose" in delegation.models:
+        raise ConfigError(
+            "experimental.delegation.models.general-purpose is not delivered yet"
+        )
+    for role, profile_id in delegation.models.items():
+        try:
+            profile = config.require_model_profile(profile_id)
+            _validate_model_profile(profile)
+        except ConfigError as exc:
+            raise ConfigError(
+                f"experimental.delegation.models.{role} is unavailable: {exc} ({profile_id})"
+            ) from exc

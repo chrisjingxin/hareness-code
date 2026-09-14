@@ -15,7 +15,7 @@
 | 角色 ID | 来源 | 用途 | 工具范围 | 特性与限制 |
 | --- | --- | --- | --- | --- |
 | `general-purpose` | 内置（Builtin） | 通用多步骤研究与实现任务 | 继承父 Agent 工具集（去除排除项）+ 父 MCP + 父 Skill | 继承父 AGENTS、工作区快照；在父 `default` 模式下内部按 `auto-edit` 运行 |
-| `explore` | 内置（Builtin） | 只读代码搜索与位置定位 | 仅限 `ls`、`read_file`、`glob`、`grep`、`lsp`（5 只读工具） | 纯只读，无写工具、无 Shell、无网络、无 MCP、无 Skill 索引；启动自动放行 |
+| `explore` | 内置（Builtin） | 只读代码搜索与位置定位 | 仅限 `ls`、`read_file`、`glob`、`grep`、`lsp`（5 只读工具） | 纯只读，无写工具、无 Shell、无网络、无 MCP、无 Skill 索引；启动自动放行。默认继承父模型；开启 `[experimental.delegation]` 后可绑定独立 Profile |
 | Plugin Agent | 插件（Plugin） | 插件声明的领域专用审查/分析角色 | 插件显式声明的工具子集（与父权限求交） | 使用独立 Managed 引擎；需要人工交互时 fail closed |
 
 主代理会根据任务性质自动选择合适的子代理。你也可以在提示词中明确指定，例如“用 explore 搜索 task 工具的定义位置”。

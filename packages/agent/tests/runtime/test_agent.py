@@ -789,6 +789,46 @@ def test_controlled_inline_subagents_have_boundaries_and_guards(tmp_path):
     assert middleware is not None
 
 
+def test_controlled_inline_subagents_omit_bound_builtin_ids(tmp_path):
+    """已绑定为 Managed 的内建角色不得再注册 Inline 备选。"""
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+    from harness_agent.policy.capability_policy import (
+        BUILTIN_TOOL_NAMES,
+        resolve_effective_capability_view,
+    )
+    from harness_agent.runtime.agent import _create_controlled_inline_subagents
+    from harness_agent.runtime.agent_catalog import EffectiveExecutionPolicy
+    from harness_agent.runtime.agent_execution import AgentExecutionRegistry
+
+    policy = EffectiveExecutionPolicy(
+        policy_ids=("main",),
+        tools=None,
+        mcp_tools=None,
+        skills=None,
+        filesystem_read=None,
+        filesystem_write=None,
+        shell=None,
+        network=None,
+        isolation="local",
+        approval_mode="default",
+    )
+    view = resolve_effective_capability_view(policy, available_tools=BUILTIN_TOOL_NAMES)
+    subagents, _middleware = _create_controlled_inline_subagents(
+        model=FakeListChatModel(responses=["ok"]),
+        backend=None,
+        tools=[],
+        workspace=tmp_path,
+        approval_mode="default",
+        capability_view=view,
+        execution_registry=AgentExecutionRegistry(),
+        model_view=None,
+        managed_builtin_ids=frozenset({"explore"}),
+    )
+    names = [item["name"] for item in subagents]
+    assert "explore" not in names
+    assert "general-purpose" in names
+
+
 def test_managed_delegation_output_becomes_compiled_subagent_message_state():
     """Managed final 必须适配为 DeepAgents CompiledSubAgent 的 messages 状态。"""
     from harness_agent.runtime.agent import _compiled_subagent_state

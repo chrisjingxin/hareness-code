@@ -17,7 +17,7 @@ from harness_agent.runtime.agent_catalog import (
     intersect_execution_policies,
 )
 from harness_agent.runtime.agent_engine_profile import component_fingerprint
-from harness_agent.config.config import ExecutionSettings, ModelCatalog, ModelSettings
+from harness_agent.config.config import ExecutionSettings, ModelCatalog, ModelProfile, ModelSettings
 from harness_agent.runtime.execution_binding import ResolvedExecutionBinding, SafeModelProfile
 from harness_agent.extensions.mcp import McpConfigSnapshot
 from harness_agent.threads.prompting import canonical_json, sha256_text, tool_schema_fingerprint
@@ -379,6 +379,7 @@ def resolve_builtin_main_agent_spec(
     interactive: bool,
     pinned: bool,
     delegation_agent_ids: tuple[str, ...] = (),
+    delegation_binding: tuple[tuple[str, str], ...] = (),
     goal_backed: bool = False,
     max_iterations: int = 3,
     grader_model_fingerprint: str | None = None,
@@ -429,6 +430,14 @@ def resolve_builtin_main_agent_spec(
         if name in capability_view.mcp_tool_names
     )
     effective_skills = skill_registry.restricted(capability_view.skill_ids)
+    prompt = default_system_prompt()
+    if delegation_binding:
+        bound = "、".join(f"{role}→{profile_id}" for role, profile_id in sorted(delegation_binding))
+        prompt = (
+            f"{prompt}\n\n实验性角色模型绑定已开启：{bound}。"
+            "将大范围定位/阅读交给 explore；简单精准读取、复杂判断和关键风险仍直接处理。"
+            "不得为了委派先读完整资料；收到结果后按疑点查证，不例行全量重查。"
+        )
     return ResolvedAgentSpec(
         project_fingerprint=project_fingerprint,
         role="primary",
@@ -442,7 +451,7 @@ def resolve_builtin_main_agent_spec(
         tools=tools,
         skill_registry=effective_skills,
         mcp_snapshot=mcp_snapshot,
-        prompt=default_system_prompt(),
+        prompt=prompt,
         execution=execution,
         workspace=workspace,
         interactive=interactive,
@@ -464,6 +473,7 @@ def resolve_builtin_main_agent_spec(
                     "interactive-question" if interactive else "headless",
                     "memory-on",
                     "skills-on",
+                    *(() if not delegation_binding else (tuple(sorted(delegation_binding)),)),
                 )
             )
         ),
@@ -486,6 +496,98 @@ def resolve_builtin_main_agent_spec(
         goal_backed=goal_backed,
         max_iterations=max_iterations,
         grader_model_fingerprint=grader_model_fingerprint,
+    )
+
+
+def resolve_bound_builtin_child_spec(
+    *,
+    parent: ResolvedAgentSpec,
+    agent_id: str,
+    model_profile: ModelProfile,
+) -> ResolvedAgentSpec:
+    """把已绑定的内建角色解析为独立 Managed 构图快照，不把它变成 Plugin 定义。"""
+    from harness_agent.runtime.builtin_agents import (
+        BUILTIN_AGENTS_BY_ID,
+        resolve_builtin_child_view,
+    )
+
+    record = BUILTIN_AGENTS_BY_ID.get(agent_id)
+    if record is None:
+        raise ValueError(f"UNKNOWN_BUILTIN_AGENT: {agent_id}")
+    child_view = resolve_builtin_child_view(
+        agent_id=agent_id,
+        parent=parent.capability_view,
+        available_tool_names=frozenset(parent.capability_view.tool_names),
+    )
+    delivery_prompt = record.prompt
+    if agent_id == "explore":
+        tools: tuple[Any, ...] = ()
+        skill_registry = parent.skill_registry.restricted(())
+        mcp_snapshot = build_mcp_snapshot([], revision=parent.mcp_snapshot.revision)
+        identity = "builtin-explore-bound"
+        enable_memory = False
+        enable_skills = False
+        delivery_prompt = (
+            f"{record.prompt}\n\n交付要求：给父 Agent 一份可交接的调查结果，"
+            "包含简短结论、文件或符号位置、必要短引文、未覆盖范围与疑点。"
+            "不要复述大段源码和完整调查过程。"
+        )
+    else:
+        tools = tuple(
+            tool
+            for tool in parent.tools
+            if child_view.allows_tool(str(getattr(tool, "name", "")))
+        )
+        skill_registry = parent.skill_registry
+        mcp_snapshot = parent.mcp_snapshot
+        identity = "builtin-general-purpose-bound"
+        enable_memory = parent.enable_memory
+        enable_skills = parent.enable_skills
+    return ResolvedAgentSpec(
+        project_fingerprint=parent.project_fingerprint,
+        role="delegate",
+        agent_id=agent_id,
+        definition_fingerprint=record.fingerprint,
+        model_profile_id=model_profile.profile_id,
+        model_settings=model_profile.settings,
+        model_view=SafeModelProfile.from_profile(model_profile),
+        effective_policy=parent.effective_policy,
+        capability_view=child_view,
+        tools=tools,
+        skill_registry=skill_registry,
+        mcp_snapshot=mcp_snapshot,
+        prompt=delivery_prompt,
+        execution=parent.execution,
+        workspace=parent.workspace,
+        interactive=False,
+        tool_view_fingerprint=child_view.fingerprint,
+        skill_view_fingerprint=sha256_text(
+            canonical_json(
+                {
+                    "view": child_view.fingerprint,
+                    "skills": skill_registry.snapshot_id,
+                }
+            )
+        ),
+        middleware_fingerprint=sha256_text(
+            str(
+                (
+                    RUN_CONTEXT_SNAPSHOT_MIDDLEWARE_VERSION,
+                    "context-window-v1",
+                    "workspace-boundary-v1",
+                    identity,
+                    "memory-on" if enable_memory else "memory-off",
+                    "skills-on" if enable_skills else "skills-off",
+                    model_profile.profile_id,
+                )
+            )
+        ),
+        prompt_template_fingerprint=sha256_text(record.prompt),
+        sandbox_config_fingerprint=parent.sandbox_config_fingerprint,
+        pinned=False,
+        enable_memory=enable_memory,
+        enable_skills=enable_skills,
+        enable_ask_user=False,
     )
 
 

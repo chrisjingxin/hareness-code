@@ -206,6 +206,16 @@ async def test_run_coordinator_emits_one_diagnostic_terminal_with_timing() -> No
     }
 
 
+def test_host_prepares_experimental_delegation_before_run_accept() -> None:
+    """实验角色预检发生在 Host 准备 Run 时，失败不会进入 Coordinator 受理。"""
+    from harness_agent.host.agent_host import AgentHost
+
+    source = inspect.getsource(AgentHost._prepare_run)
+    assert source.index("validate_experimental_delegation_for_run") < source.index(
+        "_resolve_execution_binding"
+    )
+
+
 @pytest.mark.asyncio
 async def test_run_acceptance_logs_bounded_catalog_projection() -> None:
     """Run 受理记录实际目录计数；超过 32 个 ID 时不写有界列表。"""

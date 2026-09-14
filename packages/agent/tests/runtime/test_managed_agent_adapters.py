@@ -41,6 +41,29 @@ def test_plugin_agent_adapter_has_no_direct_graph_execution() -> None:
     assert ".astream(" not in source
 
 
+def test_bound_builtin_adapter_has_no_direct_graph_execution() -> None:
+    """绑定的内建角色必须复用 managed executor，且不挂 Plugin Hook。"""
+    from harness_agent.host.agent_host import AgentHost
+
+    source = inspect.getsource(AgentHost._bound_builtin_delegation_targets)
+
+    assert "ManagedAgentExecutor" in source
+    assert "SubagentStop" not in source
+    assert "engine.graph" not in source
+    assert ".ainvoke(" not in source
+    assert ".astream(" not in source
+    assert "model_profile_id=resolved.model_profile_id" in source
+
+
+def test_plugin_agent_adapter_passes_model_profile_id() -> None:
+    """Plugin Agent 必须把 resolved.model_profile_id 显式传给 ManagedAgentRequest。"""
+    from harness_agent.host.agent_host import AgentHost
+
+    source = inspect.getsource(AgentHost._plugin_delegation_targets)
+
+    assert "model_profile_id=resolved.model_profile_id" in source
+
+
 def test_delegation_module_has_no_second_managed_engine_runner() -> None:
     """Pool lease 只能由 ManagedAgentExecutor runtime seam 负责，不能保留旧 runner。"""
     from harness_agent.runtime import agent_delegation
@@ -48,6 +71,7 @@ def test_delegation_module_has_no_second_managed_engine_runner() -> None:
     source = inspect.getsource(agent_delegation)
 
     assert "def managed_engine_runner" not in source
+
 
 
 

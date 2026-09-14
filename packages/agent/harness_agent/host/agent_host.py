@@ -73,6 +73,7 @@ from harness_agent.runtime.execution_binding import (
     ThreadExecutionSelection,
     describe_thread_binding,
     resolve_execution_binding,
+    validate_experimental_delegation_for_run,
 )
 from harness_agent.runtime.agent_catalog import (
     AgentCatalog,
@@ -167,6 +168,7 @@ from harness_agent.plugins.model import ExtensionCatalogSnapshot, catalog_snapsh
 from harness_agent.plugins.runtime import HookRuntimeFailure
 from harness_agent.runtime.agent_spec import (
     ResolvedAgentSpec,
+    resolve_bound_builtin_child_spec,
     resolve_builtin_main_agent_spec,
     resolve_plugin_agent_spec,
     skill_catalog_fingerprint,
@@ -1522,6 +1524,7 @@ class AgentHost:
             self._load_config()
             if self._config is None:
                 raise ConfigError(self._startup_error or "MODEL_CONFIGURATION_REQUIRED")
+            validate_experimental_delegation_for_run(self._config)
             resolved = await self._resolve_execution_binding(
                 command.thread_id,
                 self._config,
@@ -3843,9 +3846,22 @@ class AgentHost:
         self._reject_params(params, set(), "agents.list")
         await self._refresh_control_plane_catalog()
         catalog = self._agent_catalog_for_control_plane()
+        agents = catalog.list_agents()
+        bound = (
+            dict(self._config.experimental.delegation.bound_models)
+            if self._config is not None
+            else {}
+        )
+        if bound:
+            agents = [
+                {**item, "model_profile_id": bound[str(item["id"])]}
+                if str(item.get("id")) in bound
+                else item
+                for item in agents
+            ]
         return {
             "snapshot_id": catalog.snapshot_id,
-            "agents": catalog.list_agents(),
+            "agents": agents,
             "diagnostics": [*self._plugin_diagnostics, *catalog.diagnostics],
         }
 
@@ -4369,6 +4385,9 @@ class AgentHost:
                 tuple(definition.agent_id for definition in agent_catalog.agents)
                 if agent_catalog is not None
                 else ()
+            ),
+            delegation_binding=tuple(
+                sorted(config.experimental.delegation.bound_models.items())
             ),
             goal_backed=goal_backed,
             max_iterations=max_iterations,
@@ -5038,6 +5057,7 @@ class AgentHost:
                     else (),
                     diagnostic_log=child_log,
                     final_output_gate=final_output_gate if stop_controller is not None else None,
+                    model_profile_id=resolved.model_profile_id,
                 )
                 try:
                     result = await ManagedAgentExecutor().execute(
@@ -5078,6 +5098,203 @@ class AgentHost:
                     policy_fingerprint=child_spec.effective_policy.fingerprint,
                     engine_profile_key=child_profile.profile_key,
                     definition_fingerprint=definition.fingerprint,
+                )
+            )
+        return tuple(targets)
+
+    async def _bound_builtin_delegation_targets(
+        self,
+        parent_spec: ResolvedAgentSpec,
+    ) -> tuple[Any, ...]:
+        """把已绑定的内建角色注册为 Managed target，不挂 Plugin Hook。"""
+        if getattr(parent_spec, "agent_id", "main") != "main":
+            return ()
+        config = self._config
+        if config is None or config.model_catalog is None:
+            return ()
+        bound = config.experimental.delegation.bound_models
+        if not bound:
+            return ()
+        from harness_agent.diagnostic_log.runtime import bind_execution_log
+        from harness_agent.runtime.agent_delegation import (
+            AgentDelegationError,
+            DelegationTarget,
+            child_execution_ref,
+            current_delegation_call,
+        )
+        from harness_agent.runtime.builtin_agents import BUILTIN_AGENTS_BY_ID
+        from harness_agent.runtime.managed_agent_executor import (
+            ManagedAgentExecutionError,
+            ManagedAgentExecutor,
+            ManagedAgentRequest,
+            ManagedChildObserver,
+            acquire_pooled_agent_runtime,
+        )
+        from harness_agent.runtime.provider_retry import BoundedProviderRetry
+
+        persistence = await self._ensure_thread_persistence()
+        pool = self._ensure_agent_engine_pool(config)
+        targets: list[DelegationTarget] = []
+        for agent_id, profile_id in bound.items():
+            record = BUILTIN_AGENTS_BY_ID.get(agent_id)
+            if record is None:
+                continue
+            child_spec = resolve_bound_builtin_child_spec(
+                parent=parent_spec,
+                agent_id=agent_id,
+                model_profile=config.model_catalog.require_profile(profile_id),
+            )
+            child_profile = child_spec.runtime_profile
+            self._resolved_agent_specs.setdefault(child_profile.profile_key, child_spec)
+            await persistence.persist_agent_engine_profile(child_profile)
+
+            async def invoke(
+                command: Any,
+                *,
+                resolved: ResolvedAgentSpec = child_spec,
+                profile: AgentEngineProfile = child_profile,
+            ) -> Mapping[str, Any]:
+                """用统一 executor 运行已绑定的内建角色，不经过 Plugin Hook。"""
+                child_ref = child_execution_ref(command)
+                checkpoint_thread_id = child_ref.checkpoint_thread_id(
+                    resolved.project_fingerprint
+                )
+                try:
+                    parent_context = current_delegation_call().run_context
+                except AgentDelegationError:
+                    parent_context = None
+                child_log = bind_execution_log(
+                    getattr(parent_context, "diagnostic_log", None),
+                    thread_id=child_ref.thread_id,
+                    run_id=child_ref.run_id,
+                    execution_id=child_ref.execution_id,
+                    parent_execution_id=child_ref.parent_execution_id,
+                    agent_id=resolved.agent_id,
+                )
+                context_snapshot = ContextLifecycle(
+                    resolved.workspace,
+                    home=self._config_home,
+                ).prepare(thread_id=child_ref.thread_id, spec=resolved)
+                context = RunContext(
+                    thread_id=child_ref.thread_id,
+                    run_id=child_ref.run_id,
+                    context_snapshot=context_snapshot,
+                    skill_registry=resolved.skill_registry,
+                    approval_mode=(
+                        resolved.effective_policy.approval_mode
+                        or resolved.execution.approval_mode
+                    ),
+                    approval_state=(
+                        getattr(parent_context, "approval_state", None)
+                        if parent_context is not None
+                        else None
+                    ),
+                    profile_key=resolved.runtime_profile.profile_key,
+                    checkpoint_thread_id=checkpoint_thread_id,
+                    execution_id=child_ref.execution_id,
+                    parent_execution_id=child_ref.parent_execution_id,
+                    agent_id=resolved.agent_id,
+                    execution_mode=ExecutionMode.MANAGED,
+                    cancellation_token=command.cancellation_token,
+                    plan_constraint=(
+                        getattr(parent_context, "plan_constraint", None)
+                        if parent_context is not None
+                        else None
+                    ) or RunPlanConstraint(),
+                    delegation_policy=resolved.effective_policy.delegation,
+                    workspace_root_registry=(
+                        self._workspace_root_registry.readonly_view()
+                        if self._workspace_root_registry is not None
+                        else None
+                    ),
+                    snapshot_store=self._snapshot_store,
+                    deferred_tool_store=ThreadDeferredToolStore(),
+                    diagnostic_log=child_log,
+                )
+
+                def clear_child_process_state() -> None:
+                    """释放 child 进程内 Snapshot scope。"""
+                    self._snapshot_store.close_thread(checkpoint_thread_id)
+
+                async def acquire_runtime():
+                    """把绑定角色的 pool lease 交给 Managed executor。"""
+                    return await acquire_pooled_agent_runtime(
+                        pool=pool,
+                        profile=profile,
+                        run_context=context,
+                        graph_config=lambda namespace: {
+                            "configurable": {
+                                "thread_id": checkpoint_thread_id,
+                                "checkpoint_ns": namespace,
+                            }
+                        },
+                        checkpoint_cleanup=(
+                            lambda: persistence.delete_execution_checkpoint(
+                                checkpoint_thread_id
+                            )
+                        ),
+                        on_release=clear_child_process_state,
+                    )
+
+                managed_request = ManagedAgentRequest(
+                    execution_ref=child_ref.execution_id,
+                    parent_execution_ref=child_ref.parent_execution_id,
+                    run_id=child_ref.run_id,
+                    input=command.task,
+                    checkpoint_namespace=child_ref.checkpoint_namespace(
+                        resolved.project_fingerprint
+                    ),
+                    output_policy="capture_only",
+                    runtime_provider=acquire_runtime,
+                    is_cancelled=lambda: command.cancellation_token.cancelled,
+                    idempotency_key=command.idempotency_key,
+                    agent_spec=resolved,
+                    interaction_policy=resolved.effective_policy,
+                    timeout_seconds=command.timeout_seconds,
+                    provider_retry=BoundedProviderRetry(
+                        max_attempts=max(
+                            1,
+                            int(getattr(resolved.model_settings, "max_retries", 0)) + 1,
+                        )
+                    ),
+                    diagnostic_log=child_log,
+                    model_profile_id=resolved.model_profile_id,
+                )
+                try:
+                    result = await ManagedAgentExecutor().execute(
+                        managed_request,
+                        ManagedChildObserver(
+                            event_port=getattr(parent_context, "event_port", None)
+                            if parent_context is not None
+                            else None,
+                            execution_ref=child_ref.execution_id,
+                            parent_execution_ref=child_ref.parent_execution_id,
+                            agent_id=resolved.agent_id,
+                        ),
+                    )
+                except ManagedAgentExecutionError as exc:
+                    if exc.code == "RUN_CANCELLED":
+                        raise asyncio.CancelledError from exc
+                    raise AgentDelegationError(
+                        "PLUGIN_AGENT_EXECUTION_FAILED", exc.code
+                    ) from exc
+                output: dict[str, object] = {"final": result.final_content}
+                if result.warning:
+                    output["warning"] = result.warning
+                return output
+
+            targets.append(
+                DelegationTarget(
+                    agent_id=agent_id,
+                    mode=ExecutionMode.MANAGED,
+                    runner=invoke,
+                    description=(
+                        f"{record.description} 实际模型 Profile：{profile_id}。"
+                    ),
+                    model=child_spec.model_view,
+                    policy_fingerprint=child_spec.effective_policy.fingerprint,
+                    engine_profile_key=child_profile.profile_key,
+                    definition_fingerprint=record.fingerprint,
                 )
             )
         return tuple(targets)
@@ -5173,7 +5390,15 @@ class AgentHost:
                 } != allowed_mcp_names or len(mcp_tools) != len(allowed_mcp_names):
                     raise RuntimeError("RUNTIME_MCP_TOOL_VIEW_UNAVAILABLE")
             execution_context = workspace_lease.value
-            delegation_targets = await self._plugin_delegation_targets(spec)
+            bound_builtin_ids = frozenset(
+                self._config.experimental.delegation.bound_models
+                if self._config is not None
+                else ()
+            )
+            delegation_targets = (
+                *(await self._plugin_delegation_targets(spec)),
+                *(await self._bound_builtin_delegation_targets(spec)),
+            )
             model = create_openai_compatible_model(
                 model_settings,
                 async_client=provider_lease.value,
@@ -5271,6 +5496,7 @@ class AgentHost:
                 file_tool_metrics=self._file_tool_metrics,
                 extra_root_tools=extra_root_tools,
                 rubric_middleware=rubric_middleware,
+                managed_builtin_ids=bound_builtin_ids,
             )
             self._agent_engine_artifacts[profile.profile_key] = _AgentEngineArtifacts(
                 execution_context=execution_context,
