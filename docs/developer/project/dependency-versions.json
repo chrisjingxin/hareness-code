@@ -1,17 +1,21 @@
 {
-  "schema_version": 2,
-  "purpose": "当前项目直接需要的企业依赖；传递依赖由 bun.lock 与 packages/agent/uv.lock 固定。",
+  "schema_version": 3,
+  "generated_at": "2026-09-14",
+  "purpose": "当前项目直接依赖版本摘要；完整传递闭包以 bun.lock、packages/agent/uv.lock 和内网迁移依赖清单.md 为准。",
   "javascript": {
     "bun": "1.2.19",
     "@za38/protocol": "0.1.0 (local workspace)",
     "@opentui/core": "0.4.3",
     "@opentui/react": "0.4.3",
+    "ajv": "8.17.1",
+    "lucide-react": "1.28.0",
+    "marked": "17.0.1",
     "react": "19.2.6",
     "react-dom": "19.2.6",
     "react-reconciler": "0.33.0",
-    "lucide-react": "1.28.0",
-    "marked": "17.0.1",
-    "web-tree-sitter": "0.25.10",
+    "shiki": "3.23.0",
+    "@happy-dom/global-registrator": "20.11.1",
+    "@playwright/test": "1.62.1",
     "@types/bun": "1.3.5",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.4",
@@ -20,6 +24,7 @@
     "typescript": "6.0.3"
   },
   "python": {
+    "python": ">=3.11,<4.0",
     "deepagents": "0.7.3",
     "langchain": "1.3.15",
     "langchain-core": "1.6.2",
@@ -27,12 +32,17 @@
     "langchain-openai": "1.3.3",
     "langchain-mcp-adapters": "0.2.1",
     "PyYAML": "6.0.3",
-    "Jinja2": "3.1.6",
     "httpx": "0.28.1",
+    "jsonschema": "4.26.0",
     "pydantic": "2.12.5",
+    "tomli-w": "1.2.0",
+    "websockets": "15.0.1",
+    "tree-sitter": "0.26.0",
+    "tree-sitter-bash": "0.25.1",
+    "secretstorage": "3.3.3 (Linux only)",
     "pytest": "9.0.3",
     "pytest-asyncio": "1.4.0",
-    "hatchling": "1.27.0"
+    "hatchling": "1.27.0 (build isolation; not present in uv.lock)"
   },
   "enterprise_opentui_transitive": {
     "@opentui/core@0.4.3": {
@@ -58,6 +68,11 @@
       "runtime": { "react-reconciler": "^0.33.0" },
       "peer": { "react": ">=19.2.0", "react-devtools-core": "^7.0.1", "ws": "^8.18.0" }
     }
+  },
+  "locked_closure": {
+    "javascript": "98 external resolution records / 96 unique names in bun.lock",
+    "python": "92 external packages in packages/agent/uv.lock",
+    "full_inventory": "docs/developer/project/内网迁移依赖清单.md"
   },
   "excluded": ["@opentui/solid", "solid-js", "langchain-quickjs", "langchain-tests"]
 }

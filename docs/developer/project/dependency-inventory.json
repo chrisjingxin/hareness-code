@@ -1,19 +1,29 @@
 {
-  "schema_version": 2,
-  "generated_at": "2026-07-17",
-  "purpose": "企业依赖迁移后的全部直接依赖、OpenTUI 0.4.3 传递契约和排除项。完整传递闭包以企业环境生成的 bun.lock 与 packages/agent/uv.lock 为唯一来源。",
+  "schema_version": 3,
+  "generated_at": "2026-09-14",
+  "purpose": "当前项目直接依赖、关键传递依赖与内网迁移风险摘要。完整锁定闭包见 bun.lock、packages/agent/uv.lock 和内网迁移依赖清单.md。",
+  "snapshot": {
+    "git_commit": "07bb7880293258614a912454aed1f554e80b6ec8",
+    "bun_lock_sha256": "e46c7318f4444f1b4b496175ebe16b8369f3e2fc5c66e77a5e956a7819121e15",
+    "uv_lock_sha256": "d3aeea573138d2b4c9d77363d3e9de11f45fd70a39feaf89c8037919bbe62b24"
+  },
   "runtime": {
     "bun": "1.2.19",
-    "python": ">=3.11,<4.0"
+    "python": ">=3.11,<4.0",
+    "uv": "not pinned"
   },
   "javascript": {
     "runtime": {
       "@za38/protocol": { "version": "0.1.0", "source": "local workspace", "path": "packages/protocol" },
-      "@opentui/core": { "version": "0.4.3", "source": "enterprise registry" },
-      "@opentui/react": { "version": "0.4.3", "source": "enterprise registry" },
-      "react": { "version": "19.2.6", "source": "enterprise registry" },
-      "react-reconciler": { "version": "0.33.0", "source": "enterprise registry" },
-      "web-tree-sitter": { "version": "0.25.10", "source": "enterprise registry" }
+      "@opentui/core": "0.4.3",
+      "@opentui/react": "0.4.3",
+      "ajv": "8.17.1",
+      "lucide-react": "1.28.0",
+      "marked": "17.0.1",
+      "react": "19.2.6",
+      "react-dom": "19.2.6",
+      "react-reconciler": "0.33.0",
+      "shiki": "3.23.0"
     },
     "opentui_core_transitive": {
       "bun-ffi-structs": "0.2.4",
@@ -39,12 +49,22 @@
       "ws": "^8.18.0"
     },
     "development": {
+      "@happy-dom/global-registrator": "^20.11.1 (locked 20.11.1)",
+      "@playwright/test": "^1.62.1 (locked 1.62.1)",
       "@types/bun": "1.3.5",
       "@types/react": "19.2.14",
+      "@types/react-dom": "^19.2.4 (locked 19.2.4)",
       "@types/react-reconciler": "0.32.0",
+      "happy-dom": "^20.11.1 (locked 20.11.1)",
       "typescript": "6.0.3"
     },
-    "lockfile_note": "bun-ffi-structs@0.2.4 declares peer typescript:^5; 企业 bun install 会为该 peer 解析隔离的 TypeScript 5.x，直接项目 TypeScript 仍为 6.0.3。@types/react-reconciler 0.32.0 仅用于编译期声明，运行时 reconciler 由 OpenTUI React 0.4.3 固定为 0.33.0。",
+    "locked_closure": {
+      "external_resolution_records": 98,
+      "unique_external_package_names": 96,
+      "source": "bun.lock",
+      "registry_endpoint": "not recorded by bun.lock"
+    },
+    "lockfile_note": "bun-ffi-structs@0.2.4 declares peer typescript:^5; bun.lock contains isolated typescript@5.9.3 while the project directly uses typescript@6.0.3. It also contains ws@8.21.1 and isolated ws@7.5.12; both exact versions must be audited.",
     "removed": ["@opentui/solid", "solid-js", "local OpenTUI 0.1.74 snapshot", "local native artifact workspaces"]
   },
   "python": {
@@ -56,16 +76,30 @@
       "langchain-openai": "1.3.3",
       "langchain-mcp-adapters": "0.2.1",
       "PyYAML": "6.0.3",
-      "Jinja2": "3.1.6",
       "httpx": "0.28.1",
-      "pydantic": "2.12.5"
+      "jsonschema": "4.26.0",
+      "pydantic": "2.12.5",
+      "tomli-w": ">=1.1.0 (locked 1.2.0)",
+      "websockets": "15.0.1",
+      "tree-sitter": ">=0.24.0,<0.27.0 (locked 0.26.0)",
+      "tree-sitter-bash": ">=0.25.0,<0.26.0 (locked 0.25.1)",
+      "secretstorage": "3.3.3; sys_platform == 'linux'"
     },
     "test": {
       "pytest": "9.0.3",
       "pytest-asyncio": "1.4.0"
     },
-    "build": { "hatchling": "1.27.0" },
+    "build": {
+      "hatchling": "1.27.0",
+      "lock_status": "declared in pyproject.toml but absent from uv.lock; audit separately for build isolation"
+    },
     "lockfile": "packages/agent/uv.lock",
+    "locked_external_packages": 92,
+    "locked_registry": "https://mirrors.aliyun.com/pypi/simple/",
     "removed": ["langchain-quickjs", "langchain-tests", "js_eval"]
+  },
+  "migration_documents": {
+    "full_inventory": "docs/developer/project/内网迁移依赖清单.md",
+    "prompts": "docs/developer/project/内网依赖查询提示词.md"
   }
 }
