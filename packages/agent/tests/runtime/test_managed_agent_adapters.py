@@ -49,6 +49,9 @@ def test_bound_builtin_adapter_has_no_direct_graph_execution() -> None:
 
     assert "ManagedAgentExecutor" in source
     assert "SubagentStop" not in source
+    assert "approval_mode_provider" in source
+    assert "resolve_child_approval_mode" in source
+    assert "request_child_interaction" in source
     assert "engine.graph" not in source
     assert ".ainvoke(" not in source
     assert ".astream(" not in source

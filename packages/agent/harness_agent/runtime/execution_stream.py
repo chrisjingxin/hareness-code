@@ -64,6 +64,8 @@ class StreamSession:
     usage: dict[str, int] = field(
         default_factory=lambda: {"input_tokens": 0, "output_tokens": 0}
     )
+    last_call_usage: dict[str, int] = field(default_factory=dict)
+    call_usages: list[dict[str, int]] = field(default_factory=list)
     tool_stream_ids: dict[str, str] = field(default_factory=dict)
     tool_result_ids: dict[str, str] = field(default_factory=dict)
     tool_names: dict[str, str] = field(default_factory=dict)
@@ -950,8 +952,11 @@ def allocate_tool_id(session: StreamSession, preferred: str | None = None) -> st
 
 def start_model_round(session: StreamSession) -> None:
     """开始新模型回合，并清理上一回合的正文与 Tool 临时状态。"""
+    if session.last_call_usage:
+        session.call_usages.append(dict(session.last_call_usage))
     session.model_round_active = True
     session.model_round_has_tool_results = False
+    session.last_call_usage = {}
     session.content_parts.clear()
     session.tool_stream_ids.clear()
     session.tool_result_ids.clear()
@@ -1028,6 +1033,15 @@ def update_usage(session: StreamSession, usage: Any, chunk: Any = None) -> None:
                 usage = token_usage
     if not isinstance(usage, Mapping):
         return
+    call_input = int(usage.get("input_tokens", 0) or usage.get("prompt_tokens", 0) or 0)
+    call_output = int(usage.get("output_tokens", 0) or usage.get("completion_tokens", 0) or 0)
+    session.last_call_usage = {
+        "input_tokens": call_input,
+        "output_tokens": call_output,
+    }
+    cached_for_call = _extract_cached_tokens(usage, chunk)
+    if cached_for_call > 0:
+        session.last_call_usage["cached_tokens"] = cached_for_call
     session.usage["input_tokens"] = max(
         session.usage.get("input_tokens", 0),
         int(usage.get("input_tokens", 0) or usage.get("prompt_tokens", 0) or 0),

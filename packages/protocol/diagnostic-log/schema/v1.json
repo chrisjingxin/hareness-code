@@ -38,6 +38,7 @@
       "hook.failed": { "levels": ["warn", "error"], "fields": "#/$defs/hookFailedFields" },
       "execution.started": { "levels": ["info"], "fields": "#/$defs/executionStartedFields" },
       "execution.completed": { "levels": ["info"], "fields": "#/$defs/executionCompletedFields" },
+      "delegation.usage": { "levels": ["info"], "fields": "#/$defs/delegationUsageFields" },
       "execution.failed": { "levels": ["warn", "error"], "fields": "#/$defs/executionFailedFields" },
       "model.started": { "levels": ["debug", "info"], "fields": "#/$defs/modelStartedFields" },
       "model.completed": { "levels": ["info"], "fields": "#/$defs/modelCompletedFields" },
@@ -268,6 +269,35 @@
       "type": "object", "additionalProperties": false,
       "required": ["kind", "agent_id", "outcome", "duration_ms"],
       "properties": { "kind": { "enum": ["root", "child", "compose_stage"] }, "agent_id": { "$ref": "#/$defs/safeName" }, "outcome": { "$ref": "#/$defs/safeName" }, "duration_ms": { "$ref": "#/$defs/nonNegativeInt" } }
+    },
+    "delegationUsageFields": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "root_input_tokens",
+        "root_output_tokens",
+        "root_cached_input_tokens",
+        "child_input_tokens",
+        "child_output_tokens",
+        "child_cached_input_tokens",
+        "total_input_tokens",
+        "total_output_tokens",
+        "total_cached_input_tokens",
+        "complete",
+        "child_count"
+      ],
+      "properties": {
+        "root_input_tokens": { "$ref": "#/$defs/nonNegativeInt" },
+        "root_output_tokens": { "$ref": "#/$defs/nonNegativeInt" },
+        "root_cached_input_tokens": { "$ref": "#/$defs/nonNegativeInt" },
+        "child_input_tokens": { "$ref": "#/$defs/nonNegativeInt" },
+        "child_output_tokens": { "$ref": "#/$defs/nonNegativeInt" },
+        "child_cached_input_tokens": { "$ref": "#/$defs/nonNegativeInt" },
+        "total_input_tokens": { "$ref": "#/$defs/nonNegativeInt" },
+        "total_output_tokens": { "$ref": "#/$defs/nonNegativeInt" },
+        "total_cached_input_tokens": { "$ref": "#/$defs/nonNegativeInt" },
+        "complete": { "type": "boolean" },
+        "child_count": { "$ref": "#/$defs/nonNegativeInt" }
+      }
     },
     "executionFailedFields": {
       "type": "object", "additionalProperties": false,

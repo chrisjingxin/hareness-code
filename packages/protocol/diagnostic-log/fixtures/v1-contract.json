@@ -2864,6 +2864,122 @@
     "value": {
       "schema_version": 1,
       "timestamp_ms": 1,
+      "level": "info",
+      "event": "delegation.usage",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "root_input_tokens": 1,
+        "root_output_tokens": 1,
+        "root_cached_input_tokens": 1,
+        "child_input_tokens": 1,
+        "child_output_tokens": 1,
+        "child_cached_input_tokens": 1,
+        "total_input_tokens": 1,
+        "total_output_tokens": 1,
+        "total_cached_input_tokens": 1,
+        "complete": false,
+        "child_count": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "delegation.usage",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "root_input_tokens": 1,
+        "root_output_tokens": 1,
+        "root_cached_input_tokens": 1,
+        "child_input_tokens": 1,
+        "child_output_tokens": 1,
+        "child_cached_input_tokens": 1,
+        "total_input_tokens": 1,
+        "total_output_tokens": 1,
+        "total_cached_input_tokens": 1,
+        "complete": false,
+        "child_count": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "delegation.usage",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "root_input_tokens": 1,
+        "root_output_tokens": 1,
+        "root_cached_input_tokens": 1,
+        "child_input_tokens": 1,
+        "child_output_tokens": 1,
+        "child_cached_input_tokens": 1,
+        "total_input_tokens": 1,
+        "total_output_tokens": 1,
+        "total_cached_input_tokens": 1,
+        "complete": false,
+        "child_count": 1,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "delegation.usage",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "root_output_tokens": 1,
+        "root_cached_input_tokens": 1,
+        "child_input_tokens": 1,
+        "child_output_tokens": 1,
+        "child_cached_input_tokens": 1,
+        "total_input_tokens": 1,
+        "total_output_tokens": 1,
+        "total_cached_input_tokens": 1,
+        "complete": false,
+        "child_count": 1
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
       "level": "warn",
       "event": "execution.failed",
       "component": "cli",

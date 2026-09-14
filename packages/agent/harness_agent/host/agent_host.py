@@ -1646,6 +1646,7 @@ class AgentHost:
                 context_snapshot=context_snapshot,
                 goal_binding=goal_binding,
                 idle_duration_ms=idle_duration_ms,
+                experimental_delegation=self._config.experimental.delegation.enabled,
                 approval_mode=(
                     spec.effective_policy.approval_mode
                     or spec.execution.approval_mode
@@ -4921,6 +4922,9 @@ class AgentHost:
                     # Thread 的 Host store，否则 sibling 会继承已 reveal 工具。
                     deferred_tool_store=ThreadDeferredToolStore(),
                     diagnostic_log=child_log,
+                    usage_ledger=getattr(parent_context, "usage_ledger", None)
+                    if parent_context is not None
+                    else None,
                 )
                 checkpoint_namespace = child_ref.checkpoint_namespace(
                     resolved.project_fingerprint
@@ -5058,6 +5062,7 @@ class AgentHost:
                     diagnostic_log=child_log,
                     final_output_gate=final_output_gate if stop_controller is not None else None,
                     model_profile_id=resolved.model_profile_id,
+                    usage_ledger=getattr(context, "usage_ledger", None),
                 )
                 try:
                     result = await ManagedAgentExecutor().execute(
@@ -5122,7 +5127,11 @@ class AgentHost:
             child_execution_ref,
             current_delegation_call,
         )
-        from harness_agent.runtime.builtin_agents import BUILTIN_AGENTS_BY_ID
+        from harness_agent.runtime.builtin_agents import (
+            BUILTIN_AGENTS_BY_ID,
+            resolve_child_approval_mode,
+        )
+        from harness_agent.runtime.run_context import current_approval_mode
         from harness_agent.runtime.managed_agent_executor import (
             ManagedAgentExecutionError,
             ManagedAgentExecutor,
@@ -5163,6 +5172,19 @@ class AgentHost:
                     parent_context = current_delegation_call().run_context
                 except AgentDelegationError:
                     parent_context = None
+                child_approval_provider = None
+                if parent_context is not None:
+                    def child_approval_provider(
+                        parent: Any = parent_context,
+                        role: str = resolved.agent_id,
+                    ) -> ApprovalMode:
+                        """把父 Run 当前档位与内建角色上限求交。"""
+                        current = current_approval_mode(
+                            parent,
+                            fallback=getattr(parent, "approval_mode", "default"),
+                        ) or getattr(parent, "approval_mode", "default")
+                        return resolve_child_approval_mode(current, role)
+
                 child_log = bind_execution_log(
                     getattr(parent_context, "diagnostic_log", None),
                     thread_id=child_ref.thread_id,
@@ -5189,6 +5211,17 @@ class AgentHost:
                         if parent_context is not None
                         else None
                     ),
+                    approval_mode_provider=child_approval_provider,
+                    interaction_port=(
+                        (
+                            lambda interaction, ref=child_ref: self._run_coordinator.request_child_interaction(
+                                RunRef(ref.thread_id, ref.run_id),
+                                interaction,
+                            )
+                        )
+                        if parent_context is not None
+                        else None
+                    ),
                     profile_key=resolved.runtime_profile.profile_key,
                     checkpoint_thread_id=checkpoint_thread_id,
                     execution_id=child_ref.execution_id,
@@ -5210,6 +5243,9 @@ class AgentHost:
                     snapshot_store=self._snapshot_store,
                     deferred_tool_store=ThreadDeferredToolStore(),
                     diagnostic_log=child_log,
+                    usage_ledger=getattr(parent_context, "usage_ledger", None)
+                    if parent_context is not None
+                    else None,
                 )
 
                 def clear_child_process_state() -> None:
@@ -5259,6 +5295,7 @@ class AgentHost:
                     ),
                     diagnostic_log=child_log,
                     model_profile_id=resolved.model_profile_id,
+                    usage_ledger=getattr(context, "usage_ledger", None),
                 )
                 try:
                     result = await ManagedAgentExecutor().execute(
@@ -5684,6 +5721,7 @@ class AgentHost:
             event_port=event_port,
             record_approval=record_approval,
             diagnostic_log=run.diagnostic_log,
+            usage_ledger=getattr(run, "usage_ledger", None),
             goal_binding=run.preparation.goal_binding,
             goal_store=(
                 run.persistence.goal_store()

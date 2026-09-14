@@ -433,9 +433,16 @@ def resolve_builtin_main_agent_spec(
     prompt = default_system_prompt()
     if delegation_binding:
         bound = "、".join(f"{role}→{profile_id}" for role, profile_id in sorted(delegation_binding))
+        roles = {role for role, _profile_id in delegation_binding}
+        hints: list[str] = []
+        if "explore" in roles:
+            hints.append("将大范围定位/阅读交给 explore")
+        if "general-purpose" in roles:
+            hints.append("将明确的局部实现交给 general-purpose")
+        hint = "；".join(hints) + "；" if hints else ""
         prompt = (
             f"{prompt}\n\n实验性角色模型绑定已开启：{bound}。"
-            "将大范围定位/阅读交给 explore；简单精准读取、复杂判断和关键风险仍直接处理。"
+            f"{hint}简单精准读取、复杂判断和关键风险仍直接处理。"
             "不得为了委派先读完整资料；收到结果后按疑点查证，不例行全量重查。"
         )
     return ResolvedAgentSpec(
@@ -543,6 +550,11 @@ def resolve_bound_builtin_child_spec(
         identity = "builtin-general-purpose-bound"
         enable_memory = parent.enable_memory
         enable_skills = parent.enable_skills
+        delivery_prompt = (
+            f"{record.prompt}\n\n交付要求：给父 Agent 一份可交接的结果，"
+            "包含结论、改过的文件、做过的校验、未完成项或阻塞。"
+            "不要复述全部工具输出。"
+        )
     return ResolvedAgentSpec(
         project_fingerprint=parent.project_fingerprint,
         role="delegate",

@@ -14,7 +14,23 @@ export * from "./generated"
 
 type Validator = { (value: unknown): boolean; errors?: Array<{ instancePath: string; message?: string }> | null }
 const sensitiveKey = /(api[_-]?key|authorization|cookie|credential|password|secret|token)/i
-const allowedTokenCountKeys = new Set(["input_tokens", "output_tokens", "cached_input_tokens", "estimated_tokens", "before_estimated_tokens", "after_estimated_tokens"])
+const allowedTokenCountKeys = new Set([
+  "input_tokens",
+  "output_tokens",
+  "cached_input_tokens",
+  "estimated_tokens",
+  "before_estimated_tokens",
+  "after_estimated_tokens",
+  "root_input_tokens",
+  "root_output_tokens",
+  "root_cached_input_tokens",
+  "child_input_tokens",
+  "child_output_tokens",
+  "child_cached_input_tokens",
+  "total_input_tokens",
+  "total_output_tokens",
+  "total_cached_input_tokens",
+])
 
 /** 校验完整记录，包括 event/level/fields 对应、敏感键、有限数值和 8 KiB 上限。 */
 export function assertDiagnosticRecord(value: unknown): asserts value is DiagnosticRecord {

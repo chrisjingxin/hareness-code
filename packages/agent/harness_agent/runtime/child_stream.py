@@ -106,6 +106,7 @@ def child_context_for(parent: RunContext, *, child_ref: ExecutionRef, agent_id: 
         event_port=parent.event_port,
         record_approval=parent.record_approval,
         model_call_lifecycle=parent.model_call_lifecycle,
+        usage_ledger=getattr(parent, "usage_ledger", None),
         diagnostic_log=bind_execution_log(
             getattr(parent, "diagnostic_log", None),
             thread_id=parent.thread_id,
@@ -222,4 +223,15 @@ async def stream_inline_child(
             "duration_ms": max(0, int((time.monotonic() - started_at) * 1000)),
         },
     )
+    ledger = getattr(child_context, "usage_ledger", None)
+    record = getattr(ledger, "record", None)
+    if callable(record):
+        leftover = dict(session.last_call_usage) if session.last_call_usage else None
+        for usage in (*session.call_usages, *(() if leftover is None else (leftover,))):
+            record(
+                execution_id=child_ref.execution_id,
+                agent_id=agent_id,
+                profile_id="inherit",
+                usage=usage,
+            )
     return {"messages": [AIMessage(content=final_content)]}

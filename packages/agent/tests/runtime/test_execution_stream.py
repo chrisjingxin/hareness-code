@@ -21,6 +21,7 @@ from harness_agent.runtime.execution_stream import (
     execute,
     extract_interaction,
     translate_stream_event,
+    update_usage,
 )
 
 
@@ -439,3 +440,18 @@ def test_update_usage_with_openai_and_langchain_cached_tokens() -> None:
     })
     translate_stream_event(("messages", (chunk_oai, {})), session, content_visibility="passthrough")
     assert session.usage == {"input_tokens": 1200, "output_tokens": 150, "cached_tokens": 950}
+
+
+def test_update_usage_keeps_current_round_absolute_values() -> None:
+    """session.usage 仍取 max；last_call_usage 保留本回合绝对值，供诊断累加。"""
+    session = StreamSession(run_id="run-1")
+    update_usage(session, {"input_tokens": 10, "output_tokens": 1})
+    assert session.usage["input_tokens"] == 10
+    assert session.last_call_usage == {"input_tokens": 10, "output_tokens": 1}
+    from harness_agent.runtime.execution_stream import start_model_round
+
+    start_model_round(session)
+    update_usage(session, {"input_tokens": 20, "output_tokens": 2})
+    assert session.usage["input_tokens"] == 20
+    assert session.last_call_usage == {"input_tokens": 20, "output_tokens": 2}
+    assert session.call_usages == [{"input_tokens": 10, "output_tokens": 1}]

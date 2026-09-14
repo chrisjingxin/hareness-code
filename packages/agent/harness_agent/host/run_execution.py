@@ -320,6 +320,7 @@ class BuildRunAdapter:
             diagnostic_log=getattr(run, "diagnostic_log", None),
             timing=getattr(run, "timing", None),
             on_resume_consumed=on_resume_consumed,
+            usage_ledger=getattr(run, "usage_ledger", None),
             model_profile_id=(
                 run.execution_binding.actual_primary.profile_id
                 if getattr(run, "execution_binding", None) is not None
@@ -974,6 +975,7 @@ class ComposeRunAdapter:
             diagnostic_log=getattr(run, "diagnostic_log", None),
             timing=getattr(run, "timing", None),
             on_resume_consumed=on_resume_consumed,
+            usage_ledger=getattr(run, "usage_ledger", None),
             model_profile_id=(
                 run.execution_binding.actual_primary.profile_id
                 if getattr(run, "execution_binding", None) is not None

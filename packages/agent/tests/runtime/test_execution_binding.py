@@ -269,11 +269,10 @@ def test_experimental_delegation_precheck_rejects_missing_credentials(monkeypatc
         validate_experimental_delegation_for_run(config)
 
 
-def test_experimental_delegation_precheck_rejects_undelivered_general_purpose() -> None:
-    """A 阶段已绑定但未交付的 general-purpose 必须明确拒绝运行。"""
+def test_experimental_delegation_precheck_accepts_bound_general_purpose() -> None:
+    """绑定可用的 general-purpose 时预检通过，不再因未交付拒绝。"""
     config = _config_with_delegation(enabled=True, models={"general-purpose": "fast"})
-    with pytest.raises(ConfigError, match="general-purpose"):
-        validate_experimental_delegation_for_run(config)
+    validate_experimental_delegation_for_run(config)
 
 
 def test_experimental_delegation_precheck_accepts_bound_explore() -> None:

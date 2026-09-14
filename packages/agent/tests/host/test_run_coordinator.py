@@ -206,6 +206,52 @@ async def test_run_coordinator_emits_one_diagnostic_terminal_with_timing() -> No
     }
 
 
+@pytest.mark.asyncio
+async def test_experimental_run_logs_delegation_usage_without_ui_payload() -> None:
+    """实验开启时终态诊断包含主/子用量合计；协议 usage 仍是旧整数形状。"""
+    log = _RecordingDiagnosticLog()
+
+    async def prepare(_command, _persistence) -> RunPreparation:
+        return RunPreparation(experimental_delegation=True)
+
+    async def runtime_provider(run) -> RunRuntime:
+        assert run.usage_ledger is not None
+        run.usage_ledger.record(
+            execution_id="root-run-usage",
+            agent_id="main",
+            profile_id="pro",
+            usage={"input_tokens": 30, "output_tokens": 4},
+        )
+        run.usage_ledger.record(
+            execution_id="child-1",
+            agent_id="explore",
+            profile_id="fast",
+            usage={"input_tokens": 7, "output_tokens": 1},
+        )
+        return await _noop_runtime(run)
+
+    coordinator = RunCoordinator(
+        persistence_provider=_noop_persistence,
+        preparation_provider=prepare,
+        runtime_provider=runtime_provider,
+        interaction_port=_NoopInteraction(),
+        diagnostic_log=log,
+    )
+    execution = await coordinator.start(
+        StartRun(mode="build", thread_id="thread", run_id="run-usage", input=UserRunInput(message="hello")),
+        ConnectionRef("owner"),
+    )
+    events = await _events(execution)
+    assert events[-1].type == "run.completed"
+    assert "delegation_usage" not in events[-1].payload
+    usage_log = next(record[3] for record in log.records if record[1] == "delegation.usage")
+    assert usage_log["root_input_tokens"] == 30
+    assert usage_log["child_input_tokens"] == 7
+    assert usage_log["total_input_tokens"] == 37
+    assert usage_log["complete"] is True
+    assert usage_log["child_count"] == 1
+
+
 def test_host_prepares_experimental_delegation_before_run_accept() -> None:
     """实验角色预检发生在 Host 准备 Run 时，失败不会进入 Coordinator 受理。"""
     from harness_agent.host.agent_host import AgentHost

@@ -16,6 +16,7 @@ from typing import Any, ClassVar, Literal, Protocol
 
 from harness_agent.compose.models import ThreadMode
 from harness_agent.diagnostic_log.runtime import DiagnosticLog, ensure_log, safe_context_value
+from harness_agent.runtime.delegation_usage import DelegationUsageLedger
 from harness_agent.goals.context import GoalRunBinding
 from harness_agent.host.run_execution import (
     AdapterOutcome,
@@ -378,6 +379,7 @@ class RunPreparation:
     # 受理阶段到真正取得 AgentEngine lease 之间，由 Host 持有的快照锁令牌。
     # Coordinator 只透传不使用，快照协议归 Host 所有。
     snapshot_reservation: Any | None = None
+    experimental_delegation: bool = False
 
     def __post_init__(self) -> None:
         """拒绝把 requested Skill、Context 和 Profile 拆成不同 snapshot。"""
@@ -558,6 +560,8 @@ class RunState:
     context_summary: dict[str, object] = field(default_factory=dict)
     cancellation_token: RunCancellationToken = field(default_factory=RunCancellationToken)
     run_context: RunContext | None = None
+    experimental_delegation: bool = False
+    usage_ledger: Any | None = None
     agent_engine_lease: Any | None = None
     agent_engine_run_lease: Any | None = None
     agent_engine_profile_key: str | None = None
@@ -990,6 +994,7 @@ class RunCoordinator:
                     "usage": _diagnostic_usage(run.usage),
                 },
             )
+            self._log_delegation_usage(run)
             return
         if status == "cancelled":
             run.diagnostic_log.warn(
@@ -1001,6 +1006,7 @@ class RunCoordinator:
                     ),
                 },
             )
+            self._log_delegation_usage(run)
             return
         raw_error = payload.get("error")
         error = raw_error if isinstance(raw_error, Mapping) else {}
@@ -1016,6 +1022,18 @@ class RunCoordinator:
                 "summary_code": "run_failed",
             },
         )
+        self._log_delegation_usage(run)
+
+    def _log_delegation_usage(self, run: RunState) -> None:
+        """实验开启时把主/子用量合计写入诊断日志，不进入协议或 UI。"""
+        if not run.experimental_delegation or run.usage_ledger is None:
+            return
+        root_id = (
+            run.root_execution.ref.execution_id
+            if run.root_execution is not None
+            else f"root-{run.run_id}"
+        )
+        run.diagnostic_log.info("delegation.usage", run.usage_ledger.summary(root_id))
 
     async def start(
         self,
@@ -1097,6 +1115,7 @@ class RunCoordinator:
             # preparation/persistence 仍属于受理过程；Run wall time 从真正受理完成后起算。
             accepted_at = self._clock()
             root_execution = self._root_execution_binding(command, preparation)
+            experimental = bool(preparation.experimental_delegation)
             run = RunState(
                 start=command,
                 owner=owner,
@@ -1113,6 +1132,8 @@ class RunCoordinator:
                         "agent_id": root_execution.agent_id,
                     }
                 ),
+                experimental_delegation=experimental,
+                usage_ledger=DelegationUsageLedger() if experimental else None,
             )
             self._log_run_started(run)
             await self._execution_registry.accept(root_execution)

@@ -285,6 +285,7 @@ class ManagedAgentRequest:
     # Managed child 的最终输出提交前门禁；continue 只在同一 runtime/checkpoint
     # 内开始下一模型回合，不创建新的 DelegationTarget 或 execution。
     final_output_gate: FinalOutputGate | None = None
+    usage_ledger: object | None = None
 
     def __post_init__(self) -> None:
         """在取得昂贵 runtime 前拒绝不完整的执行事实。"""
@@ -560,6 +561,7 @@ class ManagedAgentExecutor:
                     stream_input,
                     mark_first_chunk,
                 )
+                round_usage = _round_usage(session, usage_before)
                 request.diagnostic_log.info(
                     "model.completed",
                     {
@@ -571,12 +573,25 @@ class ManagedAgentExecutor:
                             if first_chunk_at is None
                             else max(0, round((first_chunk_at - attempt_started) * 1000))
                         ),
-                        "usage": _usage_delta(usage_before, session.usage),
+                        "usage": round_usage,
                         "finish_reason": (
                             "interaction" if result.resume is not None else "completed"
                         ),
                     },
                 )
+                ledger = getattr(request, "usage_ledger", None)
+                record = getattr(ledger, "record", None)
+                if callable(record):
+                    record(
+                        execution_id=request.execution_ref,
+                        agent_id=str(getattr(runtime.run_context, "agent_id", "") or "main"),
+                        profile_id=request.model_profile_id,
+                        usage={
+                            "input_tokens": round_usage.get("input_tokens"),
+                            "output_tokens": round_usage.get("output_tokens"),
+                            "cached_input_tokens": round_usage.get("cached_input_tokens"),
+                        },
+                    )
                 return result
             except asyncio.CancelledError:
                 session.restore(attempt_snapshot)
@@ -790,6 +805,18 @@ def _log_model_failure(
         request.diagnostic_log.warn("model.failed", fields)
         return
     request.diagnostic_log.error("model.failed", fields)
+
+
+def _round_usage(session: Any, usage_before: Mapping[str, int]) -> dict[str, int | None]:
+    """优先使用本回合最后一次绝对用量，避免跨回合 session max 把 20 记成 10。"""
+    raw = getattr(session, "last_call_usage", None) or {}
+    if raw:
+        return {
+            "input_tokens": raw.get("input_tokens"),
+            "output_tokens": raw.get("output_tokens"),
+            "cached_input_tokens": raw.get("cached_tokens"),
+        }
+    return _usage_delta(usage_before, session.usage)
 
 
 def _usage_delta(

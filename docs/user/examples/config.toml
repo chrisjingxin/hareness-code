@@ -56,6 +56,7 @@ X-Enterprise-Tenant = "HARNESS_TENANT"
 # enabled = false
 # [experimental.delegation.models]
 # explore = "fast"
+# general-purpose = "fast"
 
 [approval]
 mode = "auto"

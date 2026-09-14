@@ -135,6 +135,28 @@ def test_bound_explore_child_spec_uses_specified_profile_and_readonly_tools(tmp_
     assert child.interactive is False
     assert "交付要求" in child.prompt
     assert child.runtime_profile.profile_key != parent.runtime_profile.profile_key
+
+
+def test_bound_general_purpose_child_spec_keeps_parent_mcp_and_skills(tmp_path: Path) -> None:
+    """绑定 general-purpose 后仍继承父 MCP/Skill，不收成 Plugin 子集。"""
+    parent = _spec(tmp_path)
+    fast = ModelProfile(
+        profile_id="fast",
+        settings=ModelSettings("fast-model", "https://gateway.example/v1", api_key="secret"),
+        source="test",
+    )
+    child = resolve_bound_builtin_child_spec(
+        parent=parent,
+        agent_id="general-purpose",
+        model_profile=fast,
+    )
+    assert child.agent_id == "general-purpose"
+    assert child.model_profile_id == "fast"
+    assert child.skill_registry.snapshot_id == parent.skill_registry.snapshot_id
+    assert child.mcp_snapshot.digest == parent.mcp_snapshot.digest
+    assert child.enable_skills is parent.enable_skills
+    assert "task" not in child.capability_view.tool_names
+    assert "交付要求" in child.prompt
     same_parent_model = resolve_bound_builtin_child_spec(
         parent=parent,
         agent_id="explore",
@@ -191,6 +213,19 @@ def test_main_spec_fingerprint_includes_experimental_binding(tmp_path: Path) -> 
     assert other.runtime_profile.profile_key != bound.runtime_profile.profile_key
     assert "实验性角色模型绑定已开启" in bound.prompt
     assert "实验性角色模型绑定已开启" not in plain.prompt
+    gp_bound = resolve_builtin_main_agent_spec(
+        project_fingerprint=component_fingerprint({"project": "test"}),
+        workspace=plain.workspace,
+        binding=_binding(),
+        execution=ExecutionSettings(approval_mode=DEFAULT_APPROVAL_MODE),
+        skill_registry=plain.skill_registry,
+        mcp_snapshot=plain.mcp_snapshot,
+        mcp_tools=(),
+        interactive=True,
+        pinned=False,
+        delegation_binding=(("general-purpose", "fast"),),
+    )
+    assert "general-purpose" in gp_bound.prompt
 
 
 def test_compose_planning_stage_is_read_only_and_bounded(tmp_path: Path) -> None:

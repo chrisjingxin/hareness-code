@@ -32,6 +32,15 @@ _ALLOWED_TOKEN_COUNT_KEYS = {
     "estimated_tokens",
     "before_estimated_tokens",
     "after_estimated_tokens",
+    "root_input_tokens",
+    "root_output_tokens",
+    "root_cached_input_tokens",
+    "child_input_tokens",
+    "child_output_tokens",
+    "child_cached_input_tokens",
+    "total_input_tokens",
+    "total_output_tokens",
+    "total_cached_input_tokens",
 }
 
 
