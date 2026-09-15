@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync } from "node:fs"
+import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { expect, test } from "bun:test"
@@ -14,6 +14,13 @@ import {
 
 function writeJson(path: string, value: unknown): void {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, "utf-8")
+}
+
+function mutateProvenance(root: string, callback: (provenance: Record<string, unknown>) => void): void {
+  const path = join(root, "third_party/npm/provenance.json")
+  const provenance = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>
+  callback(provenance)
+  writeJson(path, provenance)
 }
 
 function createFixture(): string {
@@ -87,6 +94,29 @@ function createFixture(): string {
     schemaVersion: 1,
     target: { os: "win32", cpu: "x64" },
     packages: provenancePackages,
+    normalizations: [
+      {
+        kind: "workspace-dependency",
+        package: "@opentui/core",
+        field: "dependencies.bun-ffi-structs",
+        before: "0.2.4",
+        after: "workspace:*",
+      },
+      {
+        kind: "workspace-dependency",
+        package: "@opentui/core",
+        field: "optionalDependencies.@opentui/core-win32-x64",
+        before: "0.4.3",
+        after: "workspace:*",
+      },
+      {
+        kind: "workspace-dependency",
+        package: "@opentui/react",
+        field: "dependencies.@opentui/core",
+        before: "0.4.3",
+        after: "workspace:*",
+      },
+    ],
     patches: {
       "react-devtools-core": {
         source: "patches/react-devtools-core@7.0.1.patch",
@@ -227,6 +257,41 @@ test("rejects a duplicate root patchedDependencies entry", () => {
       patchedDependencies: { "react-devtools-core@7.0.1": "patches/react-devtools-core@7.0.1.patch" },
     })
     expect(validateVendoredWorkspace(root).join("\n")).toContain("duplicate root patchedDependencies")
+  })
+})
+
+test("rejects missing workspace normalization provenance", () => {
+  withFixture((root) => {
+    mutateProvenance(root, (provenance) => {
+      provenance.normalizations = (provenance.normalizations as unknown[]).slice(1)
+    })
+    expect(validateVendoredWorkspace(root).join("\n")).toContain("workspace normalization set mismatch")
+  })
+})
+
+test("rejects incorrect workspace normalization provenance", () => {
+  withFixture((root) => {
+    mutateProvenance(root, (provenance) => {
+      const normalizations = provenance.normalizations as Array<Record<string, unknown>>
+      normalizations[0] = { ...normalizations[0], before: "0.2.3" }
+    })
+    expect(validateVendoredWorkspace(root).join("\n")).toContain("workspace normalization set mismatch")
+  })
+})
+
+test("rejects extra workspace normalization drift", () => {
+  withFixture((root) => {
+    mutateProvenance(root, (provenance) => {
+      const normalizations = provenance.normalizations as Array<Record<string, unknown>>
+      normalizations.push({
+        kind: "workspace-dependency",
+        package: "@opentui/core",
+        field: "dependencies.unexpected",
+        before: "1.0.0",
+        after: "workspace:*",
+      })
+    })
+    expect(validateVendoredWorkspace(root).join("\n")).toContain("workspace normalization set mismatch")
   })
 })
 

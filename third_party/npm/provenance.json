@@ -55,6 +55,27 @@
   },
   "normalizations": [
     {
+      "kind": "workspace-dependency",
+      "package": "@opentui/core",
+      "field": "dependencies.bun-ffi-structs",
+      "before": "0.2.4",
+      "after": "workspace:*"
+    },
+    {
+      "kind": "workspace-dependency",
+      "package": "@opentui/core",
+      "field": "optionalDependencies.@opentui/core-win32-x64",
+      "before": "0.4.3",
+      "after": "workspace:*"
+    },
+    {
+      "kind": "workspace-dependency",
+      "package": "@opentui/react",
+      "field": "dependencies.@opentui/core",
+      "before": "0.4.3",
+      "after": "workspace:*"
+    },
+    {
       "package": "@opentui/react",
       "removedDevDependencies": ["@opentui/keymap", "@types/bun", "@types/node", "@types/react-reconciler", "@types/ws", "react", "react-devtools-core", "typescript", "ws"],
       "addedDevDependencies": {"@types/react": "19.2.14"},

@@ -68,6 +68,17 @@ export const VENDORED_PACKAGE_CONSUMERS: Readonly<Record<string, readonly string
 const TARGET_PLATFORM = { os: "win32", cpu: "x64" } as const
 const PATCH_SOURCE = "patches/react-devtools-core@7.0.1.patch"
 
+const EXPECTED_WORKSPACE_NORMALIZATIONS = [
+  { package: "@opentui/core", field: "dependencies.bun-ffi-structs", before: "0.2.4", after: "workspace:*" },
+  {
+    package: "@opentui/core",
+    field: "optionalDependencies.@opentui/core-win32-x64",
+    before: "0.4.3",
+    after: "workspace:*",
+  },
+  { package: "@opentui/react", field: "dependencies.@opentui/core", before: "0.4.3", after: "workspace:*" },
+] as const
+
 type JsonRecord = Record<string, unknown>
 
 /** 校验只允许在目标 Windows x64 环境执行依赖安装或重新解析。 */
@@ -150,6 +161,16 @@ function objectValue(record: JsonRecord | undefined, key: string): JsonRecord | 
   return isRecord(value) ? value : undefined
 }
 
+function nestedStringValue(record: JsonRecord | undefined, path: string): string | undefined {
+  const segments = path.split(".")
+  let current: unknown = record
+  for (const segment of segments) {
+    if (!isRecord(current)) return undefined
+    current = current[segment]
+  }
+  return typeof current === "string" ? current : undefined
+}
+
 function hasWorkspaceDependency(record: JsonRecord | undefined, key: string): boolean {
   return stringValue(record, key) === "workspace:*"
 }
@@ -214,6 +235,65 @@ function validatePackageFiles(root: string, spec: VendoredPackageSpec): string[]
   return issues
 }
 
+function workspaceNormalizationKey(entry: unknown): string | undefined {
+  if (!isRecord(entry)) return undefined
+  const looksLikeWorkspaceNormalization = entry.kind === "workspace-dependency"
+    || "field" in entry
+    || "before" in entry
+    || "after" in entry
+  if (!looksLikeWorkspaceNormalization) return undefined
+  if (entry.kind !== "workspace-dependency") return "invalid"
+  const packageName = stringValue(entry, "package")
+  const field = stringValue(entry, "field")
+  const before = stringValue(entry, "before")
+  const after = stringValue(entry, "after")
+  if (!packageName || !field || !before || !after) return "invalid"
+  return `${packageName}\t${field}\t${before}\t${after}`
+}
+
+function actualWorkspaceEdges(root: string): string[] {
+  const edges: string[] = []
+  for (const spec of VENDORED_PACKAGE_SPECS) {
+    const manifest = packageManifest(root, spec)
+    for (const section of ["dependencies", "optionalDependencies", "devDependencies", "peerDependencies"]) {
+      const dependencies = objectValue(manifest, section)
+      for (const [dependency, version] of Object.entries(dependencies ?? {})) {
+        if (version === "workspace:*") edges.push(`${spec.name}\t${section}.${dependency}`)
+      }
+    }
+  }
+  return edges.sort()
+}
+
+function validateWorkspaceNormalizations(root: string, value: unknown): string[] {
+  const issues: string[] = []
+  const actualEntries = Array.isArray(value) ? value : []
+  const actualKeys = actualEntries
+    .map(workspaceNormalizationKey)
+    .filter((key): key is string => key !== undefined)
+    .sort()
+  const expectedKeys = EXPECTED_WORKSPACE_NORMALIZATIONS.map(
+    ({ package: packageName, field, before, after }) => `${packageName}\t${field}\t${before}\t${after}`,
+  ).sort()
+  if (actualKeys.join("\n") !== expectedKeys.join("\n")) {
+    issues.push("provenance workspace normalization set mismatch")
+  }
+
+  for (const expected of EXPECTED_WORKSPACE_NORMALIZATIONS) {
+    const spec = VENDORED_PACKAGE_SPECS.find(({ name }) => name === expected.package)
+    const manifest = spec ? packageManifest(root, spec) : undefined
+    if (nestedStringValue(manifest, expected.field) !== expected.after) {
+      issues.push(`provenance workspace normalization does not match ${expected.package}:${expected.field}`)
+    }
+  }
+
+  const expectedEdges = EXPECTED_WORKSPACE_NORMALIZATIONS.map(({ package: packageName, field }) => `${packageName}\t${field}`).sort()
+  if (actualWorkspaceEdges(root).join("\n") !== expectedEdges.join("\n")) {
+    issues.push("vendored workspace dependency drift is not represented in provenance")
+  }
+  return issues
+}
+
 function validateProvenance(root: string): string[] {
   const issues: string[] = []
   const provenancePath = resolve(root, "third_party/npm/provenance.json")
@@ -256,6 +336,7 @@ function validateProvenance(root: string): string[] {
   if (!patch || patch.source !== PATCH_SOURCE || !existsSync(patchPath) || patch.sourceSha256 !== sha256Hex(readFileSync(patchPath))) {
     issues.push("react-devtools-core: patch source provenance mismatch")
   }
+  issues.push(...validateWorkspaceNormalizations(root, provenance.normalizations))
   return issues
 }
 
