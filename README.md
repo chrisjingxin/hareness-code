@@ -6,15 +6,19 @@ Harness Code 是面向企业研发场景的 Coding Agent CLI。终端交互由 B
 
 ## 开始使用
 
-本地开发固定使用 Bun `1.2.19`、Python 3.11+ 和 `uv`。先在企业索引环境中同步锁定的 Agent 依赖，再复制用户级示例配置并将 API Key 放入指定环境变量：
+本地开发固定使用 Bun `1.2.19`、Python 3.11+ 和 `uv`。先注入企业 npm/Python 索引，再通过统一入口安装锁定依赖、应用 DeepAgents 补丁并执行零 Anthropic 门禁：
 
 ```bash
 mkdir -p ~/.harness
-cd packages/agent && uv sync --extra test && cd ../..
+export HARNESS_NPM_REGISTRY='内网 npm registry 地址'
+export HARNESS_PYPI_INDEX='内网 Python simple index 地址'
+bun run deps:install
 cp docs/user/examples/config.toml ~/.harness/config.toml
 export HARNESS_API_KEY='你的企业网关密钥'
 bun run dev
 ```
+
+首次在内网重新解析锁文件时使用 `bun run deps:resolve`；它会在显式内网源下重新生成 `bun.lock` 和 `packages/agent/uv.lock`，通过审查后，后续工作副本只使用 `bun run deps:install` 冻结安装。缺少内网源、工具链版本不符或锁文件仍指向公网时，安装会在联网前失败。
 
 推荐通过 `api_key_env` 引用环境变量。若本机开发环境无法预先设置环境变量，可在权限为 `0600` 的 `~/.harness/config.toml` 模型 Profile 中设置 `api_key` 作为降级值；环境变量非空时始终优先。
 

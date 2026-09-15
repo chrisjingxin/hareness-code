@@ -1,0 +1,13 @@
+diff --git a/package.json b/package.json
+index 54b89e72e8ae5d701005b47385646350274f756e..2e1705a450e252147c09cce3fe422ce9069a36a0 100644
+--- a/package.json
++++ b/package.json
+@@ -26,7 +26,7 @@
+   },
+   "dependencies": {
+     "shell-quote": "^1.6.1",
+-    "ws": "^7"
++    "ws": "7.5.10"
+   },
+   "devDependencies": {
+     "cross-env": "^3.1.4",
