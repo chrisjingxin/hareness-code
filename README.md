@@ -20,6 +20,8 @@ bun run dev
 
 首次在内网重新解析锁文件时使用 `bun run deps:resolve`；它会在显式内网源下重新生成 `bun.lock` 和 `packages/agent/uv.lock`，通过审查后，后续工作副本只使用 `bun run deps:install` 冻结安装。缺少内网源、工具链版本不符或锁文件仍指向公网时，安装会在联网前失败。
 
+Windows x64 内网提前验证使用临时分支 `feat_hc_179_内网依赖源码化`：五个关键 npm 发布包（含完整发布入口与 `dist/**`）位于 `third_party/npm/` 并按 workspace 链接，`provenance.json` 记录 tarball integrity 与目录哈希；安装后还会校验实际 realpath，`deps:install`/`deps:resolve` 只允许 win32/x64，其他依赖仍从现有内网源安装。该例外不代表 canonical `master` 的永久发布策略，正式内网包可用并完成目标环境验收后应移除。
+
 推荐通过 `api_key_env` 引用环境变量。若本机开发环境无法预先设置环境变量，可在权限为 `0600` 的 `~/.harness/config.toml` 模型 Profile 中设置 `api_key` 作为降级值；环境变量非空时始终优先。
 
 可使用 `bun run dev -- --help` 查看当前 CLI 参数；无头运行示例：

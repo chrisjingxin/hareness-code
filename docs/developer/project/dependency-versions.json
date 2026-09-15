@@ -5,8 +5,11 @@
   "javascript": {
     "bun": "1.2.19",
     "@za38/protocol": "0.1.0 (local workspace)",
-    "@opentui/core": "0.4.3",
-    "@opentui/react": "0.4.3",
+    "@opentui/core": "0.4.3 (local workspace on HC-179 temporary branch)",
+    "@opentui/react": "0.4.3 (local workspace on HC-179 temporary branch)",
+    "@opentui/core-win32-x64": "0.4.3 (local workspace on HC-179 temporary branch)",
+    "bun-ffi-structs": "0.2.4 (local workspace on HC-179 temporary branch)",
+    "react-devtools-core": "7.0.1 (local workspace on HC-179 temporary branch)",
     "ajv": "8.17.1",
     "lucide-react": "1.28.0",
     "marked": "17.0.1",
@@ -47,7 +50,7 @@
   "enterprise_opentui_transitive": {
     "@opentui/core@0.4.3": {
       "runtime": {
-        "bun-ffi-structs": "0.2.4",
+        "bun-ffi-structs": "0.2.4 (local workspace on HC-179 temporary branch)",
         "diff": "9.0.0",
         "marked": "17.0.1",
         "string-width": "7.2.0",
