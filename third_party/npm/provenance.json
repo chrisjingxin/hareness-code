@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "directoryHashAlgorithm": "sha256-path-content-v1",
+  "sourceKind": "npm-tarball",
+  "target": {
+    "os": "win32",
+    "cpu": "x64"
+  },
+  "packages": {
+    "@opentui/core": {
+      "name": "@opentui/core",
+      "version": "0.4.3",
+      "path": "third_party/npm/@opentui/core",
+      "tarball": "https://registry.npmjs.org/@opentui/core/-/core-0.4.3.tgz",
+      "integrity": "sha512-rrJfAk13tALDqldYjhc78eWQ+aKq1iknJgffIOg3OwyZoqQo+p6gtuqyhmWvXIfQzlNUbpgpCPcxbXlhMnlaHQ==",
+      "license": "MIT",
+      "directorySha256": "046d58a4d458106a4a3ddccc52a5ab8a04fc53d4c3e2e37226035a4cced52c88"
+    },
+    "@opentui/react": {
+      "name": "@opentui/react",
+      "version": "0.4.3",
+      "path": "third_party/npm/@opentui/react",
+      "tarball": "https://registry.npmjs.org/@opentui/react/-/react-0.4.3.tgz",
+      "integrity": "sha512-HtC/+lMURaZlifiJNVsn84YqKMywXQmkeSNbUTlbbeS6YM6reahaacnZEYZdnEUgklO6+r/J1tG8UBhqO26X7Q==",
+      "license": "MIT",
+      "directorySha256": "98c11d261a863ee59f8b874e42851536c71432c1734500a2894648941c0818db"
+    },
+    "@opentui/core-win32-x64": {
+      "name": "@opentui/core-win32-x64",
+      "version": "0.4.3",
+      "path": "third_party/npm/@opentui/core-win32-x64",
+      "tarball": "https://registry.npmjs.org/@opentui/core-win32-x64/-/core-win32-x64-0.4.3.tgz",
+      "integrity": "sha512-NuoqvWKGXaYnmlqvu7Gg2lLI6yVMnS9OfWBvxp+7Q+McSgHFSTQmYBXaPpvQ8HikpQXE1nCeMPtuSG4PdZHe2w==",
+      "license": "MIT",
+      "directorySha256": "c0bcaa8e545cd94a10e335c64e4d6400527ca130ee64d640eb7e81adf5c7563d"
+    },
+    "bun-ffi-structs": {
+      "name": "bun-ffi-structs",
+      "version": "0.2.4",
+      "path": "third_party/npm/bun-ffi-structs",
+      "tarball": "https://registry.npmjs.org/bun-ffi-structs/-/bun-ffi-structs-0.2.4.tgz",
+      "integrity": "sha512-AJzsqoVFs1KBbJbWHIYrVZLDC3NhTqqh25awRXqzoLzmBAKr5oqk6+CwuYHAekKx+VBCYVohBoKuRq40dV+TYg==",
+      "license": "MIT",
+      "directorySha256": "8985274f17182bb3275aedcb8634cfe902c66b5687e3f1f792c50e8cb7845288"
+    },
+    "react-devtools-core": {
+      "name": "react-devtools-core",
+      "version": "7.0.1",
+      "path": "third_party/npm/react-devtools-core",
+      "tarball": "https://registry.npmjs.org/react-devtools-core/-/react-devtools-core-7.0.1.tgz",
+      "integrity": "sha512-C3yNvRHaizlpiASzy7b9vbnBGLrhvdhl1CbdU6EnZgxPNbai60szdLtl+VL76UNOt5bOoVTOz5rNWZxgGt+Gsw==",
+      "license": "MIT",
+      "directorySha256": "bba40a32f5adf67d61567ba9da03575140c15894f3b8c90dd40bb949986f1f04"
+    }
+  },
+  "normalizations": [
+    {
+      "package": "@opentui/react",
+      "removedDevDependencies": ["@opentui/keymap", "@types/bun", "@types/node", "@types/react", "@types/react-reconciler", "@types/ws", "react", "react-devtools-core", "typescript", "ws"],
+      "reason": "published package metadata contains source-repository workspace/dev edges; remove non-runtime development metadata so the exact release files can be installed as a local workspace without vendoring more packages"
+    },
+    {
+      "package": "bun-ffi-structs",
+      "removedDevDependencies": ["@types/bun", "prettier", "tinybench"],
+      "reason": "development-only metadata is not part of the consumer dependency graph"
+    },
+    {
+      "package": "react-devtools-core",
+      "removedDevDependencies": ["cross-env", "process", "webpack", "webpack-cli", "workerize-loader"],
+      "reason": "development-only metadata is not part of the consumer dependency graph"
+    }
+  ],
+  "patches": {
+    "react-devtools-core": {
+      "source": "patches/react-devtools-core@7.0.1.patch",
+      "sourceSha256": "a1e70255a5f7331a4109356160e54bef4f36169992c38eabfb7772e33cd5fe90",
+      "change": "dependencies.ws ^7 -> 7.5.10",
+      "application": "vendored package.json; root patchedDependencies is forbidden"
+    }
+  }
+}

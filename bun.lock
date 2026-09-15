@@ -16,8 +16,8 @@
         "harness": "./dist/index.js",
       },
       "dependencies": {
-        "@opentui/core": "0.4.3",
-        "@opentui/react": "0.4.3",
+        "@opentui/core": "workspace:*",
+        "@opentui/react": "workspace:*",
         "@za38/protocol": "workspace:*",
         "lucide-react": "1.16.0",
         "marked": "17.0.1",
@@ -34,7 +34,7 @@
         "@types/react-dom": "19.2.3",
         "@types/react-reconciler": "0.32.0",
         "happy-dom": "^20.11.1",
-        "react-devtools-core": "7.0.1",
+        "react-devtools-core": "workspace:*",
         "typescript": "6.0.3",
       },
     },
@@ -45,9 +45,62 @@
         "ajv": "8.17.1",
       },
     },
-  },
-  "patchedDependencies": {
-    "react-devtools-core@7.0.1": "patches/react-devtools-core@7.0.1.patch",
+    "third_party/npm/@opentui/core": {
+      "name": "@opentui/core",
+      "version": "0.4.3",
+      "dependencies": {
+        "bun-ffi-structs": "workspace:*",
+        "diff": "9.0.0",
+        "marked": "17.0.1",
+        "string-width": "7.2.0",
+        "strip-ansi": "7.1.2",
+      },
+      "optionalDependencies": {
+        "@opentui/core-darwin-arm64": "0.4.3",
+        "@opentui/core-darwin-x64": "0.4.3",
+        "@opentui/core-linux-arm64": "0.4.3",
+        "@opentui/core-linux-arm64-musl": "0.4.3",
+        "@opentui/core-linux-x64": "0.4.3",
+        "@opentui/core-linux-x64-musl": "0.4.3",
+        "@opentui/core-win32-arm64": "0.4.3",
+        "@opentui/core-win32-x64": "workspace:*",
+      },
+      "peerDependencies": {
+        "web-tree-sitter": "0.25.10",
+      },
+    },
+    "third_party/npm/@opentui/core-win32-x64": {
+      "name": "@opentui/core-win32-x64",
+      "version": "0.4.3",
+    },
+    "third_party/npm/@opentui/react": {
+      "name": "@opentui/react",
+      "version": "0.4.3",
+      "dependencies": {
+        "@opentui/core": "workspace:*",
+        "react-reconciler": "^0.33.0",
+      },
+      "peerDependencies": {
+        "react": ">=19.2.0",
+        "react-devtools-core": "^7.0.1",
+        "ws": "^8.18.0",
+      },
+    },
+    "third_party/npm/bun-ffi-structs": {
+      "name": "bun-ffi-structs",
+      "version": "0.2.4",
+      "peerDependencies": {
+        "typescript": "^5",
+      },
+    },
+    "third_party/npm/react-devtools-core": {
+      "name": "react-devtools-core",
+      "version": "7.0.1",
+      "dependencies": {
+        "shell-quote": "^1.6.1",
+        "ws": "7.5.10",
+      },
+    },
   },
   "overrides": {
     "fast-uri": "3.1.7",
@@ -55,7 +108,7 @@
   "packages": {
     "@happy-dom/global-registrator": ["@happy-dom/global-registrator@20.0.11", "", { "dependencies": { "@types/node": "^20.0.0", "happy-dom": "^20.0.11" } }, "sha512-GqNqiShBT/lzkHTMC/slKBrvN0DsD4Di8ssBk4aDaVgEn+2WMzE6DXxq701ndSXj7/0cJ8mNT71pM7Bnrr6JRw=="],
 
-    "@opentui/core": ["@opentui/core@0.4.3", "", { "dependencies": { "bun-ffi-structs": "0.2.4", "diff": "9.0.0", "marked": "17.0.1", "string-width": "7.2.0", "strip-ansi": "7.1.2" }, "optionalDependencies": { "@opentui/core-darwin-arm64": "0.4.3", "@opentui/core-darwin-x64": "0.4.3", "@opentui/core-linux-arm64": "0.4.3", "@opentui/core-linux-arm64-musl": "0.4.3", "@opentui/core-linux-x64": "0.4.3", "@opentui/core-linux-x64-musl": "0.4.3", "@opentui/core-win32-arm64": "0.4.3", "@opentui/core-win32-x64": "0.4.3" }, "peerDependencies": { "web-tree-sitter": "0.25.10" } }, "sha512-rrJfAk13tALDqldYjhc78eWQ+aKq1iknJgffIOg3OwyZoqQo+p6gtuqyhmWvXIfQzlNUbpgpCPcxbXlhMnlaHQ=="],
+    "@opentui/core": ["@opentui/core@workspace:third_party/npm/@opentui/core"],
 
     "@opentui/core-darwin-arm64": ["@opentui/core-darwin-arm64@0.4.3", "", { "os": "darwin", "cpu": "arm64" }, "sha512-p5+7AAxpxGuDGagyQfewKtmTFnN7THvTVY4FyKqUtJomNaHdQXPHztapNNzMx0DGWbwOUbVKzpL+yc3CZY3chQ=="],
 
@@ -71,9 +124,9 @@
 
     "@opentui/core-win32-arm64": ["@opentui/core-win32-arm64@0.4.3", "", { "os": "win32", "cpu": "arm64" }, "sha512-Mx2zuOjrhm/z2SDS6RExIyjP/SnN/8QhhagxURUw0jQi/NssGSeAllu1cBAFFnhobJL5QLTE4FU4CRhUK9svgg=="],
 
-    "@opentui/core-win32-x64": ["@opentui/core-win32-x64@0.4.3", "", { "os": "win32", "cpu": "x64" }, "sha512-NuoqvWKGXaYnmlqvu7Gg2lLI6yVMnS9OfWBvxp+7Q+McSgHFSTQmYBXaPpvQ8HikpQXE1nCeMPtuSG4PdZHe2w=="],
+    "@opentui/core-win32-x64": ["@opentui/core-win32-x64@workspace:third_party/npm/@opentui/core-win32-x64"],
 
-    "@opentui/react": ["@opentui/react@0.4.3", "", { "dependencies": { "@opentui/core": "0.4.3", "react-reconciler": "^0.33.0" }, "peerDependencies": { "react": ">=19.2.0", "react-devtools-core": "^7.0.1", "ws": "^8.18.0" } }, "sha512-HtC/+lMURaZlifiJNVsn84YqKMywXQmkeSNbUTlbbeS6YM6reahaacnZEYZdnEUgklO6+r/J1tG8UBhqO26X7Q=="],
+    "@opentui/react": ["@opentui/react@workspace:third_party/npm/@opentui/react"],
 
     "@playwright/test": ["@playwright/test@1.59.1", "", { "dependencies": { "playwright": "1.59.1" }, "bin": { "playwright": "cli.js" } }, "sha512-PG6q63nQg5c9rIi4/Z5lR5IVF7yU5MqmKaPOe0HSc0O2cX1fPi96sUQu5j7eo4gKCkB2AnNGoWt7y4/Xx3Kcqg=="],
 
@@ -123,7 +176,7 @@
 
     "buffer-image-size": ["buffer-image-size@0.6.4", "", { "dependencies": { "@types/node": "*" } }, "sha512-nEh+kZOPY1w+gcCMobZ6ETUp9WfibndnosbpwB1iJk/8Gt5ZF2bhS6+B6bPYz424KtwsR6Rflc3tCz1/ghX2dQ=="],
 
-    "bun-ffi-structs": ["bun-ffi-structs@0.2.4", "", { "peerDependencies": { "typescript": "^5" } }, "sha512-AJzsqoVFs1KBbJbWHIYrVZLDC3NhTqqh25awRXqzoLzmBAKr5oqk6+CwuYHAekKx+VBCYVohBoKuRq40dV+TYg=="],
+    "bun-ffi-structs": ["bun-ffi-structs@workspace:third_party/npm/bun-ffi-structs"],
 
     "bun-types": ["bun-types@1.3.5", "", { "dependencies": { "@types/node": "*" } }, "sha512-inmAYe2PFLs0SUbFOWSVD24sg1jFlMPxOjOSSCYqUgn4Hsc3rDc7dFvfVYjFPNHtov6kgUeulV4SxbuIV/stPw=="],
 
@@ -193,7 +246,7 @@
 
     "react": ["react@19.2.6", "", {}, "sha512-sfWGGfavi0xr8Pg0sVsyHMAOziVYKgPLNrS7ig+ivMNb3wbCBw3KxtflsGBAwD3gYQlE/AEZsTLgToRrSCjb0Q=="],
 
-    "react-devtools-core": ["react-devtools-core@7.0.1", "", { "dependencies": { "shell-quote": "^1.6.1", "ws": "7.5.10" } }, "sha512-C3yNvRHaizlpiASzy7b9vbnBGLrhvdhl1CbdU6EnZgxPNbai60szdLtl+VL76UNOt5bOoVTOz5rNWZxgGt+Gsw=="],
+    "react-devtools-core": ["react-devtools-core@workspace:third_party/npm/react-devtools-core"],
 
     "react-dom": ["react-dom@19.2.6", "", { "dependencies": { "scheduler": "^0.27.0" }, "peerDependencies": { "react": "^19.2.6" } }, "sha512-0prMI+hvBbPjsWnxDLxlCGyM8PN6UuWjEUCYmZhO67xIV9Xasa/r/vDnq+Xyq4Lo27g8QSbO5YzARu0D1Sps3g=="],
 

@@ -7,3 +7,7 @@ packages/protocol/fixtures/v3-contract.json text eol=lf
 packages/agent/harness_agent/protocol/protocol_v3.json text eol=lf
 packages/agent/harness_agent/protocol/protocol_v3.sha256 text eol=lf
 packages/agent/harness_agent/protocol/generated.py text eol=lf
+
+# 精确 npm 发布目录保留上游文件字节（其中可能有文档表格或模板字面量的尾随空格）；
+# provenance 目录摘要负责完整性校验，避免通用 diff 门禁把上游原始内容误报为错误。
+third_party/npm/** whitespace=-trailing-space

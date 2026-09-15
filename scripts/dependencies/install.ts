@@ -10,6 +10,7 @@ import {
   validateLockSources,
   validateToolchainVersions,
 } from "./source_policy"
+import { validateVendoredWorkspace } from "./vendor_policy"
 
 const root = resolve(import.meta.dir, "../..")
 const agent = resolve(root, "packages/agent")
@@ -96,6 +97,13 @@ function preflight(phase: Phase) {
         "当前锁文件尚未证明来自该内网源；请在内网执行 `bun run deps:resolve`，提交审查重新解析后的锁文件后再冻结安装",
       ])
     }
+  }
+  const vendorIssues = validateVendoredWorkspace(root)
+  if (vendorIssues.length > 0) {
+    throw new DependencyPreflightError([
+      ...vendorIssues,
+      "五个目标 npm 包必须在安装前通过源码化完整性门禁，禁止回退 registry",
+    ])
   }
   return { sources }
 }

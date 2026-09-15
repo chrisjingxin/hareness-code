@@ -1,0 +1,63 @@
+{
+  "name": "@opentui/react",
+  "module": "index.js",
+  "main": "index.js",
+  "types": "src/index.d.ts",
+  "type": "module",
+  "version": "0.4.3",
+  "description": "React renderer for building terminal user interfaces using OpenTUI core",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anomalyco/opentui",
+    "directory": "packages/react"
+  },
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./index.js",
+      "require": "./index.js"
+    },
+    "./renderer": {
+      "types": "./src/reconciler/renderer.d.ts",
+      "import": "./index.js",
+      "require": "./index.js"
+    },
+    "./test-utils": {
+      "types": "./src/test-utils.d.ts",
+      "import": "./test-utils.js",
+      "require": "./test-utils.js"
+    },
+    "./runtime-plugin-support": {
+      "types": "./scripts/runtime-plugin-support.d.ts",
+      "bun": "./scripts/runtime-plugin-support.js",
+      "node": "./scripts/runtime-plugin-support.node.js",
+      "default": "./scripts/runtime-plugin-support.node.js"
+    },
+    "./runtime-plugin-support/configure": {
+      "types": "./scripts/runtime-plugin-support-configure.d.ts",
+      "bun": "./scripts/runtime-plugin-support-configure.js",
+      "node": "./scripts/runtime-plugin-support-configure.node.js",
+      "default": "./scripts/runtime-plugin-support-configure.node.js"
+    },
+    "./jsx-runtime": {
+      "types": "./jsx-runtime.d.ts",
+      "import": "./jsx-runtime.js",
+      "require": "./jsx-runtime.js"
+    },
+    "./jsx-dev-runtime": {
+      "types": "./jsx-dev-runtime.d.ts",
+      "import": "./jsx-dev-runtime.js",
+      "require": "./jsx-dev-runtime.js"
+    }
+  },
+  "dependencies": {
+    "@opentui/core": "workspace:*",
+    "react-reconciler": "^0.33.0"
+  },
+  "peerDependencies": {
+    "react": ">=19.2.0",
+    "react-devtools-core": "^7.0.1",
+    "ws": "^8.18.0"
+  }
+}
