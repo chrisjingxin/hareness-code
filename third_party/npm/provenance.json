@@ -23,7 +23,7 @@
       "tarball": "https://registry.npmjs.org/@opentui/react/-/react-0.4.3.tgz",
       "integrity": "sha512-HtC/+lMURaZlifiJNVsn84YqKMywXQmkeSNbUTlbbeS6YM6reahaacnZEYZdnEUgklO6+r/J1tG8UBhqO26X7Q==",
       "license": "MIT",
-      "directorySha256": "98c11d261a863ee59f8b874e42851536c71432c1734500a2894648941c0818db"
+      "directorySha256": "d53a4fe419673981985f590f58ddba23346790817f84134d55cdf971882dd719"
     },
     "@opentui/core-win32-x64": {
       "name": "@opentui/core-win32-x64",
@@ -56,8 +56,9 @@
   "normalizations": [
     {
       "package": "@opentui/react",
-      "removedDevDependencies": ["@opentui/keymap", "@types/bun", "@types/node", "@types/react", "@types/react-reconciler", "@types/ws", "react", "react-devtools-core", "typescript", "ws"],
-      "reason": "published package metadata contains source-repository workspace/dev edges; remove non-runtime development metadata so the exact release files can be installed as a local workspace without vendoring more packages"
+      "removedDevDependencies": ["@opentui/keymap", "@types/bun", "@types/node", "@types/react-reconciler", "@types/ws", "react", "react-devtools-core", "typescript", "ws"],
+      "addedDevDependencies": {"@types/react": "19.2.14"},
+      "reason": "published package metadata contains source-repository workspace/dev edges; remove non-runtime development metadata, then retain the exact CLI React type package so declarations resolve from the vendored workspace without vendoring another package"
     },
     {
       "package": "bun-ffi-structs",

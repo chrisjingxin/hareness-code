@@ -55,6 +55,9 @@
     "@opentui/core": "workspace:*",
     "react-reconciler": "^0.33.0"
   },
+  "devDependencies": {
+    "@types/react": "19.2.14"
+  },
   "peerDependencies": {
     "react": ">=19.2.0",
     "react-devtools-core": "^7.0.1",

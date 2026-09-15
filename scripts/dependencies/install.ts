@@ -10,7 +10,11 @@ import {
   validateLockSources,
   validateToolchainVersions,
 } from "./source_policy"
-import { validateVendoredWorkspace } from "./vendor_policy"
+import {
+  validateExecutionPlatform,
+  validateInstalledVendoredWorkspace,
+  validateVendoredWorkspace,
+} from "./vendor_policy"
 
 const root = resolve(import.meta.dir, "../..")
 const agent = resolve(root, "packages/agent")
@@ -77,6 +81,8 @@ function phaseFromArgs(): Phase {
 }
 
 function preflight(phase: Phase) {
+  const platformIssues = validateExecutionPlatform()
+  if (platformIssues.length > 0) throw new DependencyPreflightError(platformIssues)
   const sources = resolveInternalSources()
   const expectedBun = expectedBunVersion(root)
   const uvVersion = versionFromOutput(uv, capture([uv, "--version"], root))
@@ -108,6 +114,16 @@ function preflight(phase: Phase) {
   return { sources }
 }
 
+function validateInstalledVendorOrThrow(): void {
+  const issues = validateInstalledVendoredWorkspace(root, true)
+  if (issues.length > 0) {
+    throw new DependencyPreflightError([
+      ...issues,
+      "Bun 安装完成后五个目标包必须实际解析到 third_party/npm，禁止接受 registry 或缺失入口",
+    ])
+  }
+}
+
 function pythonPath(): string {
   const candidates = process.platform === "win32"
     ? [resolve(environment, "Scripts/python.exe")]
@@ -130,12 +146,14 @@ try {
   if (phase === "resolve") {
     // 首次内网副本允许重新解析；完成后仍走冻结安装，确保 lock 与实际安装一致。
     run([process.execPath, "install", "--registry", sources.npmRegistry.toString()], root, sourceEnv)
+    validateInstalledVendorOrThrow()
     run([uv, "lock", "--refresh", "--default-index", sources.pythonIndex.toString(), "--no-python-downloads"], agent, sourceEnv)
     const lockIssues = validateLockSources(root, sources)
     if (lockIssues.length > 0) throw new DependencyPreflightError(lockIssues)
   }
 
   run([process.execPath, "install", "--frozen-lockfile", "--registry", sources.npmRegistry.toString()], root, sourceEnv)
+  validateInstalledVendorOrThrow()
   run(
     [
       uv,

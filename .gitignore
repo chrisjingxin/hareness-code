@@ -13,6 +13,12 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# 这两个精确 npm 发布包的 dist 是发布内容，不是仓库构建输出，必须随源码化工件提交。
+!third_party/npm/bun-ffi-structs/dist/
+!third_party/npm/bun-ffi-structs/dist/**
+!third_party/npm/react-devtools-core/dist/
+!third_party/npm/react-devtools-core/dist/**
+
 # IDE
 .vscode/
 .idea/

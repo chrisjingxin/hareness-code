@@ -1,11 +1,14 @@
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs"
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { expect, test } from "bun:test"
 import {
   VENDORED_PACKAGE_SPECS,
+  VENDORED_PACKAGE_CONSUMERS,
   directorySha256,
   sha256Hex,
+  validateExecutionPlatform,
+  validateInstalledVendoredWorkspace,
   validateVendoredWorkspace,
 } from "./vendor_policy"
 
@@ -49,6 +52,7 @@ function createFixture(): string {
     }
     if (spec.name === "@opentui/react") {
       packageJson.dependencies = { "@opentui/core": "workspace:*" }
+      packageJson.devDependencies = { "@types/react": "19.2.14" }
     }
     if (spec.name === "react-devtools-core") {
       packageJson.dependencies = { ws: "7.5.10" }
@@ -60,6 +64,12 @@ function createFixture(): string {
     }
     writeJson(join(packageRoot, "package.json"), packageJson)
     writeFileSync(join(packageRoot, "LICENSE"), "MIT\n", "utf-8")
+    for (const requiredFile of spec.requiredFiles) {
+      if (requiredFile === "package.json" || requiredFile === "LICENSE") continue
+      const requiredPath = join(packageRoot, requiredFile)
+      mkdirSync(dirname(requiredPath), { recursive: true })
+      writeFileSync(requiredPath, "fixture release file\n", "utf-8")
+    }
   }
 
   const provenancePackages = Object.fromEntries(
@@ -93,6 +103,20 @@ function createFixture(): string {
   return root
 }
 
+function packageSegments(name: string): string[] {
+  return name.startsWith("@") ? name.split("/") : [name]
+}
+
+function linkInstalledPackages(root: string): void {
+  for (const spec of VENDORED_PACKAGE_SPECS) {
+    for (const consumer of VENDORED_PACKAGE_CONSUMERS[spec.name] ?? []) {
+      const link = join(root, consumer, "node_modules", ...packageSegments(spec.name))
+      mkdirSync(dirname(link), { recursive: true })
+      symlinkSync(join(root, spec.path), link, process.platform === "win32" ? "junction" : "dir")
+    }
+  }
+}
+
 function withFixture(callback: (root: string) => void): void {
   const root = createFixture()
   try {
@@ -111,6 +135,13 @@ test("rejects a vendored package with the wrong version", () => {
     const packageJson = join(root, "third_party/npm/bun-ffi-structs/package.json")
     writeJson(packageJson, { name: "bun-ffi-structs", version: "0.2.3", license: "MIT" })
     expect(validateVendoredWorkspace(root).join("\n")).toContain("version mismatch")
+  })
+})
+
+test("rejects a vendored package with a missing required entrypoint", () => {
+  withFixture((root) => {
+    rmSync(join(root, "third_party/npm/bun-ffi-structs/dist/index.js"))
+    expect(validateVendoredWorkspace(root).join("\n")).toContain("required file missing")
   })
 })
 
@@ -173,6 +204,21 @@ test("rejects registry resolution for any vendored package", () => {
   })
 })
 
+test("rejects a nested registry locator even when the primary record is workspace", () => {
+  withFixture((root) => {
+    const lock = {
+      packages: {
+        ...Object.fromEntries(
+          VENDORED_PACKAGE_SPECS.map((spec) => [spec.name, [`${spec.name}@workspace:${spec.path}`]]),
+        ),
+        "@opentui/core@0.4.3": ["@opentui/core@0.4.3", "", {}, VENDORED_PACKAGE_SPECS[0].integrity],
+      },
+    }
+    writeJson(join(root, "bun.lock"), lock)
+    expect(validateVendoredWorkspace(root).join("\n")).toContain("@opentui/core: registry fallback")
+  })
+})
+
 test("rejects a duplicate root patchedDependencies entry", () => {
   withFixture((root) => {
     writeJson(join(root, "package.json"), {
@@ -181,5 +227,36 @@ test("rejects a duplicate root patchedDependencies entry", () => {
       patchedDependencies: { "react-devtools-core@7.0.1": "patches/react-devtools-core@7.0.1.patch" },
     })
     expect(validateVendoredWorkspace(root).join("\n")).toContain("duplicate root patchedDependencies")
+  })
+})
+
+test("accepts the target execution platform", () => {
+  expect(validateExecutionPlatform("win32", "x64")).toEqual([])
+})
+
+test("rejects a non-Windows execution platform", () => {
+  expect(validateExecutionPlatform("darwin", "arm64").join("\n")).toContain("win32/x64")
+})
+
+test("does not report an installed resolution before node_modules exists", () => {
+  withFixture((root) => expect(validateInstalledVendoredWorkspace(root)).toEqual([]))
+})
+
+test("accepts installed package links that resolve to the vendored directories", () => {
+  withFixture((root) => {
+    linkInstalledPackages(root)
+    expect(validateInstalledVendoredWorkspace(root)).toEqual([])
+  })
+})
+
+test("rejects an installed package link that resolves outside third_party", () => {
+  withFixture((root) => {
+    linkInstalledPackages(root)
+    const link = join(root, "packages/cli/node_modules/react-devtools-core")
+    rmSync(link)
+    const external = join(root, "registry/react-devtools-core")
+    mkdirSync(external, { recursive: true })
+    symlinkSync(external, link, process.platform === "win32" ? "junction" : "dir")
+    expect(validateInstalledVendoredWorkspace(root).join("\n")).toContain("must resolve to third_party")
   })
 })
